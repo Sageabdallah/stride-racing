@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+Targeted backtest of the v2 ensemble model on recent metro races.
+Loads the saved model, scores each race, and compares strategies.
+"""
+
+import argparse
+import json
+import os
+import sys
+import pickle
+import numpy as np
+import pandas as pd
+from collections import defaultdict
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+ENV_PATH = os.path.normpath(os.path.join(SCRIPT_DIR, os.pardir, os.pardir, ".env"))
+EXPLICIT_ENV = r"c:\Users\sagea\OneDrive\Desktop\Race-Analytics\Race-Analytics\.env"
+
+def _load_env(path):
+    env = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    env[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+_env = _load_env(ENV_PATH)
+if not _env.get("DATABASE_URL"):
+    _env = _load_env(EXPLICIT_ENV)
+DATABASE_URL = _env.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL:
+    print("ERROR: DATABASE_URL not found"); sys.exit(1)
+
+import psycopg2, psycopg2.extras
+from sklearn.isotonic import IsotonicRegression
+
+METRO_TRACKS = (
+    'rosehill gardens', 'royal randwick', 'flemington', 'caulfield',
+    'eagle farm', 'doomben', 'canterbury park', 'newcastle',
+    'warwick farm', 'morphettville', 'sandown', 'moonee valley',
+    'caulfield heath',
+)
+
+MODEL_PATH = os.path.join(SCRIPT_DIR, "models", "racing_ensemble_v2.pkl")
+
+PHASE2_FEATURES = [
+    "z_200m", "z_400m", "z_600m", "z_800m",
+    "lambda_decay", "svi", "rsi", "trip_cost_seconds",
+]
+
+VIEW_TO_FEATURE_MAP = {
+    "prior_z_200m": "z_200m", "prior_z_400m": "z_400m",
+    "prior_z_600m": "z_600m", "prior_z_800m": "z_800m",
+    "prior_lambda_decay": "lambda_decay", "prior_svi": "svi",
+    "prior_rsi": "rsi", "prior_trip_cost_seconds": "trip_cost_seconds",
+    "barrier": "barrier_draw", "distance_m": "distance",
+    "weight_kg": "weight_kg", "field_size": "field_size",
+    "class_level": "class_level", "sp_odds": "market_odds",
+    "weighted_form_score": "weighted_form_score",
+    "ground_suitability": "ground_suitability",
+    "distance_strike_rate": "distance_strike_rate",
+}
+
+
+def load_model(model_path=MODEL_PATH):
+    with open(model_path, "rb") as f:
+        payload = pickle.load(f)
+    return payload
+
+
+def predict_ensemble(payload, X):
+    feature_cols = payload["feature_columns"]
+    X_sub = X[feature_cols]
+    preds = []
+
+    for key in ["xgb_model", "lgb_model", "cb_model"]:
+        model = payload.get(key)
+        if model is not None:
+            raw = model.predict_proba(X_sub)[:, 1]
+            if hasattr(model, "_isotonic"):
+                raw = model._isotonic.transform(raw)
+            preds.append(raw)
+
+    if not preds:
+        return np.zeros(len(X_sub))
+    return np.mean(preds, axis=0)
+
+
+def load_metro_data(date_from, date_to):
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT
+            race_date, track, race_number, horse_name, position,
+            is_winner, margin_lengths,
+            barrier, distance_m, weight_kg, field_size, class_level,
+            sp_odds, market_odds,
+            weighted_form_score, ground_suitability, distance_strike_rate,
+            prior_z_200m, prior_z_400m, prior_z_600m, prior_z_800m,
+            prior_lambda_decay, prior_svi, prior_rsi, prior_trip_cost_seconds
+        FROM training_view_v2
+        WHERE race_date >= %s AND race_date <= %s
+          AND LOWER(track) IN %s
+          AND sp_odds IS NOT NULL AND sp_odds > 0
+        ORDER BY race_date, track, race_number, position
+    """, (date_from, date_to, METRO_TRACKS))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return pd.DataFrame(rows)
+
+
+def build_feature_matrix(df, feature_cols):
+    out = pd.DataFrame(index=df.index)
+
+    if "market_odds" in df.columns and "sp_odds" in df.columns:
+        df["_effective_odds"] = pd.to_numeric(
+            df["market_odds"], errors="coerce"
+        ).fillna(pd.to_numeric(df["sp_odds"], errors="coerce"))
+    elif "sp_odds" in df.columns:
+        df["_effective_odds"] = pd.to_numeric(df["sp_odds"], errors="coerce")
+    else:
+        df["_effective_odds"] = np.nan
+
+    for view_col, feat_col in VIEW_TO_FEATURE_MAP.items():
+        if view_col == "sp_odds":
+            continue
+        if view_col in df.columns:
+            out[feat_col] = pd.to_numeric(df[view_col], errors="coerce")
+
+    out["market_odds"] = df["_effective_odds"]
+
+    for col in feature_cols:
+        if col not in out.columns:
+            out[col] = np.nan
+
+    non_sect = [f for f in feature_cols if f not in PHASE2_FEATURES]
+    for col in non_sect:
+        if col in out.columns:
+            out[col] = out[col].fillna(0)
+
+    out = out[[c for c in feature_cols if c in out.columns]]
+    return out
+
+
+STRATEGIES = [
+    ("Value Edge 3%+ ($2-$15)", {"min_odds": 2.0, "max_odds": 15.0, "min_edge": 0.03}),
+    ("Mid-Range $3-$8 5%+ edge", {"min_odds": 3.0, "max_odds": 8.0, "min_edge": 0.05}),
+    ("Short Price $2-$5 3%+ edge", {"min_odds": 2.0, "max_odds": 5.0, "min_edge": 0.03}),
+    ("Big Value $5-$15 5%+ edge", {"min_odds": 5.0, "max_odds": 15.0, "min_edge": 0.05}),
+    ("Top Pick (highest prob)", {"top_pick": True}),
+    ("All $2-$20 positive edge", {"min_odds": 2.0, "max_odds": 20.0, "min_edge": 0.001}),
+]
+
+STAKE = 100
+
+
+def run_backtest(df, payload):
+    feature_cols = payload["feature_columns"]
+    X = build_feature_matrix(df.copy(), feature_cols)
+    probs = predict_ensemble(payload, X)
+    df = df.copy()
+    df["model_prob"] = probs
+
+    races = df.groupby(["race_date", "track", "race_number"])
+
+    results = {label: {"bets": [], "label": label} for label, _ in STRATEGIES}
+
+    for (date, track, rnum), race_df in races:
+        race_df = race_df.copy()
+        total_prob = race_df["model_prob"].sum()
+        if total_prob > 0:
+            race_df["norm_prob"] = race_df["model_prob"] / total_prob
+        else:
+            race_df["norm_prob"] = 1.0 / len(race_df)
+
+        for label, cfg in STRATEGIES:
+            if cfg.get("top_pick"):
+                best_idx = race_df["norm_prob"].idxmax()
+                best = race_df.loc[best_idx]
+                sp = float(best["sp_odds"])
+                if sp >= 1.5:
+                    results[label]["bets"].append({
+                        "date": str(date), "track": track, "race": rnum,
+                        "horse": best["horse_name"], "sp": sp,
+                        "prob": float(best["norm_prob"]),
+                        "won": bool(best["is_winner"]),
+                        "position": int(best["position"]) if pd.notna(best["position"]) else 99,
+                    })
+                continue
+
+            min_odds = cfg["min_odds"]
+            max_odds = cfg["max_odds"]
+            min_edge = cfg["min_edge"]
+
+            candidates = []
+            for _, row in race_df.iterrows():
+                sp = float(row["sp_odds"])
+                if sp < min_odds or sp > max_odds:
+                    continue
+                implied = 1.0 / sp
+                prob = float(row["norm_prob"])
+                edge = prob - implied
+                if edge >= min_edge:
+                    ev = prob * sp - 1
+                    candidates.append({
+                        "date": str(date), "track": track, "race": rnum,
+                        "horse": row["horse_name"], "sp": sp,
+                        "prob": prob, "edge": edge, "ev": ev,
+                        "won": bool(row["is_winner"]),
+                        "position": int(row["position"]) if pd.notna(row["position"]) else 99,
+                    })
+
+            if candidates:
+                best = max(candidates, key=lambda x: x["ev"])
+                results[label]["bets"].append(best)
+
+    return results
+
+
+def summarize_results(results, df):
+    n_races = df.groupby(["race_date", "track", "race_number"]).ngroups
+    n_runners = len(df)
+    dates = sorted(df["race_date"].astype(str).unique())
+
+    strategy_rows = []
+    for label, _ in STRATEGIES:
+        bets = results[label]["bets"]
+        n_bets = len(bets)
+        wins = sum(1 for b in bets if b["won"])
+        staked = n_bets * STAKE
+        returned = sum(STAKE * b["sp"] for b in bets if b["won"])
+        pnl = returned - staked
+        roi = (pnl / staked * 100) if staked else 0.0
+        strategy_rows.append({
+            "label": label,
+            "bets": n_bets,
+            "wins": wins,
+            "strike_rate": (wins / n_bets * 100) if n_bets else 0.0,
+            "staked": staked,
+            "returned": returned,
+            "pnl": pnl,
+            "roi": roi,
+        })
+
+    return {
+        "date_from": dates[0] if dates else None,
+        "date_to": dates[-1] if dates else None,
+        "races": n_races,
+        "runners": n_runners,
+        "tracks": sorted(df["track"].unique().tolist()),
+        "strategies": strategy_rows,
+    }
+
+
+def print_results(results, df):
+    summary = summarize_results(results, df)
+    n_races = df.groupby(["race_date", "track", "race_number"]).ngroups
+    n_runners = len(df)
+    dates = sorted(df["race_date"].astype(str).unique())
+
+    print("\n" + "=" * 80)
+    print("  V2 ENSEMBLE MODEL BACKTEST — RECENT METRO RACES")
+    print("=" * 80)
+    print(f"\n  Dates: {dates[0]} to {dates[-1]}")
+    print(f"  Races: {n_races} | Runners: {n_runners}")
+    print(f"  Tracks: {', '.join(sorted(df['track'].unique()))}")
+    print(f"  Staking: Flat ${STAKE} per bet")
+
+    date_track = df.groupby(["race_date", "track"]).agg(
+        races=("race_number", "nunique"),
+        runners=("horse_name", "count"),
+    ).reset_index()
+    print(f"\n  {'Date':<12} {'Track':<25} {'Races':>5} {'Runners':>7}")
+    print(f"  {'-'*12} {'-'*25} {'-'*5} {'-'*7}")
+    for _, row in date_track.iterrows():
+        print(f"  {str(row['race_date']):<12} {row['track']:<25} {row['races']:>5} {row['runners']:>7}")
+
+    print(f"\n\n  {'Strategy':<35} {'Bets':>5} {'Wins':>5} {'SR%':>7} {'Staked':>9} {'Return':>9} {'P&L':>10} {'ROI':>8}")
+    print(f"  {'-'*35} {'-'*5} {'-'*5} {'-'*7} {'-'*9} {'-'*9} {'-'*10} {'-'*8}")
+
+    for label, _ in STRATEGIES:
+        bets = results[label]["bets"]
+        n_bets = len(bets)
+        if n_bets == 0:
+            print(f"  {label:<35} {'0':>5} {'0':>5} {'—':>7} {'—':>9} {'—':>9} {'—':>10} {'—':>8}")
+            continue
+
+        wins = sum(1 for b in bets if b["won"])
+        sr = wins / n_bets * 100
+        staked = n_bets * STAKE
+        returned = sum(STAKE * b["sp"] for b in bets if b["won"])
+        pnl = returned - staked
+        roi = pnl / staked * 100
+
+        print(f"  {label:<35} {n_bets:>5} {wins:>5} {sr:>6.1f}% ${staked:>7,} ${returned:>7,.0f} ${pnl:>+9,.0f} {roi:>+7.1f}%")
+
+    print("\n\n" + "=" * 80)
+    print("  DETAILED BET LOG — All strategies")
+    print("=" * 80)
+
+    for label, _ in STRATEGIES:
+        bets = results[label]["bets"]
+        if not bets:
+            continue
+
+        wins = sum(1 for b in bets if b["won"])
+        n_bets = len(bets)
+        staked = n_bets * STAKE
+        returned = sum(STAKE * b["sp"] for b in bets if b["won"])
+        pnl = returned - staked
+        roi = pnl / staked * 100 if staked > 0 else 0
+
+        print(f"\n  {label} ({n_bets} bets, {wins}W, ROI: {roi:+.1f}%)")
+        print(f"  {'Date':<12} {'Track':<22} {'R':>2} {'Horse':<25} {'SP':>6} {'Prob':>6} {'Pos':>4} {'Result':>8}")
+        print(f"  {'-'*12} {'-'*22} {'-'*2} {'-'*25} {'-'*6} {'-'*6} {'-'*4} {'-'*8}")
+
+        running_pnl = 0
+        for b in sorted(bets, key=lambda x: (x["date"], x["track"], x["race"])):
+            result_str = f"WON +${STAKE * b['sp'] - STAKE:.0f}" if b["won"] else f"LOST -${STAKE}"
+            running_pnl += (STAKE * b["sp"] - STAKE) if b["won"] else -STAKE
+            prob_str = f"{b['prob']*100:.1f}%" if "prob" in b else "—"
+            print(f"  {b['date']:<12} {b['track']:<22} {b['race']:>2} {b['horse']:<25} ${b['sp']:>5.1f} {prob_str:>6} {b['position']:>4} {result_str:>8}")
+
+        print(f"  {'':>12} {'':>22} {'':>2} {'':>25} {'':>6} {'':>6} {'':>4} {'Running':>8}")
+        print(f"  {'':>12} {'':>22} {'':>2} {'TOTAL':<25} {'':>6} {'':>6} {'':>4} ${running_pnl:>+7,.0f}")
+
+    print("\n\n" + "=" * 80)
+    print("  BY TRACK BREAKDOWN (All $2-$20 positive edge)")
+    print("=" * 80)
+
+    all_bets = results["All $2-$20 positive edge"]["bets"]
+    if all_bets:
+        track_groups = defaultdict(list)
+        for b in all_bets:
+            track_groups[b["track"]].append(b)
+
+        print(f"\n  {'Track':<25} {'Bets':>5} {'Wins':>5} {'SR%':>7} {'P&L':>10} {'ROI':>8}")
+        print(f"  {'-'*25} {'-'*5} {'-'*5} {'-'*7} {'-'*10} {'-'*8}")
+
+        for track in sorted(track_groups.keys()):
+            tb = track_groups[track]
+            tw = sum(1 for b in tb if b["won"])
+            ts = len(tb) * STAKE
+            tr = sum(STAKE * b["sp"] for b in tb if b["won"])
+            print(f"  {track:<25} {len(tb):>5} {tw:>5} {tw/len(tb)*100:>6.1f}% ${tr-ts:>+9,.0f} {(tr-ts)/ts*100:>+7.1f}%")
+
+    return summary
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Backtest the v2 ensemble model on metro races.")
+    parser.add_argument("date_from", nargs="?", default="2026-02-01", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("date_to", nargs="?", default="2026-02-28", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--model-path", default=MODEL_PATH, help="Path to the model artifact to backtest.")
+    parser.add_argument("--summary-json", help="Optional path to write machine-readable backtest summary JSON.")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    model_path = os.path.abspath(args.model_path)
+    print("Loading v2 ensemble model...")
+    payload = load_model(model_path)
+    print(f"  Model version: {payload.get('version', '?')}")
+    print(f"  Trained at: {payload.get('trained_at', '?')}")
+    print(f"  Features: {len(payload['feature_columns'])}")
+
+    date_from = args.date_from
+    date_to = args.date_to
+
+    print(f"\nLoading metro race data ({date_from} to {date_to})...")
+    df = load_metro_data(date_from, date_to)
+
+    if df.empty:
+        print("ERROR: No metro race data found for this period.")
+        sys.exit(1)
+
+    print(f"  Loaded {len(df)} runners across {df.groupby(['race_date','track','race_number']).ngroups} races")
+
+    print("\nRunning backtest...")
+    results = run_backtest(df, payload)
+    summary = print_results(results, df)
+    if args.summary_json:
+        with open(args.summary_json, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2)
+    print()
+
+
+if __name__ == "__main__":
+    main()

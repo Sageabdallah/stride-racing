@@ -1,0 +1,87 @@
+# ─── Secrets / credentials ───
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# ─── Local config (templated — copy the .example file) ───
+server/python/tipster_panel.json
+
+# ─── Not part of this repo (frontend / Node / TS server) ───
+client/
+node_modules/
+dist/
+build/
+package*.json
+tsconfig.json
+*.config.ts
+*.config.js
+components.json
+knip.json
+.nvmrc
+drizzle.config.ts
+.claude/
+.config/
+.local/
+
+# ─── Python build artifacts ───
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+catboost_info/
+server/python/feature_cache/
+server/python/tmp*.json
+
+# ─── Trained models (proprietary IP — kept out of a public repo) ───
+*.pkl
+*.joblib
+server/python/models/
+
+# ─── Bulk / generated data ───
+racecards/
+server/python/racecards/
+server/python/intelligence/*.json
+historical/
+# Generated intelligence & research output (data, not source code)
+server/python/intelligence/output/
+server/python/intelligence/outputs/
+server/python/intelligence/*.txt
+server/python/research/learning_runs/
+server/python/research/*.json
+server/python/research/*.jsonl
+server/python/research/*.txt
+server/python/calibration_model.json
+server/python/calibration_report.json
+*.jsonl
+historical_data/
+barrier_trials/
+backtest_results/
+data/
+attached_assets/
+*.csv
+*.tar.gz
+*.zip
+
+# ─── Logs / runtime status ───
+*.log
+*_bg.status.txt
+import_log_full_*.txt
+historical_download*.log
+betfair_mapping_log_*.txt
+dev-run.out
+dev-run.err
+dev-server.log
+dev-server.err.log
+
+# ─── Local databases ───
+*.sqlite
+*.sqlite3
+*.db
+
+# ─── OS cruft ───
+.DS_Store
+*.swp
+ziUPj6wr

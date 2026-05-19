@@ -1,0 +1,60 @@
+{
+  "_comment": "Template panel. Copy this file to tipster_panel.json and replace the sample sources with your own independent tipsters. The bucket weights below are placeholders (1.0 across the board) — tune to your data.",
+  "panel_version": "2.0",
+  "last_updated": "2026-01-01",
+  "target_size": 50,
+  "current_size": 3,
+  "sources": [
+    {
+      "id": "tp_001",
+      "name": "Example Form Tipster",
+      "base_url": "https://example.com/",
+      "tip_page_url": "https://example.com/tips/",
+      "type": "form_analyst",
+      "tracks": ["all"],
+      "state": "ALL",
+      "fetch_method": "direct",
+      "active": false,
+      "verified": false,
+      "historical_accuracy": null,
+      "notes": "Sample source — replace with a real independent tipster and verify before activating."
+    },
+    {
+      "id": "tp_002",
+      "name": "Example Speed Tipster",
+      "base_url": "https://example.com/",
+      "tip_page_url": "https://example.com/speed-tips/",
+      "type": "speed_analyst",
+      "tracks": ["all"],
+      "state": "ALL",
+      "fetch_method": "direct",
+      "active": false,
+      "verified": false,
+      "historical_accuracy": null,
+      "notes": "Sample source — replace with a real independent tipster and verify before activating."
+    },
+    {
+      "id": "tp_003",
+      "name": "Example Value Tipster",
+      "base_url": "https://example.com/",
+      "tip_page_url": "https://example.com/value-tips/",
+      "type": "value_analyst",
+      "tracks": ["all"],
+      "state": "ALL",
+      "fetch_method": "direct",
+      "active": false,
+      "verified": false,
+      "historical_accuracy": null,
+      "notes": "Sample source — replace with a real independent tipster and verify before activating."
+    }
+  ],
+  "bucket_definitions": {
+    "form_analyst":     {"weight": 1.0, "description": "Traditional form reading"},
+    "speed_analyst":    {"weight": 1.0, "description": "Sectional/speed map analysis"},
+    "ratings_analyst":  {"weight": 1.0, "description": "Ratings-based methodology"},
+    "stable_watcher":   {"weight": 1.0, "description": "Trackwork/stable intelligence"},
+    "value_analyst":    {"weight": 1.0, "description": "Price-based value hunting"},
+    "track_specialist": {"weight": 1.0, "description": "Venue-specific expertise"},
+    "retail_punter":    {"weight": 1.0, "description": "Public opinion signal"}
+  }
+}
