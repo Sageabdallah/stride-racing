@@ -172,6 +172,9 @@ def run_backtest(df, payload):
     probs = predict_ensemble(payload, X)
     df = df.copy()
     df["model_prob"] = probs
+    df["norm_prob"] = df.groupby(["race_date", "track", "race_number"])["model_prob"].transform(
+        lambda x: x / x.sum() if x.sum() > 0 else 1.0 / max(len(x), 1)
+    )
 
     races = df.groupby(["race_date", "track", "race_number"])
 
@@ -226,7 +229,78 @@ def run_backtest(df, payload):
                 best = max(candidates, key=lambda x: x["ev"])
                 results[label]["bets"].append(best)
 
-    return results
+    return results, df
+
+
+def _compute_calibration_bins(df, n_bins=10):
+    """Bin predicted win prob and report per-bin predicted-vs-observed (for a calibration plot)."""
+    work = df[df["norm_prob"].notna() & df["is_winner"].notna()].copy()
+    if len(work) == 0:
+        return {"bins": [], "brier_score": None, "n": 0}
+    edges = np.linspace(0, 1, n_bins + 1)
+    work["_bin"] = pd.cut(work["norm_prob"], bins=edges, include_lowest=True)
+    bins_out = []
+    for interval, g in work.groupby("_bin", observed=True):
+        n = len(g)
+        if n == 0:
+            continue
+        bins_out.append({
+            "bin_low": float(interval.left),
+            "bin_high": float(interval.right),
+            "n_runners": int(n),
+            "predicted_mean": float(g["norm_prob"].mean()),
+            "observed_mean": float(g["is_winner"].astype(int).mean()),
+        })
+    p = work["norm_prob"].astype(float).values
+    y = work["is_winner"].astype(int).values
+    brier = float(np.mean((p - y) ** 2))
+    return {"bins": bins_out, "brier_score": brier, "n": int(len(work))}
+
+
+def _compute_confidence_bands(df, longshot_cap=30.0):
+    """Take the top model pick per race, classify its live confidence tier, and aggregate ROI per tier."""
+    work = df[df["norm_prob"].notna() & df["sp_odds"].notna() & df["is_winner"].notna()].copy()
+    work["_sp"] = pd.to_numeric(work["sp_odds"], errors="coerce")
+    work = work[work["_sp"] > 1.0]
+
+    top_idx = work.groupby(["race_date", "track", "race_number"])["norm_prob"].idxmax()
+    top = work.loc[top_idx].copy()
+    top["_implied"] = 1.0 / top["_sp"]
+    top["_edge_pp"] = (top["norm_prob"] - top["_implied"]) * 100
+    top["_ev"] = top["norm_prob"] * top["_sp"] - 1.0
+
+    def tier(row):
+        if row["_sp"] > longshot_cap:
+            return "LOW"
+        if row["_ev"] > 0 and row["_edge_pp"] > 1.0:
+            return "HIGH"
+        if row["_edge_pp"] > 0:
+            return "MEDIUM"
+        return "LOW"
+
+    top["_tier"] = top.apply(tier, axis=1)
+
+    bands = []
+    for t in ("HIGH", "MEDIUM", "LOW"):
+        g = top[top["_tier"] == t]
+        n = int(len(g))
+        wins = int(g["is_winner"].astype(int).sum()) if n else 0
+        staked = n * STAKE
+        returned = float((g[g["is_winner"].astype(bool)]["_sp"] * STAKE).sum()) if wins else 0.0
+        pnl = returned - staked
+        roi = (pnl / staked * 100) if staked else 0.0
+        bands.append({
+            "tier": t,
+            "races_picked": n,
+            "wins": wins,
+            "strike_rate": round((wins / n * 100) if n else 0.0, 2),
+            "staked": staked,
+            "returned": round(returned, 2),
+            "pnl": round(pnl, 2),
+            "roi": round(roi, 2),
+            "note": "NO_BET in live system" if t == "LOW" else "stakeable",
+        })
+    return bands
 
 
 def summarize_results(results, df):
@@ -254,7 +328,7 @@ def summarize_results(results, df):
             "roi": roi,
         })
 
-    return {
+    summary = {
         "date_from": dates[0] if dates else None,
         "date_to": dates[-1] if dates else None,
         "races": n_races,
@@ -262,6 +336,10 @@ def summarize_results(results, df):
         "tracks": sorted(df["track"].unique().tolist()),
         "strategies": strategy_rows,
     }
+    if "norm_prob" in df.columns:
+        summary["calibration"] = _compute_calibration_bins(df)
+        summary["confidence_bands"] = _compute_confidence_bands(df)
+    return summary
 
 
 def print_results(results, df):
@@ -390,7 +468,7 @@ def main():
     print(f"  Loaded {len(df)} runners across {df.groupby(['race_date','track','race_number']).ngroups} races")
 
     print("\nRunning backtest...")
-    results = run_backtest(df, payload)
+    results, df = run_backtest(df, payload)
     summary = print_results(results, df)
     if args.summary_json:
         with open(args.summary_json, "w", encoding="utf-8") as fh:

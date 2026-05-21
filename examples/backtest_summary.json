@@ -1,0 +1,156 @@
+{
+  "date_from": "2026-03-04",
+  "date_to": "2026-04-18",
+  "races": 352,
+  "runners": 3396,
+  "tracks": [
+    "Caulfield",
+    "Caulfield Heath",
+    "Doomben",
+    "Eagle Farm",
+    "Flemington",
+    "Morphettville",
+    "Newcastle",
+    "Rosehill Gardens",
+    "Royal Randwick",
+    "Warwick Farm"
+  ],
+  "strategies": [
+    {
+      "label": "Value Edge 3%+ ($2-$15)",
+      "bets": 142,
+      "wins": 14,
+      "strike_rate": 9.859154929577464,
+      "staked": 14200,
+      "returned": 15950.0,
+      "pnl": 1750.0,
+      "roi": 12.323943661971832
+    },
+    {
+      "label": "Mid-Range $3-$8 5%+ edge",
+      "bets": 25,
+      "wins": 3,
+      "strike_rate": 12.0,
+      "staked": 2500,
+      "returned": 1800.0,
+      "pnl": -700.0,
+      "roi": -28.000000000000004
+    },
+    {
+      "label": "Short Price $2-$5 3%+ edge",
+      "bets": 7,
+      "wins": 0,
+      "strike_rate": 0.0,
+      "staked": 700,
+      "returned": 0,
+      "pnl": -700,
+      "roi": -100.0
+    },
+    {
+      "label": "Big Value $5-$15 5%+ edge",
+      "bets": 54,
+      "wins": 4,
+      "strike_rate": 7.4074074074074066,
+      "staked": 5400,
+      "returned": 4600.0,
+      "pnl": -800.0,
+      "roi": -14.814814814814813
+    },
+    {
+      "label": "Top Pick (highest prob)",
+      "bets": 344,
+      "wins": 116,
+      "strike_rate": 33.72093023255814,
+      "staked": 34400,
+      "returned": 32955.0,
+      "pnl": -1445.0,
+      "roi": -4.200581395348838
+    },
+    {
+      "label": "All $2-$20 positive edge",
+      "bets": 333,
+      "wins": 25,
+      "strike_rate": 7.5075075075075075,
+      "staked": 33300,
+      "returned": 31500.0,
+      "pnl": -1800.0,
+      "roi": -5.405405405405405
+    }
+  ],
+  "calibration": {
+    "bins": [
+      {
+        "bin_low": -0.001,
+        "bin_high": 0.1,
+        "n_runners": 1786,
+        "predicted_mean": 0.053255093944445143,
+        "observed_mean": 0.029115341545352745
+      },
+      {
+        "bin_low": 0.1,
+        "bin_high": 0.2,
+        "n_runners": 1337,
+        "predicted_mean": 0.14431507344501204,
+        "observed_mean": 0.15108451757666416
+      },
+      {
+        "bin_low": 0.2,
+        "bin_high": 0.3,
+        "n_runners": 265,
+        "predicted_mean": 0.23079790734140043,
+        "observed_mean": 0.3283018867924528
+      },
+      {
+        "bin_low": 0.3,
+        "bin_high": 0.4,
+        "n_runners": 6,
+        "predicted_mean": 0.3181037663937623,
+        "observed_mean": 0.5
+      },
+      {
+        "bin_low": 0.4,
+        "bin_high": 0.5,
+        "n_runners": 2,
+        "predicted_mean": 0.4335404877030977,
+        "observed_mean": 0.0
+      }
+    ],
+    "brier_score": 0.08337315532337708,
+    "n": 3396
+  },
+  "confidence_bands": [
+    {
+      "tier": "HIGH",
+      "races_picked": 20,
+      "wins": 2,
+      "strike_rate": 10.0,
+      "staked": 2000,
+      "returned": 1250.0,
+      "pnl": -750.0,
+      "roi": -37.5,
+      "note": "stakeable"
+    },
+    {
+      "tier": "MEDIUM",
+      "races_picked": 1,
+      "wins": 0,
+      "strike_rate": 0.0,
+      "staked": 100,
+      "returned": 0.0,
+      "pnl": -100.0,
+      "roi": -100.0,
+      "note": "stakeable"
+    },
+    {
+      "tier": "LOW",
+      "races_picked": 331,
+      "wins": 120,
+      "strike_rate": 36.25,
+      "staked": 33100,
+      "returned": 32528.0,
+      "pnl": -572.0,
+      "roi": -1.73,
+      "note": "NO_BET in live system"
+    }
+  ]
+}
