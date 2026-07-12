@@ -97,7 +97,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`calibration_model.py`** | Global isotonic calibrator applied in the tips pipeline |
 | `double_calibration.py` | Two-layer per-model + ensemble isotonic |
 | `mc_recalibration.py` | Isotonic recalibration of MC probabilities (custom PAV) |
-| `stacking_meta_learner.py` | OOF logistic stacking over base predictions (currently never activates) |
+| `stacking_meta_learner.py` | OOF logistic stacking over base predictions (fit-path bug fixed; activates on newly trained v1 artifacts) |
 | `focal_loss.py` | Focal-loss objectives *(implemented, unwired)* |
 | `predictability_meta_model.py` | Race-level "will the favourite win" chaos classifier |
 | `model_versioning.py` | Model registry + shadow A/B promotion rules *(unused so far)* |

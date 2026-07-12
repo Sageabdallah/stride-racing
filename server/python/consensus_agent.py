@@ -202,7 +202,7 @@ def fetch_panel_pages(
 
     if not active_sources:
         print("[PANEL] WARNING: No active+verified panel members", file=sys.stderr)
-        return []
+        return [], []
 
     print(f"[PANEL] Fetching {len(active_sources)} active panel members...", file=sys.stderr)
 

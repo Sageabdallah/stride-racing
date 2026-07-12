@@ -383,7 +383,6 @@ def build_flemington_straight(today, conn):
 def build_class_distance_patterns(today, conn):
     """Build class_distance_patterns.json — class movement win rate patterns."""
     cur = conn.cursor()
-    date_str = today["races"][0]["track"] if today["races"] else ""
 
     try:
         cur.execute("""

@@ -667,10 +667,12 @@ def enrich_with_sectional_features(df: pd.DataFrame, db_url: str) -> pd.DataFram
         conn = psycopg2.connect(db_url)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # Get unique (horse_name, race_date) pairs — fetch most recent sectional
-        # run BEFORE race_date (avoids data leakage)
-        horse_dates = df[['horse_name', 'race_date']].drop_duplicates().values.tolist() \
-            if 'horse_name' in df.columns and 'race_date' in df.columns else []
+        # Get unique (horse, race_date) pairs — fetch most recent sectional
+        # run BEFORE race_date (avoids data leakage). The runner table emits
+        # 'horse'; accept 'horse_name' too for externally supplied frames.
+        horse_col = 'horse_name' if 'horse_name' in df.columns else 'horse'
+        horse_dates = df[[horse_col, 'race_date']].drop_duplicates().values.tolist() \
+            if horse_col in df.columns and 'race_date' in df.columns else []
 
         sectional_lookup = {}
         for horse_name, race_date in horse_dates:
@@ -700,7 +702,7 @@ def enrich_with_sectional_features(df: pd.DataFrame, db_url: str) -> pd.DataFram
             return df
 
         def _get_sectional(row):
-            key = (str(row.get('horse_name', '')).lower(), str(row.get('race_date', '')))
+            key = (str(row.get(horse_col, '')).lower(), str(row.get('race_date', '')))
             return sectional_lookup.get(key, {})
 
         for col in SECTIONAL_COLS:

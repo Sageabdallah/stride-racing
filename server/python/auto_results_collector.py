@@ -558,7 +558,7 @@ def main():
         target_date = datetime.now().strftime('%Y-%m-%d')
 
     if args.daemon:
-        run_daemon(check_interval=5)
+        run_daemon(check_interval=args.check_interval if args.check_interval > 0 else 5)
     elif args.check_interval > 0:
         run_daemon(check_interval=args.check_interval)
     else:

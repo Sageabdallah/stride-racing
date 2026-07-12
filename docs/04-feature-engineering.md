@@ -216,8 +216,11 @@ missing dates, which is wrong for historical training rows.
 - **Five recency-weight schemes** coexist: 0.75^i (form), [0.35,0.25,0.20,0.12,0.08]
   (advanced form), [0.4,0.3,0.2,0.1] (settling), 3/2/1 windows (jockey momentum),
   1.0/0.7/0.4 date bands (distance sectionals).
-- `build_features.enrich_with_sectional_features` keys on a `horse_name` column that
-  the table builder never emits (it emits `horse`) — the join silently no-ops.
+- `build_features.enrich_with_sectional_features` previously keyed on a
+  `horse_name` column the table builder never emits (it emits `horse`), so the
+  join silently no-oped. Fixed: it now detects the `horse` column (still accepting
+  `horse_name` for external frames). Note the function has no caller inside
+  `build_features.main()` — it is an opt-in utility.
 - Duplicate `RunningStyle`/`PaceScenario` enums and diverging tight-turn track lists
   exist in `pace_modeling.py` vs `speed_mapping.py`.
 - `race_context`'s formulas are re-implemented inline in `retrain_v2.py` rather than

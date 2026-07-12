@@ -91,11 +91,16 @@ The README's "27 folds, 30,226 temporal predictions" comes from this machinery:
    notes this closes "the leak where X_cal is used for both early stopping and
    calibration fitting" — calibration never sees data the model was tuned on.
 
-**Known integration gap:** `RacingMLModel.predict_proba` (`ml_model.py:552-585`)
-calls the base models' `predict_proba` directly and **never checks `_isotonic`** —
-only retrain_v2's own `predict_ensemble` applies the embedded calibrators. At
-inference the ensemble's OOF isotonic step is therefore bypassed; calibration is
-instead applied downstream by the tips pipeline's `ProbabilityCalibrator` (below).
+**Integration note:** `RacingMLModel.predict_proba` (`ml_model.py:552-585`) calls
+the base models' `predict_proba` directly and does not apply the embedded
+`_isotonic` calibrators — only retrain_v2's own `predict_ensemble` uses them.
+This is deliberately left as-is (and now documented with an inline comment at the
+stacking branch): calibration of the final output is handled downstream by the
+tips pipeline's `ProbabilityCalibrator`, which was fitted against the *current*
+inference output. Switching per-model isotonic on at inference without refitting
+the downstream calibrator would double-calibrate and distort the validated
+probability scale. If per-model calibration at inference is ever wanted, refit
+`isotonic_calibrator.pkl` on the new output in the same change.
 
 ---
 
@@ -128,7 +133,7 @@ run_tips_pipeline.py
   └─ RacingMLModel()                # loads models/racing_ensemble_v2.pkl
        ├─ prepare_features(df)      # ~110-column contract (see FEATURES doc)
        └─ predict_proba(X, distance_m=…)
-            ├─ try stacking_meta_learner   → currently ALWAYS fails (see §8)
+            ├─ try stacking_meta_learner   → used when the artifact carries one (see §8)
             ├─ try double_calibrator       → if fitted
             └─ else weighted average of xgb/lgb/cat
                  weights from _model_performance — HARDCODED seed accuracies
@@ -184,12 +189,21 @@ contains code only.
 
 ## 8. Known defects & quirks (verified in source)
 
-- **Stacking never activates:** `ml_model.train` calls
-  `stacking_learner.fit(X_train_bal, y_train_bal, …)` (`ml_model.py:317`) but those
-  variables are never defined; the `NameError` is swallowed by the except block and
-  stacking is set to `None`. Retrain_v2 artifacts carry no stacking either.
-- **Focal loss configured but never applied** to any fit (`ml_model.py:238-241`).
-- **OOF isotonic bypassed at inference** (see §4).
+- **Stacking fit bug — fixed.** `ml_model.train` previously called
+  `stacking_learner.fit(X_train_bal, y_train_bal, …)` (`ml_model.py:317`) with
+  variables that stopped existing when SMOTE was removed; the `NameError` was
+  swallowed and stacking silently never activated. It now fits on
+  `X_train_scaled, y_train` (verified with a synthetic end-to-end training run —
+  the meta-learner fits and `predict_proba` routes through it). Artifacts trained
+  *before* the fix carry no stacking learner, so nothing changes for the current
+  production `racing_ensemble_v2.pkl`; the path activates only on future
+  `ml_model.train` runs.
+- **Focal loss is implemented but deliberately not wired** into any fit; the
+  training metrics previously claimed `enabled: True`, which now truthfully reports
+  `enabled: False` with a note (`ml_model.py:238-241`). Class imbalance is handled
+  by native class weights instead.
+- **OOF isotonic not applied at inference — by design** (see §4 for the
+  double-calibration rationale).
 - **Enhanced sub-models stubbed:** regional (NSW/VIC/QLD) and distance sub-model
   training exists but `main()` skips both with `'Skipped for simplicity'`
   (`train_ml_enhanced.py:1596-1613`).

@@ -237,8 +237,8 @@ class RacingMLModel:
         
         if FOCAL_LOSS_AVAILABLE:
             self._focal_config = FocalLossConfig(gamma=2.0, alpha=0.25)
-            metrics['focal_loss'] = {'gamma': 2.0, 'alpha': 0.25, 'enabled': True}
-            print("[ML] Focal loss configured for XGBoost and LightGBM")
+            metrics['focal_loss'] = {'gamma': 2.0, 'alpha': 0.25, 'enabled': False, 'note': 'objective available but not passed to boosters; class weights handle imbalance'}
+            print("[ML] Focal loss available (not applied — native class weights in use)")
         
         if TARGET_ENCODING_AVAILABLE:
             try:
@@ -314,7 +314,7 @@ class RacingMLModel:
             try:
                 self.stacking_learner = StackingMetaLearner(n_folds=5)
                 self.stacking_learner.fit(
-                    X_train_bal, y_train_bal,
+                    X_train_scaled, y_train,
                     {'xgb': self.xgb_model, 'lgb': self.lgb_model, 'cat': self.catboost_model},
                     self.scaler
                 )
@@ -553,7 +553,7 @@ class RacingMLModel:
         lgb_pred = self.lgb_model.predict_proba(X_scaled)[:, 1] if self.lgb_model else np.zeros(len(X_scaled))
         cat_pred = self.catboost_model.predict_proba(X_scaled)[:, 1] if self.catboost_model else np.zeros(len(X_scaled))
         
-        # Try stacking meta-learner first
+        # Try stacking meta-learner first. NB: retrain_v2 artifacts carry per-model _isotonic calibrators that are deliberately NOT applied here — pipeline-level isotonic (ProbabilityCalibrator in run_tips_pipeline.calibrate_and_score) calibrates the final output, and applying both layers would double-calibrate.
         if hasattr(self, 'stacking_learner') and self.stacking_learner is not None and self.stacking_learner.is_fitted:
             try:
                 ensemble = self.stacking_learner.predict(xgb_pred, lgb_pred, cat_pred)

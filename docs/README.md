@@ -62,10 +62,21 @@ data — see the main README). Verification performed while writing these docs
   distribution, exactas/trifectas.
 - Anything DB- or API-backed (the tips pipeline, trainers, collectors) requires the
   excluded credentials/data and was verified by source reading only.
+- Five small defects found during the review were fixed on this branch and
+  verified without touching any validated model behaviour: the stacking
+  meta-learner fit bug (proven fixed with a synthetic end-to-end
+  `RacingMLModel.train` run — the meta-learner now fits and serves predictions),
+  the consensus agent's empty-panel crash, the sectional-enrichment column
+  mismatch in `build_features.py` (exercised against a stubbed DB), the daemon
+  `--check-interval` flag being ignored, and a dead misnamed variable. Details in
+  each doc's quirks section.
 
 ## Documentation conventions
 
-- Code references use `file.py:line` (line numbers as of commit `bf55bb2`).
+- Code references use `file.py:line` (line numbers as of commit `bf55bb2`; the
+  fixes commit on this branch keeps the patched files line-count-neutral except
+  `build_features.py` (+1 line from ~line 674) and `stride_agent_track.py`
+  (−1 line from ~line 386)).
 - Named constants and thresholds are quoted from source, not paraphrased.
 - Known defects/dead code are called out in a "quirks" section at the end of each
   doc rather than silently corrected.

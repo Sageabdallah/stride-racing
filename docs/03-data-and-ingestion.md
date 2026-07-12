@@ -183,8 +183,9 @@ The repo assumes these exist in Neon — there is no CREATE TABLE for them anywh
   85/72/64/58).
 - `fetch_and_import_date.py` and `import_barrier_trials_to_db.py` contain a
   hardcoded Windows `.env` fallback path from the dev machine.
-- `auto_results_collector --daemon` ignores `--check-interval` and hardcodes 5
-  minutes.
+- `auto_results_collector --daemon` previously ignored `--check-interval` and
+  hardcoded 5 minutes; it now honours a positive `--check-interval` and defaults
+  to 5.
 - `weather_api.py` is an unwired stub (confidence 0.0, `source: 'stub'`).
 - `betfair_odds_snapshots` holds Racing-API prices in Phase 1; genuine Betfair data
   enters only via `build_betfair_mapping.py` (historical stream ETL for research

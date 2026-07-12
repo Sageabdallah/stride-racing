@@ -294,8 +294,10 @@ fuzzy-match 0.85 (agent); `MAX_ADJUSTMENT = 0.08` (pre-MC LLM).
 - `MIN_INDEPENDENT_SOURCES_PER_RACE = 3` is defined but never referenced.
 - `calculate_consensus_score()` accepts a `weighted_sum` argument that the body
   never uses.
-- `fetch_panel_pages()` returns a bare `[]` when the panel has no active sources,
-  but its caller unpacks a 2-tuple — an all-inactive panel would raise `ValueError`.
+- `fetch_panel_pages()` previously returned a bare `[]` when the panel had no
+  active sources while its caller unpacks a 2-tuple — an all-inactive panel would
+  have raised `ValueError`. Fixed: it now returns `([], [])` matching its
+  signature.
 - The `crowd_score ≥ 100` unanimous-crowd bet rule was added off a single observed
   race (inline comment) and is flagged for a 4-week review.
 - `betfair_odds_snapshots.back_price` holds Racing-API medians, not Betfair prices.

@@ -188,7 +188,7 @@ regardless of the edge calculation (`_check_intelligence_override`,
   consumers; treat as an in-progress rewrite.
 - `build_trainer_patterns.py` (gen-3) is a stub (`historical_pattern_available:
   false` always) because trainer names aren't in `race_results_history`.
-- `stride_agent_track.build_class_distance_patterns` line 386 assigns a track name
-  to a variable called `date_str` (unused) — harmless but confusing.
+- `stride_agent_track.build_class_distance_patterns` used to assign a track name
+  to an unused variable called `date_str` — the dead line has been removed.
 - Date windows are all hardcoded: ELO half-life 90d, franking decay 60d, franking
   lookback 540d, prep lookback 720d, overlays 450d, sectional trends 180d.
