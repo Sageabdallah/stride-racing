@@ -204,33 +204,89 @@ def _load_db_url():
     return ""
 
 
+_FIT_SQL = """
+    SELECT race_date::text AS race_date, track, race_number::int AS race_number,
+           predicted_win_prob::float8 AS predicted_win_prob,
+           COALESCE(market_odds, sp_odds)::float8 AS odds,
+           is_winner::int AS is_winner
+    FROM training_view_v2
+    WHERE is_winner IS NOT NULL
+      AND predicted_win_prob IS NOT NULL
+      AND COALESCE(market_odds, sp_odds) > 1
+    ORDER BY race_date, track, race_number
+"""
+
+
+def _fetch_rows_pg(db_url):
+    import psycopg2
+    conn = psycopg2.connect(db_url, connect_timeout=10)
+    cur = conn.cursor()
+    cur.execute(_FIT_SQL)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def _fetch_rows_neon_http(db_url, page_size=50000):
+    """
+    Fallback for networks where Postgres TCP (5432) is blocked but HTTPS is
+    open: Neon's SQL-over-HTTPS endpoint (the serverless driver protocol) —
+    POST https://<endpoint-host>/sql with the connection string in the
+    Neon-Connection-String header. Paginates to respect response limits.
+    """
+    import requests
+
+    host = db_url.split("@", 1)[1].split("/", 1)[0].split("?", 1)[0]
+    rows, offset = [], 0
+    while True:
+        page_sql = f"{_FIT_SQL} LIMIT {int(page_size)} OFFSET {int(offset)}"
+        resp = requests.post(
+            f"https://{host}/sql",
+            headers={"Neon-Connection-String": db_url,
+                     "Content-Type": "application/json"},
+            json={"query": page_sql, "params": []},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        fields = [f.get("name") for f in payload.get("fields", [])]
+        batch = payload.get("rows", [])
+        for r in batch:
+            if isinstance(r, dict):
+                rows.append((r["race_date"], r["track"], r["race_number"],
+                             r["predicted_win_prob"], r["odds"], r["is_winner"]))
+            else:  # arrayMode-style row
+                d = dict(zip(fields, r))
+                rows.append((d["race_date"], d["track"], d["race_number"],
+                             d["predicted_win_prob"], d["odds"], d["is_winner"]))
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
 def fit_from_database(holdout_frac=0.2, min_field=4):
     """
     Fit alpha/beta from stored predictions in training_view_v2:
     the model's pre-race predicted_win_prob vs the SP-implied market
     probability, grouped per race, ordered by race_date.
-    """
-    import psycopg2
 
+    Uses a direct Postgres connection when possible, falling back to Neon's
+    SQL-over-HTTPS endpoint when port 5432 is unreachable (e.g. sandboxed /
+    proxy-only networks).
+    """
     db_url = _load_db_url()
     if not db_url:
         print("[CL] DATABASE_URL not set — cannot fit from database", file=sys.stderr)
         return None
 
-    conn = psycopg2.connect(db_url)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT race_date, track, race_number, predicted_win_prob,
-               COALESCE(market_odds, sp_odds) AS odds, is_winner
-        FROM training_view_v2
-        WHERE is_winner IS NOT NULL
-          AND predicted_win_prob IS NOT NULL
-          AND COALESCE(market_odds, sp_odds) > 1
-        ORDER BY race_date, track, race_number
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    try:
+        rows = _fetch_rows_pg(db_url)
+    except Exception as pg_err:
+        print(f"[CL] Direct Postgres connection failed ({type(pg_err).__name__}) — "
+              f"trying Neon SQL-over-HTTPS", file=sys.stderr)
+        rows = _fetch_rows_neon_http(db_url)
 
     races, current_key, bucket = [], None, []
 
@@ -246,13 +302,16 @@ def fit_from_database(holdout_frac=0.2, min_field=4):
         q = implied / implied.sum()
         races.append((m, q, winners[0]))
 
+    def _as_bool(v):
+        return str(v).strip().lower() in ("1", "t", "true")
+
     for rd, track, rn, prob, odds, won in rows:
-        key = (str(rd), str(track).strip().lower(), int(rn or 0))
+        key = (str(rd), str(track).strip().lower(), int(float(rn or 0)))
         if key != current_key:
             if bucket:
                 flush(bucket)
             current_key, bucket = key, []
-        bucket.append((prob, odds, bool(won)))
+        bucket.append((prob, odds, _as_bool(won)))
     if bucket:
         flush(bucket)
 
