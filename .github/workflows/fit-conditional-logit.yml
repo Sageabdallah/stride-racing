@@ -1,0 +1,55 @@
+# Fits the Benter-style conditional-logit blend (server/python/conditional_logit.py)
+# on a GitHub-hosted runner with direct access to the Neon database.
+#
+# Requires the repository secret DATABASE_URL (Settings → Secrets and variables
+# → Actions → New repository secret). The connection string must never be
+# passed as a workflow input or committed — this repository is public.
+#
+# The run log prints the holdout report (model-only vs market-only vs blend)
+# and the fitted model JSON (base64 between markers) so it can be retrieved
+# without artifact downloads; the JSON is also uploaded as an artifact.
+
+name: fit-conditional-logit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet numpy scipy psycopg2-binary requests
+
+      - name: Fit conditional-logit blend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set. Add it under Settings → Secrets and variables → Actions, then re-run this workflow."
+            exit 1
+          fi
+          cd server/python
+          python conditional_logit.py --fit
+          echo "===== FITTED_MODEL_BASE64 ====="
+          base64 -w0 models/conditional_logit.json
+          echo
+          echo "===== END_FITTED_MODEL ====="
+
+      - name: Upload fitted model artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conditional-logit-model
+          path: server/python/models/conditional_logit.json

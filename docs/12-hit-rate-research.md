@@ -149,7 +149,13 @@ Ordered by expected hit-rate return per unit of risk:
 1. **Fit and enable the CL blend on real data** — run
    `conditional_logit.py --fit`, inspect the holdout table, then A/B a race
    day with `--output-suffix clblend --skip-db-store` against the canonical
-   run before enabling in production.
+   run before enabling in production. Three transports are supported: direct
+   Postgres, automatic Neon SQL-over-HTTPS fallback (for networks that block
+   port 5432), and `--csv <export.csv>` for a SQL-editor export. The
+   `fit-conditional-logit` GitHub Action runs the fit on a hosted runner
+   using the `DATABASE_URL` repository secret and prints the holdout report
+   in the run log (never pass the connection string as a workflow input —
+   the repository is public).
 2. **Retrain with Phase-5 features** — the next `retrain_v2.py` run picks
    them up; check the printed feature importances and walk-forward AUC, and
    extend `run_ablation` to toggle the Phase-5 trio if a clean read is wanted.

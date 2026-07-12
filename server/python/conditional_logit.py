@@ -266,6 +266,42 @@ def _fetch_rows_neon_http(db_url, page_size=50000):
     return rows
 
 
+def _rows_to_races(rows, min_field=4):
+    """
+    Group ordered (race_date, track, race_number, prob, odds, won) rows into
+    (model_probs, market_probs, winner_idx) fitting tuples. Transport-agnostic
+    value coercion: numerics may arrive as strings (HTTP text format / CSV),
+    and the winner flag as 1/0, t/f or true/false.
+    """
+    races, current_key, bucket = [], None, []
+
+    def _as_bool(v):
+        return str(v).strip().lower() in ("1", "t", "true")
+
+    def flush(bucket):
+        if len(bucket) < min_field:
+            return
+        winners = [i for i, r in enumerate(bucket) if r[2]]
+        if len(winners) != 1:
+            return
+        m = np.array([max(float(r[0]), 1e-4) for r in bucket])
+        m = m / 100.0 if m.max() > 1.5 else m  # stored as % or fraction
+        implied = np.array([1.0 / float(r[1]) for r in bucket])
+        q = implied / implied.sum()
+        races.append((m, q, winners[0]))
+
+    for rd, track, rn, prob, odds, won in rows:
+        key = (str(rd), str(track).strip().lower(), int(float(rn or 0)))
+        if key != current_key:
+            if bucket:
+                flush(bucket)
+            current_key, bucket = key, []
+        bucket.append((prob, odds, _as_bool(won)))
+    if bucket:
+        flush(bucket)
+    return races
+
+
 def fit_from_database(holdout_frac=0.2, min_field=4):
     """
     Fit alpha/beta from stored predictions in training_view_v2:
@@ -288,34 +324,38 @@ def fit_from_database(holdout_frac=0.2, min_field=4):
               f"trying Neon SQL-over-HTTPS", file=sys.stderr)
         rows = _fetch_rows_neon_http(db_url)
 
-    races, current_key, bucket = [], None, []
-
-    def flush(bucket):
-        if len(bucket) < min_field:
-            return
-        winners = [i for i, r in enumerate(bucket) if r[2]]
-        if len(winners) != 1:
-            return
-        m = np.array([max(float(r[0]), 1e-4) for r in bucket])
-        m = m / 100.0 if m.max() > 1.5 else m  # stored as % or fraction
-        implied = np.array([1.0 / float(r[1]) for r in bucket])
-        q = implied / implied.sum()
-        races.append((m, q, winners[0]))
-
-    def _as_bool(v):
-        return str(v).strip().lower() in ("1", "t", "true")
-
-    for rd, track, rn, prob, odds, won in rows:
-        key = (str(rd), str(track).strip().lower(), int(float(rn or 0)))
-        if key != current_key:
-            if bucket:
-                flush(bucket)
-            current_key, bucket = key, []
-        bucket.append((prob, odds, _as_bool(won)))
-    if bucket:
-        flush(bucket)
+    races = _rows_to_races(rows, min_field=min_field)
 
     print(f"[CL] Usable races: {len(races)}")
+    blend = ConditionalLogitBlend()
+    report = blend.fit(races, holdout_frac=holdout_frac)
+    blend.save()
+    return report
+
+
+def fit_from_csv(csv_path, holdout_frac=0.2, min_field=4):
+    """
+    Fit from a CSV export (e.g. the Neon console SQL editor) instead of a
+    live connection. Required columns, matching the _FIT_SQL aliases:
+    race_date, track, race_number, predicted_win_prob, odds, is_winner.
+    """
+    import csv as _csv
+
+    with open(csv_path, newline="") as f:
+        reader = _csv.DictReader(f)
+        missing = {"race_date", "track", "race_number", "predicted_win_prob",
+                   "odds", "is_winner"} - set(reader.fieldnames or [])
+        if missing:
+            print(f"[CL] CSV missing columns: {sorted(missing)}", file=sys.stderr)
+            return None
+        rows = [(r["race_date"], r["track"], r["race_number"],
+                 r["predicted_win_prob"], r["odds"], r["is_winner"])
+                for r in reader]
+
+    rows.sort(key=lambda r: (str(r[0]), str(r[1]).strip().lower(),
+                             int(float(r[2] or 0))))
+    races = _rows_to_races(rows, min_field=min_field)
+    print(f"[CL] Usable races from CSV: {len(races)}")
     blend = ConditionalLogitBlend()
     report = blend.fit(races, holdout_frac=holdout_frac)
     blend.save()
@@ -368,11 +408,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Conditional-logit blend fitter")
     parser.add_argument("--fit", action="store_true",
                         help="Fit alpha/beta from training_view_v2 and save the model")
+    parser.add_argument("--csv", metavar="PATH",
+                        help="Fit from a CSV export instead of a live DB "
+                             "(columns: race_date,track,race_number,"
+                             "predicted_win_prob,odds,is_winner)")
     parser.add_argument("--holdout", type=float, default=0.2,
                         help="Temporal holdout fraction for the fit report")
     args = parser.parse_args()
 
-    if args.fit:
+    if args.csv:
+        fit_from_csv(args.csv, holdout_frac=args.holdout)
+    elif args.fit:
         fit_from_database(holdout_frac=args.holdout)
     else:
         _self_test()
