@@ -27,6 +27,19 @@ This is a production-style ML system, not a notebook. It shows:
 - **Orchestration & guardrails** — a multi-stage daily pipeline with freshness
   checks, hard gates, and an automated scheduler.
 
+## Documentation
+
+Deep documentation of how everything works lives in [`docs/`](docs/README.md):
+
+| | |
+|---|---|
+| [Architecture](docs/01-architecture.md) · [Daily pipeline](docs/02-daily-pipeline.md) | the big picture and a race day end to end |
+| [Data & ingestion](docs/03-data-and-ingestion.md) · [Feature engineering](docs/04-feature-engineering.md) | sources, collectors, DB schema, the 110-feature contract |
+| [ML training & calibration](docs/05-ml-training-and-calibration.md) · [Monte Carlo engine](docs/06-monte-carlo-engine.md) | the two probability engines |
+| [Intelligence layer](docs/07-intelligence-layer.md) · [Consensus & market](docs/08-consensus-and-market.md) | form franking, tipster panel, market signals |
+| [Scoring & output](docs/09-scoring-and-output.md) · [Backtesting & learning](docs/10-backtesting-and-learning.md) | the BET/NO_BET contract and the evaluation loop |
+| [Module reference](docs/11-module-reference.md) | one-line purpose for every file |
+
 ## Methodology — value, not tips
 
 The system bets on a market edge, not on picking winners:
