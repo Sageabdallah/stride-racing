@@ -566,6 +566,22 @@ def calibrate_and_score(horses, overround, race_class=""):
     except Exception:
         pass
 
+    # Optional Benter-style conditional-logit blend (STRIDE_CL_BLEND=true).
+    # Requires a fitted models/conditional_logit.json; otherwise (and by
+    # default) the linear odds-band market anchor below runs unchanged.
+    _cl_blend = None
+    if os.environ.get("STRIDE_CL_BLEND", "false").strip().lower() in ("true", "1", "yes"):
+        try:
+            from conditional_logit import ConditionalLogitBlend
+            _cl = ConditionalLogitBlend()
+            if _cl.load():
+                _cl_blend = _cl
+                print(f"    [CL_BLEND] Active (alpha={_cl.alpha:.2f} model, beta={_cl.beta:.2f} market)", file=sys.stderr)
+            else:
+                print("    [CL_BLEND] Enabled but no fitted models/conditional_logit.json — using default blend", file=sys.stderr)
+        except Exception as _cl_err:
+            print(f"    [CL_BLEND] Unavailable ({_cl_err}) — using default blend", file=sys.stderr)
+
     # Preserve the upstream MC engine's own ranking so the wrapper can refine it
     # rather than accidentally replacing it with a market-following score.
     upstream_scores = []
@@ -637,6 +653,25 @@ def calibrate_and_score(horses, overround, race_class=""):
             h["trueMarketProb"] = 0
             h["fairOdds"] = None
             h["modelEdge"] = 0
+
+    # Opt-in fitted replacement for the linear market anchor above: a
+    # race-conditional softmax over alpha·ln(model) + beta·ln(market)
+    # (Benter two-stage). Edge stays calibrated − market. Default: off.
+    if _cl_blend is not None:
+        _quoted = [h for h in horses
+                   if h.get("trueMarketProb", 0) > 0 and h.get("rawModelProb", 0) > 0]
+        if len(_quoted) >= 2:
+            try:
+                _blended = _cl_blend.transform_race(
+                    [h["rawModelProb"] / 100.0 for h in _quoted],
+                    [h["trueMarketProb"] / 100.0 for h in _quoted],
+                )
+                for h, _p in zip(_quoted, _blended):
+                    h["winPercentage"] = round(float(_p) * 100.0, 2)
+                    h["modelEdge"] = round(h["winPercentage"] - h["trueMarketProb"], 2)
+                    h["_cl_blended"] = True
+            except Exception as _cl_terr:
+                print(f"    [CL_BLEND] transform failed (non-fatal): {_cl_terr}", file=sys.stderr)
 
     raw_probs = [h.get("rawModelProb", 0) for h in horses]
     mc_spread = (max(raw_probs) - min(raw_probs)) if len(raw_probs) > 1 else 0
@@ -2171,9 +2206,16 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 _ml = RacingMLModel()
                 if _ml.is_trained:
                     import pandas as _pd
-                    for runner in runners:
+                    # Phase 5: within-race relative market position (favourite ladder)
+                    try:
+                        from relative_market import compute_field_relative_market
+                        _rel_mkt = compute_field_relative_market([extract_odds(r) for r in runners])
+                    except Exception:
+                        _rel_mkt = [{"fair_implied_prob": 0.0, "odds_rank": 0.0, "odds_rank_pct": 0.0}] * len(runners)
+                    for _ri, runner in enumerate(runners):
                         feat = {}
                         feat["market_odds"] = extract_odds(runner) or 0
+                        feat.update(_rel_mkt[_ri])
                         feat["barrier_draw"] = int(runner.get("draw") or runner.get("barrier") or 0)
                         wt = str(runner.get("weight", "0")).replace("kg", "").strip()
                         feat["weight_kg"] = float(wt) if wt else 0

@@ -181,6 +181,11 @@ class RacingMLModel:
         'trial_x_experience',     # best trial position percentile × (1/career_starts); first-starter signal
         'trainer_trial_pattern',  # post-trial win rate ÷ own first-up rate × credibility; 1.0 = neutral
         'trial_quality_score',    # quality_raw × field_multiplier × volume_factor; co-trialist strength
+        # Phase 5: within-race relative market position (relative_market.py;
+        # names/semantics match mc_api.extract_ml_features for train/serve parity)
+        'fair_implied_prob',      # overround-corrected implied win % within the field (0-100)
+        'odds_rank',              # 1 = market favourite; ties share the lower rank
+        'odds_rank_pct',          # odds_rank / field size
     ]
     
     def __init__(self, model_path: str = None):
@@ -377,6 +382,10 @@ class RacingMLModel:
                 self._drift_monitor = None
         
         self.is_trained = True
+        # Persist the exact training-time column set (incl. any target-encoded
+        # columns) so a reloaded artifact never shape-mismatches a grown
+        # FEATURE_COLUMNS contract.
+        self._trained_feature_columns = list(X.columns)
         self.training_stats = {
             'trained_at': datetime.now().isoformat(),
             'samples': len(training_data),
@@ -631,6 +640,8 @@ class RacingMLModel:
             'is_trained': self.is_trained,
             'feature_importance': self.feature_importance,
             'training_stats': self.training_stats,
+            'feature_columns': getattr(self, '_trained_feature_columns', None)
+                               or list(self.FEATURE_COLUMNS),
         }
         with open(self.model_path, 'wb') as f:
             pickle.dump(model_data, f)

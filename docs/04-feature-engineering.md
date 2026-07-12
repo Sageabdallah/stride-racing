@@ -1,10 +1,11 @@
 # Feature Engineering
 
-STRIDE's models consume a fixed contract of **exactly 110 features** — the
-`FEATURE_COLUMNS` list in `server/python/ml_model.py:65-184` (this is where the
-README's "~110 engineered features" comes from). This document catalogues the
-features, the modules that produce them, the maths behind the interesting ones, and
-the leakage-prevention rules.
+STRIDE's models consume a fixed contract of features — the `FEATURE_COLUMNS`
+list in `server/python/ml_model.py` (the source of the README's "~110
+engineered features"; originally exactly 110, now **113** with the Phase-5
+relative-market trio). This document catalogues the features, the modules that
+produce them, the maths behind the interesting ones, and the
+leakage-prevention rules.
 
 Related docs: [ML training & calibration](05-ml-training-and-calibration.md) ·
 [Data & ingestion](03-data-and-ingestion.md)
@@ -79,6 +80,12 @@ Related docs: [ML training & calibration](05-ml-training-and-calibration.md) ·
 
 **Track-distance profiles** (`track_profiler.py`): `td_pace_bias`, `td_upset_rate`,
 `td_barrier_style_edge`, `td_closing_speed_bias`
+
+**Within-race relative market — Phase 5** (`relative_market.py`; activates at
+the next retrain): `fair_implied_prob` (overround-corrected implied win %
+within the field), `odds_rank` (1 = favourite), `odds_rank_pct` (rank / field
+size). Names match `mc_api.extract_ml_features` for train/serve parity across
+both inference paths — see [Hit-rate research](12-hit-rate-research.md).
 
 **Interaction terms** (inline in `retrain_v2.py:627-649` and mirrored at inference in
 `run_tips_pipeline.py:2222-2235`): `fitness_x_distance`, `barrier_x_pace_inv`,

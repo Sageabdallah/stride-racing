@@ -85,6 +85,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `target_encoding.py` | Leave-one-out smoothed target encoding |
 | `feature_store.py` | Two-tier feature cache + feature registry (provenance) |
 | `learned_sectional_combination.py` | Learned blend weights over sectional engines (L-BFGS-B) |
+| **`relative_market.py`** | Phase-5 within-race market-position features (favourite ladder); parity with mc_api — has self-test |
 
 ## ML training & calibration
 
@@ -95,6 +96,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `train_ml.py` | v1 trainer (delegates to RacingMLModel) |
 | `train_ml_enhanced.py` | "Enhanced" single-model trainer (temporal CV, isotonic-vs-Platt, SHAP) |
 | **`calibration_model.py`** | Global isotonic calibrator applied in the tips pipeline |
+| `conditional_logit.py` | Benter-style two-stage model+market blend (opt-in via `STRIDE_CL_BLEND`; fit CLI + self-test) |
 | `double_calibration.py` | Two-layer per-model + ensemble isotonic |
 | `mc_recalibration.py` | Isotonic recalibration of MC probabilities (custom PAV) |
 | `stacking_meta_learner.py` | OOF logistic stacking over base predictions (fit-path bug fixed; activates on newly trained v1 artifacts) |

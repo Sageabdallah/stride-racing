@@ -19,6 +19,7 @@ source read of the ~150 Python modules (~72k lines) in this repo.
 | 9 | [Scoring & output](09-scoring-and-output.md) | Calibration → selection score → safety filters → BET/NO_BET contract → tips JSON schema |
 | 10 | [Backtesting & learning](10-backtesting-and-learning.md) | The backtest suite, the nightly learning loop, shadow P&L, staking/risk |
 | 11 | [Module reference](11-module-reference.md) | One-line purpose for every file, live-path files marked |
+| 12 | [Hit-rate research & roadmap](12-hit-rate-research.md) | External research, audit against it, the Phase-5/conditional-logit changes, and the prioritized improvement roadmap |
 
 ## Quick orientation
 
@@ -73,10 +74,10 @@ data — see the main README). Verification performed while writing these docs
 
 ## Documentation conventions
 
-- Code references use `file.py:line` (line numbers as of commit `bf55bb2`; the
-  fixes commit on this branch keeps the patched files line-count-neutral except
-  `build_features.py` (+1 line from ~line 674) and `stride_agent_track.py`
-  (−1 line from ~line 386)).
+- Code references use `file.py:line` (line numbers as of the initial docs
+  commit). Later commits on this branch (defect fixes, Phase-5 / hit-rate
+  changes) shift some cited lines in the touched files — citations name the
+  enclosing function/symbol, so grep the symbol if a number has drifted.
 - Named constants and thresholds are quoted from source, not paraphrased.
 - Known defects/dead code are called out in a "quirks" section at the end of each
   doc rather than silently corrected.

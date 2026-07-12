@@ -32,6 +32,13 @@ Per runner, in order:
    `winPercentage = mw × raw + (1−mw) × true_market`, and
    **`modelEdge = winPercentage − true_market`** (edge is computed from the
    *calibrated* probability, so a flat MC run can't fabricate edge).
+
+   *Opt-in alternative:* with `STRIDE_CL_BLEND=true` and a fitted
+   `models/conditional_logit.json`, this linear anchor is replaced by a
+   Benter-style race-conditional softmax over `α·ln(model) + β·ln(market)`
+   (`conditional_logit.py`). Edge semantics and every downstream gate are
+   unchanged; default behaviour without the flag/model is byte-identical.
+   See [Hit-rate research](12-hit-rate-research.md).
 4. **Context multipliers.** Fitness readiness and track-bias points each map
    0–100 → ×0.95–1.05; jockey momentum ×0.85–1.20.
 5. **Selection score.** Two independent signals — the probability estimate and the

@@ -259,6 +259,11 @@ FEATURE_COLUMNS = [
     "trial_x_experience",      # best trial position percentile × (1/career_starts)
     "trainer_trial_pattern",   # post-trial win rate ÷ own first-up rate × credibility; 1.0 = neutral
     "trial_quality_score",     # quality_raw × field_multiplier × volume_factor; co-trialist strength
+    # Phase 5: within-race relative market position (relative_market.py;
+    # names/semantics match mc_api.extract_ml_features for train/serve parity)
+    "fair_implied_prob",
+    "odds_rank",
+    "odds_rank_pct",
 ]
 
 # Non-sectional features — fill NaN with 0 for these (exclude both PHASE2 and NAN_PRESERVE)
@@ -555,6 +560,16 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             out[feat_col] = pd.to_numeric(df[view_col], errors="coerce")
 
     out["market_odds"] = df["_effective_odds"]
+
+    # Phase 5: within-race relative market position (favourite ladder).
+    # Grouped by the same (race_date, track, race_number) key as pace features.
+    try:
+        from relative_market import add_relative_market_features
+        out = add_relative_market_features(out, df, odds_col="_effective_odds")
+    except Exception as _rm_err:
+        print(f"  WARNING: relative market features failed: {_rm_err}")
+        for _c in ("fair_implied_prob", "odds_rank", "odds_rank_pct"):
+            out[_c] = 0.0
 
     for col in FEATURE_COLUMNS:
         if col not in out.columns:

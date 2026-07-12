@@ -39,6 +39,7 @@ Deep documentation of how everything works lives in [`docs/`](docs/README.md):
 | [Intelligence layer](docs/07-intelligence-layer.md) · [Consensus & market](docs/08-consensus-and-market.md) | form franking, tipster panel, market signals |
 | [Scoring & output](docs/09-scoring-and-output.md) · [Backtesting & learning](docs/10-backtesting-and-learning.md) | the BET/NO_BET contract and the evaluation loop |
 | [Module reference](docs/11-module-reference.md) | one-line purpose for every file |
+| [Hit-rate research & roadmap](docs/12-hit-rate-research.md) | research-backed improvements and how to validate them |
 
 ## Methodology — value, not tips
 
