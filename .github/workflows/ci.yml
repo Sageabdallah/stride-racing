@@ -26,7 +26,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install test dependencies
-        run: pip install --quiet numpy scipy pandas lightgbm
+        run: pip install --quiet numpy scipy pandas scikit-learn lightgbm
 
       - name: Syntax-compile entire repository
         run: python -m compileall -q .
