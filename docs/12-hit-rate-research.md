@@ -209,6 +209,21 @@ before you flip the flag.
   `DATABASE_URL` points at this database — the new warning will surface
   any remaining audit failure on the first real run.
 
+  **Follow-up tooling (shipped):** (1) the `backfill-results` workflow
+  closes the collection gap itself — `backfill_results.py` replays the
+  production ingestion path week by week over a dispatched date range
+  (results via The Racing API, then NSW pidata / QLD CSV / VIC-SA
+  racing.com sectionals). Post-race facts into history tables only, every
+  writer idempotent, leak-free by construction (the module docstring
+  states the argument); needs repo secrets `RACING_API_USERNAME` /
+  `RACING_API_PASSWORD`, plus optional `RACING_COM_API_KEY` for VIC/SA
+  sectionals, and `refresh_view=true` on the final chunk rebuilds
+  `training_view_v2`. (2) The `audit-smoke` workflow proves the mc_api
+  audit-write path against `DATABASE_URL` using self-cleaning sentinel
+  rows (track `AUDIT SMOKE TEST`, date 1970-01-01 — unjoinable, so zero
+  training contamination): a pass isolates any remaining audit silence to
+  the production box's own environment.
+
 ### Verification performed
 
 - `relative_market.py` and `conditional_logit.py` self-tests pass.

@@ -28,6 +28,8 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`download_racecards.py`** | Racing API → `racecards/racecard_<date>.json` (27 metro tracks, trials tagged) |
 | `download_historical.py` | Slow-mode bulk history downloader with checkpoints/resume |
 | **`fetch_and_import_date.py`** | One date: Racing API results → `race_results_history` (append) |
+| `backfill_results.py` | Date-range gap backfill, week by week: reuses `fetch_and_import_date` + all three sectional collectors (run via the `backfill-results` Action) — has self-test |
+| `audit_write_smoke.py` | Sentinel-row smoke test of mc_api's `prediction_audit` write path, self-cleaning (run via the `audit-smoke` Action) |
 | `import_historical_to_db.py` | Historical JSON → `training_data` + `race_results_history` with heuristic prior predictions |
 | `import_race_results.py` | **TRUNCATE-and-reload** of `race_results_history` from track imports (destructive) |
 | `import_track_json.py` / `_fast.py` | Track-import JSON → `training_data` (row-wise / bulk execute_values) |

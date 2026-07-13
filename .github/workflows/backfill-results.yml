@@ -1,0 +1,82 @@
+# Closes the collection gap the coverage report found (docs/12 §4c: every
+# table stops ~2026-04-18). Runs backfill_results.py, which reuses the
+# production ingestion path week by week: results via The Racing API, then
+# NSW / QLD / VIC-SA sectionals. Post-race facts into history tables only —
+# no leakage (see the module docstring); every writer is idempotent, so
+# re-dispatching a chunk is safe.
+#
+# Dispatch in chunks of ~2 weeks (a day takes ~2-4 minutes of polite,
+# rate-limited API calls). Set refresh_view=true on the FINAL chunk so
+# training_view_v2 picks up the new months.
+#
+# Required secrets: DATABASE_URL, RACING_API_USERNAME, RACING_API_PASSWORD.
+# Optional secret:  RACING_COM_API_KEY (VIC/SA sectionals; skipped loudly
+# when absent — results, NSW and QLD are unaffected).
+
+name: backfill-results
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "First date to backfill (YYYY-MM-DD, inclusive)"
+        required: true
+      end_date:
+        description: "Last date (YYYY-MM-DD, inclusive; empty = today UTC)"
+        required: false
+        default: ""
+      refresh_view:
+        description: "Rebuild training_view_v2 afterwards (use on final chunk)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet numpy pandas psycopg2-binary requests python-dotenv
+
+      - name: Backfill results + sectionals
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RACING_API_USERNAME: ${{ secrets.RACING_API_USERNAME }}
+          RACING_API_PASSWORD: ${{ secrets.RACING_API_PASSWORD }}
+          RACING_COM_API_KEY: ${{ secrets.RACING_COM_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          if [ -z "${RACING_API_USERNAME}" ] || [ -z "${RACING_API_PASSWORD}" ]; then
+            echo "::error::Repository secrets RACING_API_USERNAME and RACING_API_PASSWORD are required (The Racing API basic auth used by fetch_and_import_date.py)."
+            exit 1
+          fi
+          cd server/python
+          END_ARG=""
+          if [ -n "${{ inputs.end_date }}" ]; then
+            END_ARG="--end ${{ inputs.end_date }}"
+          fi
+          python backfill_results.py --start "${{ inputs.start_date }}" ${END_ARG}
+
+      - name: Rebuild training_view_v2
+        if: ${{ inputs.refresh_view == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          cd server/python
+          python refresh_training_view_v2.py

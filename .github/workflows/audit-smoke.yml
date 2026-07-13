@@ -1,0 +1,43 @@
+# Item 2 of the coverage-report follow-up (docs/12 §4c): prove the
+# production audit-write path (mc_api.log_prediction_audit) can write to
+# the database behind DATABASE_URL. Writes two unmistakable sentinel rows
+# (track 'AUDIT SMOKE TEST', race_date 1970-01-01 — can never join the
+# results spine, so zero training contamination), verifies them, deletes
+# them. A pass isolates any remaining audit silence to the production
+# box's own environment.
+#
+# Requires the repository secret DATABASE_URL.
+
+name: audit-smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet numpy psycopg2-binary
+
+      - name: Audit write smoke test
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          cd server/python
+          python audit_write_smoke.py
