@@ -243,6 +243,16 @@ Ordered by expected hit-rate return per unit of risk:
    against fold std 0.044) — they carry mid-table importance but no marginal
    AUC on this dataset, plausibly because sectional coverage is only ~47% of
    rows. Staged artifact uploaded; live model untouched.
+
+   **Causal read (run 2, same day, three-arm ablation): Phase 5 delta
+   −0.0012 AUC** (0.7871 with vs 0.7883 without; Brier 0.0841 vs 0.0842 —
+   both inside noise). Verdict: the trio is a *redundant re-encoding* of
+   `market_odds` — the trees substitute it freely (hence the big
+   importances) but it adds no measurable skill. It does no harm either;
+   keeping it in the 113-feature contract avoids churn, but nothing should
+   be promoted on the strength of Phase 5, and future feature work should
+   target *new information* (e.g. a close-to-jump odds snapshot, §5.5)
+   rather than better encodings of information the model already has.
 3. **Race-selectivity gate ("bet the reliable races")** — **done, see §4c**
    (fields always on, ordering influence behind `STRIDE_PREDICTABILITY_GATE`).
    Remaining: once a few weeks of results accumulate, use shadow tracking to
@@ -252,10 +262,10 @@ Ordered by expected hit-rate return per unit of risk:
    `train-rank-model` Action and read the walk-forward report. Integration
    criterion before any pipeline wiring: the ranker's holdout top-1 hit
    must beat both the market favourite and the current model's stored
-   top-1 (42.9% on the July window) across folds — then integrate as a
-   within-race ordering signal (not a probability), so calibration is
-   untouched. Research (2024) finds pairwise rankers beat pointwise
-   classification for this exact task.
+   top-1 (42.9% on the most recent audited window) across folds — then
+   integrate as a within-race ordering signal (not a probability), so
+   calibration is untouched. Research (2024) finds pairwise rankers beat
+   pointwise classification for this exact task.
 
    **First real run (2026-07-13, 8,472 usable races 2024-12→2026-04, 30
    walk-forward folds, 8,052 holdout races):** ranker top-1 **36.0%** vs
@@ -269,8 +279,25 @@ Ordered by expected hit-rate return per unit of risk:
    population (full-field `prediction_audit` races only). The harness
    therefore now emits the three-way head-to-head on identical races
    (stored-prob-covered fields): that H2H line, not the headline, decides
-   the second half of the criterion. Verdict so far: favourite-half of the
-   criterion met; stored-model-half pending the H2H run.
+   the second half of the criterion.
+
+   **Run 2 head-to-head (996 identical test races with full stored-prob
+   coverage): stored production model 39.7% / market favourite 34.4% /
+   ranker 33.6%.** The ranker loses to the stored model by 6.1pp and even
+   trails the favourite on this well-priced subset; the stored model beat
+   the ranker in 17 of the 21 folds with H2H races. **Verdict: criterion
+   FAILED — the ranker stays evidence-only, no pipeline wiring.** The
+   headline walk-forward edge (35.9% vs 29.5%) was baseline weakness, not
+   ranker strength: on sparse-odds races the ranker reconstructs a market
+   signal from its odds features while the raw favourite baseline can't —
+   exactly the failure mode the same-race H2H was added to catch. Re-test
+   only after a genuinely new information source lands (e.g. §5.5 late
+   odds). Side-finding worth fixing: full-field stored-prob coverage is
+   only 1,199 of 8,472 usable races and dries up after ~Nov 2025 (folds
+   22–30 had zero H2H races) — `prediction_audit` full-field coverage
+   should be restored/backfilled, since it is the raw material for every
+   future same-race evidence read (the `final_win_prob` logging added in
+   §4c rebuilds the final-stage record going forward).
 5. **Capture a close-to-jump odds snapshot** — the current market pillar uses
    overnight/8am prices; late money is the sharpest public information. A
    T-5-minute snapshot upgrading `market_odds`/Phase-5 features at scoring
