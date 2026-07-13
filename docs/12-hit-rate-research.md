@@ -224,6 +224,23 @@ before you flip the flag.
   training contamination): a pass isolates any remaining audit silence to
   the production box's own environment.
 
+  **Backfill executed (2026-07-13, 7 chunks, all green):** the full
+  2026-04-19 → 2026-07-13 gap was closed through the workflow —
+  **45,070 result rows** (86/86 days had meetings) plus **4,037 NSW
+  sectional records** (438 races in one pidata pass with internal dedup),
+  and `training_view_v2` was rebuilt: **78,169 → 119,577 rows**
+  (prediction-quality breakdown after rebuild: 106,193 none / 12,590
+  imported_historical / 794 live_model). Two source findings from the
+  runs: (a) Racing Queensland's sectional CSV endpoint returned "No CSV
+  found" for every date **including the most recent week** — the
+  `sectional_times_collector` URL pattern appears dead, so production's
+  daily QLD collection has presumably been failing too; the collector
+  needs re-pointing at whatever RQ serves now. (b) VIC/SA sectionals
+  remain pending the optional `RACING_COM_API_KEY` secret — once added,
+  idempotent re-dispatches over the same chunks recover them without
+  duplicating anything. 2026-07-13 itself was fetched mid-day; the daily
+  pipeline (or one later re-dispatch) collects the remainder.
+
   **Root cause, found by audit-smoke run 1 (2026-07-13):** the audit
   upsert names `ON CONFLICT (track, race_number, race_date, horse_name)`
   but the live table has **no unique key on those columns**, and
