@@ -181,6 +181,14 @@ before you flip the flag.
   Run it next to the DB with the `train-rank-model` GitHub Action.
   Evidence only: no pipeline hook consumes the artifact (§5 item 4 states
   the integration criterion and records the run results).
+- **Audit-coverage diagnostic** — `audit_coverage_report.py` + the
+  `audit-coverage` Action: read-only monthly report that separates "audit
+  writes stopped" from "the view's normalized join drifted" for the §5.4
+  coverage cliff (raw `prediction_audit` counts, `training_view_v2`
+  coverage, race-key and horse-level match rates using the view's own
+  `stride_norm_*` functions, plus raw samples of unmatched races). The
+  session is opened read-only and the self-test asserts every query is a
+  SELECT — the workflow cannot mutate the database.
 
 ### Verification performed
 
@@ -226,6 +234,20 @@ Ordered by expected hit-rate return per unit of risk:
    true independent market weight needs final-stage inputs, which the
    pipeline now records (`prediction_audit.final_win_prob`, §4c); once a
    few weeks accumulate, fit with `--stage final` for that estimate.
+
+   **Enablement runbook (production box):** grab the fitted artifact from
+   the `fit-conditional-logit` run — either the uploaded Actions artifact
+   or by decoding the base64 block printed between the log markers
+   (artifacts expire after ~90 days; re-dispatching the fit regenerates it
+   in minutes). Place it at `server/python/models/conditional_logit.json`
+   — `models/` is deliberately git-ignored, so it is never committed to
+   this public repo. Set `STRIDE_CL_BLEND=true` and A/B one race day with
+   `--output-suffix clblend --skip-db-store` against the canonical run.
+   Expected shape of a healthy A/B: top pick unchanged on almost every
+   race, win% modestly sharpened at the head of the field (α≈1.3), edge
+   still equal to win − market everywhere. If that holds, leave the flag
+   on; if anything looks off, unset the flag — the default path is
+   byte-identical without it.
 2. **Retrain with Phase-5 features** — the `retrain-model` GitHub Action now
    runs this next to the DB (staged artifact + CV/ablation report in the run
    log).

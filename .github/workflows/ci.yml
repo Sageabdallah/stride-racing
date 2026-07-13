@@ -40,3 +40,4 @@ jobs:
           python glicko2_elo.py
           python temporal_staleness.py
           python rank_model.py
+          python audit_coverage_report.py

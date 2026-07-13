@@ -1,0 +1,41 @@
+# Read-only diagnostic for prediction_audit coverage (docs/12 §5.4 found
+# full-field coverage dies after ~Nov 2025). Prints monthly write counts,
+# view coverage, and normalized-join match rates in the run log — the log
+# IS the report. The reporter opens its session read-only and its self-test
+# asserts every query is a SELECT, so this workflow cannot mutate the DB.
+#
+# Requires the repository secret DATABASE_URL.
+
+name: audit-coverage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet psycopg2-binary
+
+      - name: Run read-only coverage report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          cd server/python
+          python audit_coverage_report.py --run
