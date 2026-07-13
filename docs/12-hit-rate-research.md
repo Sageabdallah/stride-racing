@@ -156,6 +156,23 @@ Ordered by expected hit-rate return per unit of risk:
    using the `DATABASE_URL` repository secret and prints the holdout report
    in the run log (never pass the connection string as a workflow input —
    the repository is public).
+
+   **First real fit (2026-07-13, 1,227 races, 245-race temporal holdout):**
+   model-only top-pick hit 42.9% / log-loss 1.7039; market-only (SP
+   favourite) 40.4% / 1.7499; fitted blend α=1.296, β=0.000 → hit 42.9% /
+   log-loss 1.6866. Two conclusions: (a) the live pipeline's top pick beats
+   the favourite baseline in its own operating window, and the stored
+   probabilities are too flat at the top (α>1 sharpening improves log-loss
+   ~1% — consistent with the README calibration table's under-predicted
+   0.20–0.30 bin; refitting `isotonic_calibrator.pkl` captures this safely);
+   (b) **β=0 is a train/serve artifact, so do not enable `STRIDE_CL_BLEND`
+   from this fit**: the view's `predicted_win_prob` is the *final*,
+   already-market-anchored output, so the market carries no incremental
+   information *conditional on it* — while at inference the blend applies to
+   the raw pre-anchor probability, meaning this artifact would remove the
+   market tether entirely. Prerequisite before the next fit: persist the
+   full-field raw `rawModelProb` (pre market anchor) alongside the final
+   probability in `prediction_audit`, accumulate a few weeks, refit.
 2. **Retrain with Phase-5 features** — the next `retrain_v2.py` run picks
    them up; check the printed feature importances and walk-forward AUC, and
    extend `run_ablation` to toggle the Phase-5 trio if a clean read is wanted.
