@@ -175,9 +175,12 @@ before you flip the flag.
   **same 113-column matrix and walk-forward regime as retrain_v2**
   (60/14/14/14 days, purge-gapped, race-level splits — no leakage) and
   reports top-pick hit rate against the market-favourite baseline fold by
-  fold. Run it next to the DB with the `train-rank-model` GitHub Action.
+  fold, plus a three-way head-to-head (ranker vs stored production model vs
+  favourite) on test races where `predicted_win_prob` covers the full field
+  — identical races, so the §5.4 criterion is judged apples-to-apples.
+  Run it next to the DB with the `train-rank-model` GitHub Action.
   Evidence only: no pipeline hook consumes the artifact (§5 item 4 states
-  the integration criterion).
+  the integration criterion and records the run results).
 
 ### Verification performed
 
@@ -240,6 +243,21 @@ Ordered by expected hit-rate return per unit of risk:
    within-race ordering signal (not a probability), so calibration is
    untouched. Research (2024) finds pairwise rankers beat pointwise
    classification for this exact task.
+
+   **First real run (2026-07-13, 8,472 usable races 2024-12→2026-04, 30
+   walk-forward folds, 8,052 holdout races):** ranker top-1 **36.0%** vs
+   market favourite **29.5%** — the ranker beat the favourite in 29 of 30
+   folds and tied the other. Two honesty notes: (a) the 29.5% baseline is
+   the favourite by the view's stored (mostly early/racecard) odds over
+   *all* races including sparse early-history months, which is why it sits
+   below the ~35% SP-favourite AU baseline — the ranker's +6.5pp edge is
+   real but measured against early prices; (b) 36.0% is **not** comparable
+   to the 42.9% stored-model figure, which was measured on a different
+   population (full-field `prediction_audit` races only). The harness
+   therefore now emits the three-way head-to-head on identical races
+   (stored-prob-covered fields): that H2H line, not the headline, decides
+   the second half of the criterion. Verdict so far: favourite-half of the
+   criterion met; stored-model-half pending the H2H run.
 5. **Capture a close-to-jump odds snapshot** — the current market pillar uses
    overnight/8am prices; late money is the sharpest public information. A
    T-5-minute snapshot upgrading `market_odds`/Phase-5 features at scoring

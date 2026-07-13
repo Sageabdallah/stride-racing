@@ -12,8 +12,11 @@ It reuses retrain_v2's exact data loading and 113-column feature matrix
 (so there is no second feature path to drift) and a walk-forward split with
 the same 60/14/14/14-day parameters (purge gap included — no leakage), then
 reports the ranker's top-pick hit rate against the market-favourite baseline
-fold by fold. Nothing in the live pipeline consumes the artifact until that
-report earns integration (the criterion is written in docs/12 §5.4).
+fold by fold — and, on test races where the production model's stored
+MC-stage probabilities cover the full field, a three-way head-to-head
+(ranker vs stored model vs favourite on identical races). Nothing in the
+live pipeline consumes the artifact until that report earns integration
+(the criterion is written in docs/12 §5.4).
 
 Usage:
     python rank_model.py              # synthetic self-test (no DB, no repo deps)
@@ -110,12 +113,20 @@ def walk_forward_report(races, params=None, verbose=True):
     """
     races: list of dicts ordered by date, each:
       {"date": date, "X": 2D array (runners x features),
-       "winner": int index, "odds": list (None ok)}
+       "winner": int index, "odds": list (None ok),
+       "stored": optional list of the production model's stored win probs
+                 (None entries ok)}
     Returns the fold-by-fold and aggregate report comparing the ranker's
-    top pick against the market favourite.
+    top pick against the market favourite — and, on the subset of test races
+    where the stored probabilities cover the FULL field, a three-way
+    head-to-head (ranker vs stored model vs favourite on identical races).
+    That subset is what docs/12 §5.4's integration criterion is judged on:
+    partial coverage would make argmax-over-part-of-the-field meaningless.
     """
     race_dates = [r["date"] for r in races]
-    folds, agg = [], {"races": 0, "ranker_hits": 0, "market_hits": 0}
+    folds = []
+    agg = {"races": 0, "ranker_hits": 0, "market_hits": 0,
+           "h2h_races": 0, "h2h_ranker": 0, "h2h_stored": 0, "h2h_market": 0}
 
     for train_idx, test_idx in _temporal_folds(race_dates):
         X_tr = np.vstack([races[i]["X"] for i in train_idx])
@@ -127,38 +138,76 @@ def walk_forward_report(races, params=None, verbose=True):
         model = train_ranker(X_tr, y_tr, groups, params)
 
         r_hits = m_hits = n = 0
+        h2h = {"n": 0, "ranker": 0, "stored": 0, "market": 0}
         for i in test_idx:
             r = races[i]
             scores = model.predict(np.asarray(r["X"]))
-            r_hits += int(int(np.argmax(scores)) == r["winner"])
+            pick = int(np.argmax(scores))
+            r_hits += int(pick == r["winner"])
             odds = [(o if (o is not None and o > 1) else np.inf) for o in r["odds"]]
-            if np.isfinite(min(odds)):
-                m_hits += int(int(np.argmin(odds)) == r["winner"])
+            fav = int(np.argmin(odds)) if np.isfinite(min(odds)) else None
+            if fav is not None:
+                m_hits += int(fav == r["winner"])
             n += 1
+
+            stored = r.get("stored")
+            if stored is not None and fav is not None:
+                s = np.asarray([(v if v is not None else np.nan) for v in stored],
+                               dtype=float)
+                if s.shape[0] == len(odds) and np.all(np.isfinite(s)) and np.all(s > 0):
+                    h2h["n"] += 1
+                    h2h["ranker"] += int(pick == r["winner"])
+                    h2h["stored"] += int(int(np.argmax(s)) == r["winner"])
+                    h2h["market"] += int(fav == r["winner"])
 
         folds.append({
             "train_races": len(train_idx), "test_races": n,
             "ranker_hit": round(r_hits / n, 4),
             "market_hit": round(m_hits / n, 4),
+            "h2h_races": h2h["n"],
+            "h2h_ranker_hit": round(h2h["ranker"] / h2h["n"], 4) if h2h["n"] else None,
+            "h2h_stored_hit": round(h2h["stored"] / h2h["n"], 4) if h2h["n"] else None,
+            "h2h_market_hit": round(h2h["market"] / h2h["n"], 4) if h2h["n"] else None,
         })
         agg["races"] += n
         agg["ranker_hits"] += r_hits
         agg["market_hits"] += m_hits
+        agg["h2h_races"] += h2h["n"]
+        agg["h2h_ranker"] += h2h["ranker"]
+        agg["h2h_stored"] += h2h["stored"]
+        agg["h2h_market"] += h2h["market"]
         if verbose:
-            print(f"[RANK] fold {len(folds):>2}: train {len(train_idx):>5} races | "
-                  f"test {n:>4} | ranker top-1 {r_hits / n:.3f} | "
-                  f"market fav {m_hits / n:.3f}")
+            line = (f"[RANK] fold {len(folds):>2}: train {len(train_idx):>5} races | "
+                    f"test {n:>4} | ranker top-1 {r_hits / n:.3f} | "
+                    f"market fav {m_hits / n:.3f}")
+            if h2h["n"]:
+                line += (f" | h2h {h2h['n']:>3}: ranker {h2h['ranker'] / h2h['n']:.3f} "
+                         f"stored {h2h['stored'] / h2h['n']:.3f} "
+                         f"fav {h2h['market'] / h2h['n']:.3f}")
+            print(line)
 
     report = {
         "folds": folds,
         "n_races": agg["races"],
         "ranker_top1_hit": round(agg["ranker_hits"] / agg["races"], 4) if agg["races"] else None,
         "market_top1_hit": round(agg["market_hits"] / agg["races"], 4) if agg["races"] else None,
+        "h2h_races": agg["h2h_races"],
+        "h2h_ranker_hit": round(agg["h2h_ranker"] / agg["h2h_races"], 4) if agg["h2h_races"] else None,
+        "h2h_stored_hit": round(agg["h2h_stored"] / agg["h2h_races"], 4) if agg["h2h_races"] else None,
+        "h2h_market_hit": round(agg["h2h_market"] / agg["h2h_races"], 4) if agg["h2h_races"] else None,
     }
     if verbose and agg["races"]:
         print(f"[RANK] TOTAL {agg['races']} holdout races | "
               f"ranker top-1 {report['ranker_top1_hit']:.3f} | "
               f"market favourite {report['market_top1_hit']:.3f}")
+        if agg["h2h_races"]:
+            print(f"[RANK] H2H (test races where stored probs cover the full field) "
+                  f"{agg['h2h_races']} races | ranker {report['h2h_ranker_hit']:.3f} | "
+                  f"stored model {report['h2h_stored_hit']:.3f} | "
+                  f"market fav {report['h2h_market_hit']:.3f}")
+        else:
+            print("[RANK] H2H: no test races with full stored-prob coverage "
+                  "(predicted_win_prob missing from the loaded view?)")
     return report
 
 
@@ -184,6 +233,14 @@ def train_from_database(model_path=None, params=None):
     ])
     y_all = pd.to_numeric(df["is_winner"], errors="coerce").fillna(0).astype(int).values
     odds_all = pd.to_numeric(df["_effective_odds"], errors="coerce").values
+    # Stored production probability (MC stage, via prediction_audit in the
+    # view) — benchmark only. It is not in FEATURE_COLUMNS, so the ranker
+    # never sees it; it exists purely so the walk-forward report can judge
+    # docs/12 §5.4's criterion on identical races.
+    if "predicted_win_prob" in df.columns:
+        stored_all = pd.to_numeric(df["predicted_win_prob"], errors="coerce").values
+    else:
+        stored_all = np.full(len(df), np.nan)
     Xv = X_all.values
 
     races = []
@@ -202,10 +259,17 @@ def train_from_database(model_path=None, params=None):
             "X": Xv[rows],
             "winner": winners[0],
             "odds": [odds_all[ri] if np.isfinite(odds_all[ri]) else None for ri in rows],
+            "stored": [stored_all[ri] if np.isfinite(stored_all[ri]) else None for ri in rows],
         })
     races.sort(key=lambda r: r["date"])
     print(f"[RANK] Usable races: {len(races)} "
           f"({races[0]['date']} -> {races[-1]['date']})" if races else "[RANK] No usable races")
+    covered = sum(
+        1 for r in races
+        if all(v is not None and v > 0 for v in r["stored"])
+    )
+    print(f"[RANK] Stored-prob full-field coverage: {covered}/{len(races)} races "
+          f"(the head-to-head subset)")
     if len(races) < 100:
         print("[RANK] Not enough races to produce meaningful evidence", file=sys.stderr)
         return None
@@ -260,10 +324,21 @@ def _self_test():
         ])
         X[rng.random(X.shape) < 0.05] = np.nan  # ranker must tolerate NaNs
         odds = (1.0 / np.clip(true_p + rng.normal(0, 0.02, n), 0.01, None)) * 1.15
-        races.append({
+        race = {
             "date": base + timedelta(days=int(k / 3)),
             "X": X, "winner": winner, "odds": odds.tolist(),
-        })
+        }
+        # Stored-model probs appear only from k=260 on (mirrors live data,
+        # where prediction_audit coverage starts partway through the view),
+        # and every 10th covered race is left partially covered — the
+        # head-to-head must count neither the uncovered nor the partial ones.
+        if k >= 260:
+            stored = np.clip(true_p + rng.normal(0, 0.05, n), 1e-3, None)
+            if k % 10 == 0:
+                race["stored"] = [None] + stored[1:].tolist()
+            else:
+                race["stored"] = stored.tolist()
+        races.append(race)
 
     report = walk_forward_report(races, params={"n_estimators": 120}, verbose=False)
     assert report["n_races"] >= 50, report
@@ -274,6 +349,19 @@ def _self_test():
     print(f"  walk-forward: {report['n_races']} holdout races, "
           f"ranker top-1 {report['ranker_top1_hit']:.3f} "
           f"(random {random_hit:.3f}, market {report['market_top1_hit']:.3f})")
+
+    # head-to-head subset mechanics: some races covered, partial ones skipped
+    assert 0 < report["h2h_races"] < report["n_races"], report
+    for key in ("h2h_ranker_hit", "h2h_stored_hit", "h2h_market_hit"):
+        assert 0.0 <= report[key] <= 1.0, (key, report[key])
+    assert report["h2h_stored_hit"] > 2 * random_hit, (
+        f"stored argmax should track the synthetic signal: "
+        f"{report['h2h_stored_hit']} vs random {random_hit:.3f}")
+    per_fold_h2h = sum(f["h2h_races"] for f in report["folds"])
+    assert per_fold_h2h == report["h2h_races"]
+    print(f"  head-to-head subset: {report['h2h_races']}/{report['n_races']} races, "
+          f"ranker {report['h2h_ranker_hit']:.3f} / stored {report['h2h_stored_hit']:.3f} / "
+          f"fav {report['h2h_market_hit']:.3f}")
 
     # save/load roundtrip parity
     X_tr = np.vstack([r["X"] for r in races[:300]])

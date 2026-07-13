@@ -307,6 +307,10 @@ def load_training_data() -> pd.DataFrame:
             -- Odds (sp_odds is the most populated)
             sp_odds,
             market_odds,
+            -- Stored MC-stage model probability (prediction_audit via the
+            -- view). Benchmark column only — never a training feature:
+            -- build_feature_matrix restricts to FEATURE_COLUMNS.
+            predicted_win_prob,
             -- Existing engineered features
             weighted_form_score,
             ground_suitability,
