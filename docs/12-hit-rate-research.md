@@ -159,6 +159,17 @@ before you flip the flag.
 - **CI** — `.github/workflows/ci.yml` compiles the whole repository and runs
   the module self-tests on every push: the regression net that would
   have caught the silent stacking breakage years earlier.
+- **Retrain workflow** — `.github/workflows/retrain-model.yml` runs
+  `retrain_v2.py` next to the database, prints the walk-forward CV + ablation
+  report (the Phase-5 features' first real evidence read), and uploads a
+  **staged** artifact (`models/staging_ensemble_v2.pkl`) — the live model is
+  never touched until a human inspects the report and installs it, matching
+  `learn_from_results_v2`'s staging discipline.
+- **Tipster-accuracy feedback** — with `STRIDE_ACCURACY_WEIGHTS=true` the
+  consensus agent reads `source_accuracy` (last 120 days, settled tips only —
+  leak-free) and composes a bounded per-tipster multiplier (floor 20 tips,
+  20-pseudo-tip shrinkage, clamp [0.75, 1.25]) into panel quality weights.
+  Default off = byte-identical ([Consensus & market §2.4](08-consensus-and-market.md)).
 - **LambdaRank evidence harness** — `rank_model.py` trains an `LGBMRanker`
   (`objective=lambdarank`, races as query groups, binary relevance) on the
   **same 113-column matrix and walk-forward regime as retrain_v2**
@@ -212,8 +223,9 @@ Ordered by expected hit-rate return per unit of risk:
    true independent market weight needs final-stage inputs, which the
    pipeline now records (`prediction_audit.final_win_prob`, §4c); once a
    few weeks accumulate, fit with `--stage final` for that estimate.
-2. **Retrain with Phase-5 features** — the next `retrain_v2.py` run picks
-   them up; check the printed feature importances and walk-forward AUC, and
+2. **Retrain with Phase-5 features** — the `retrain-model` GitHub Action now
+   runs this next to the DB (staged artifact + CV/ablation report in the run
+   log). Check the printed feature importances and walk-forward AUC, and
    extend `run_ablation` to toggle the Phase-5 trio if a clean read is wanted.
 3. **Race-selectivity gate ("bet the reliable races")** — **done, see §4c**
    (fields always on, ordering influence behind `STRIDE_PREDICTABILITY_GATE`).
@@ -232,9 +244,9 @@ Ordered by expected hit-rate return per unit of risk:
    overnight/8am prices; late money is the sharpest public information. A
    T-5-minute snapshot upgrading `market_odds`/Phase-5 features at scoring
    time would strengthen the market input the CL blend leans on.
-6. **Close the tipster-accuracy feedback loop** — `source_accuracy` is
-   recorded but never read back into panel weights
-   ([Consensus & market §2.4](08-consensus-and-market.md)).
+6. **Close the tipster-accuracy feedback loop** — **done, see §4c** (opt-in
+   via `STRIDE_ACCURACY_WEIGHTS`). Remaining: after a month of panel history,
+   compare consensus-pillar hit rate with the flag on vs off.
 7. **Finish `weather_api.py`** — going misclassification is a documented
    failure category in the 21-day autopsy; the stub already defines the
    uncertainty-widening interface.

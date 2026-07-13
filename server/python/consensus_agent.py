@@ -89,6 +89,76 @@ BUCKET_WEIGHTS = {
 DAILY_TAVILY_CAP = 50     # panel extract (up to 35+ active sources)
 DAILY_CLAUDE_CAP = 200    # batched panel extraction (~40) + web search research (~40) + buffer
 
+# ── Tipster-accuracy feedback (opt-in: STRIDE_ACCURACY_WEIGHTS=true) ──
+# source_accuracy_tracker records every panel tip's outcome; these weights
+# feed the measured hit rates back into panel quality multipliers. Leak-free
+# by construction: only settled tips from strictly past race days are read.
+# Sources below the sample floor stay neutral; the ratio to the panel-wide
+# baseline is shrunk (pseudo-count prior) and hard-bounded so no tipster can
+# be silenced or dominate on a lucky streak. Default off: multipliers are {}
+# and scoring is byte-identical to before.
+ACCURACY_MIN_TIPS = 20
+ACCURACY_LOOKBACK_DAYS = 120
+ACCURACY_SHRINK_TIPS = 20
+ACCURACY_CLAMP = (0.75, 1.25)
+
+
+def accuracy_multiplier(wins, tips, baseline_rate,
+                        min_tips=ACCURACY_MIN_TIPS,
+                        shrink=ACCURACY_SHRINK_TIPS,
+                        clamp=ACCURACY_CLAMP):
+    """Bounded, shrunk hit-rate ratio vs the panel baseline (1.0 = neutral)."""
+    if tips < min_tips or baseline_rate <= 0:
+        return 1.0
+    shrunk_rate = (wins + shrink * baseline_rate) / (tips + shrink)
+    return round(max(clamp[0], min(clamp[1], shrunk_rate / baseline_rate)), 3)
+
+
+def load_accuracy_multipliers(lookback_days=ACCURACY_LOOKBACK_DAYS):
+    """
+    Per-tipster quality multipliers from the source_accuracy table.
+    Opens its own read-only connection (the panel fetch runs before the
+    agent's main connection exists). Returns {} unless
+    STRIDE_ACCURACY_WEIGHTS=true and enough settled history exists.
+    """
+    if os.environ.get("STRIDE_ACCURACY_WEIGHTS", "false").strip().lower() not in ("true", "1", "yes"):
+        return {}
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT tipster_id,
+                   COUNT(*) FILTER (WHERE was_winner) AS wins,
+                   COUNT(*) AS tips
+            FROM source_accuracy
+            WHERE tipster_id IS NOT NULL
+              AND race_date >= (CURRENT_DATE - INTERVAL '%s days')
+            GROUP BY tipster_id
+        """ % int(lookback_days))
+        rows = cur.fetchall()
+        cur.close()
+        total_wins = sum(int(r[1] or 0) for r in rows)
+        total_tips = sum(int(r[2] or 0) for r in rows)
+        if total_tips < ACCURACY_MIN_TIPS:
+            print(f"[ACCURACY] Only {total_tips} settled tips in {lookback_days}d — neutral weights", file=sys.stderr)
+            return {}
+        baseline = total_wins / total_tips
+        mults = {r[0]: accuracy_multiplier(int(r[1] or 0), int(r[2] or 0), baseline) for r in rows}
+        active = {k: v for k, v in mults.items() if v != 1.0}
+        print(f"[ACCURACY] Weights active for {len(active)}/{len(mults)} tipsters "
+              f"(baseline hit {baseline:.3f}, {total_tips} tips/{lookback_days}d)", file=sys.stderr)
+        return mults
+    except Exception as e:
+        print(f"[ACCURACY] Unavailable ({e}) — neutral weights", file=sys.stderr)
+        return {}
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
 
 def _usage_path(date_str: str) -> Path:
     return INTELLIGENCE_DIR / f".consensus_api_usage_{date_str}.json"
@@ -190,10 +260,15 @@ def fetch_panel_pages(
     date_str: str,
     usage: dict,
     dry_run: bool = False,
+    accuracy_multipliers: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Fetch all active+verified panel members via Tavily Extract.
     Returns (page_results, panel_log_rows).
+
+    accuracy_multipliers: optional {tipster_id: multiplier} from
+    load_accuracy_multipliers(); composes with the proofed-results boost
+    into each page's quality_multiplier. None/{} = neutral (default).
     """
     active_sources = [
         s for s in panel.get("sources", [])
@@ -254,6 +329,9 @@ def fetch_panel_pages(
                 )
                 # Proofed sources (publicly tracked P/L) get 15% quality boost
                 q_mult = 1.15 if source.get("proofed_results") else 1.0
+                # Measured-accuracy feedback (STRIDE_ACCURACY_WEIGHTS=true)
+                if accuracy_multipliers:
+                    q_mult = round(q_mult * accuracy_multipliers.get(sid, 1.0), 3)
 
                 results.append({
                     "content": content,
@@ -1227,8 +1305,10 @@ def run_consensus_agent(
     ])
     print(f"[PANEL] {tipsters_polled} active+verified tipsters in panel", file=sys.stderr)
 
+    accuracy_multipliers = load_accuracy_multipliers()
     panel_pages, panel_log_rows = fetch_panel_pages(
-        tavily_client, panel, date_str, usage, dry_run=dry_run
+        tavily_client, panel, date_str, usage, dry_run=dry_run,
+        accuracy_multipliers=accuracy_multipliers,
     )
 
     results_by_race = {}

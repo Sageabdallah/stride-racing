@@ -1,0 +1,52 @@
+# Retrains the v2 ensemble (server/python/retrain_v2.py) on a GitHub-hosted
+# runner with direct access to the Neon database, printing the walk-forward
+# CV and Phase-2 ablation report in the run log — this is where the Phase-5
+# relative-market features get their first real evidence read.
+#
+# STAGED, NEVER PROMOTED: the artifact is written to a staging filename and
+# uploaded; the live models/racing_ensemble_v2.pkl on the production box is
+# untouched until a human inspects the CV report and installs the artifact —
+# the same discipline learn_from_results_v2 follows.
+#
+# Requires the repository secret DATABASE_URL.
+
+name: retrain-model
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet numpy scipy pandas scikit-learn psycopg2-binary requests xgboost lightgbm catboost
+
+      - name: Retrain with walk-forward CV + ablation report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          cd server/python
+          python retrain_v2.py --output-path models/staging_ensemble_v2.pkl
+
+      - name: Upload staged ensemble artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staged-ensemble-v2
+          path: server/python/models/staging_ensemble_v2.pkl

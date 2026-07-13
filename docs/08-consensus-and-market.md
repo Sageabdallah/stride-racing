@@ -121,12 +121,23 @@ intelligence files → `reasoning_alignment ∈ {CONFIRMED, CONTRADICTED, UNVERI
 Outputs: `intelligence/consensus_<date>.json` (keyed `"<track>_R<n>"`), plus DB rows in
 `consensus_mentions`, `consensus_scores`, `tipster_panel_log`.
 
-### 2.4 Source accuracy tracking — an open loop
+### 2.4 Source accuracy tracking — feedback loop (opt-in)
 
 `source_accuracy_tracker.py` joins each day's mentions against `race_results_history`
-and stores per-tip hit/miss rows in `source_accuracy`. **Nothing reads that table back
-into the weights yet** — tipster hit-rates are recorded for analysis, but
-`BUCKET_WEIGHTS` and panel weights are static. This is a known open feedback loop.
+and stores per-tip hit/miss rows in `source_accuracy`. With
+**`STRIDE_ACCURACY_WEIGHTS=true`**, the agent now reads that table back:
+`load_accuracy_multipliers()` computes a per-tipster multiplier from the last
+120 days of **settled** tips (leak-free — strictly past race days only) and
+composes it into each panel page's `quality_multiplier`, which flows into the
+weighted consensus sum and the stored mentions.
+
+The multiplier is deliberately conservative: sources with fewer than 20
+settled tips stay neutral (1.0); the hit-rate ratio vs the panel-wide
+baseline is shrunk with a 20-pseudo-tip prior; and the result is hard-bounded
+to **[0.75, 1.25]** so no tipster can be silenced or dominate off a streak.
+Default off: multipliers are `{}` and scoring is byte-identical to before.
+`BUCKET_WEIGHTS` (what *kind* of tipster) remain static and multiply
+independently.
 
 ---
 
@@ -280,6 +291,7 @@ From `.env.example` and code:
 | `CONSENSUS_CONFIRM_THRESHOLD` | 45 | **unused** — present in `.env.example` only |
 | `TAVILY_API_KEY` / `ANTHROPIC_API_KEY` / `PERPLEXITY_API_KEY` | — | consensus agent |
 | `GROQ_API_KEY`, `LLM_PROVIDER`, `LLM_ENABLED`, `LLM_MODEL` | groq / true | model-side LLM |
+| `STRIDE_ACCURACY_WEIGHTS` | false | feed measured tipster hit-rates back into panel weights (§2.4) |
 
 Hard-coded: `STRIDE_THRESHOLD = 65`, `MIN_MODEL_SCORE_FOR_BET = 8.0`,
 `MIN_CONFIRM_CONVERGENCE_SCORE = 55.0` (blender); Tavily/Claude daily caps 50/200;
@@ -301,3 +313,5 @@ fuzzy-match 0.85 (agent); `MAX_ADJUSTMENT = 0.08` (pre-MC LLM).
 - The `crowd_score ≥ 100` unanimous-crowd bet rule was added off a single observed
   race (inline comment) and is flagged for a 4-week review.
 - `betfair_odds_snapshots.back_price` holds Racing-API medians, not Betfair prices.
+- `source_accuracy` was originally write-only; the opt-in feedback loop (§2.4)
+  now reads it when `STRIDE_ACCURACY_WEIGHTS=true`.
