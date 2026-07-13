@@ -144,6 +144,11 @@ half the battle:
 - **`phase2_sectional_columns.sql`**: adds the 12 biomechanical columns to
   `sectional_times` (`lambda_decay`, `svi`, `rsi`, `z_200m…z_800m`,
   `trip_cost_seconds`, `variant_adjusted_*`) plus lookup indexes.
+- **`final_prob_audit.sql`**: adds `prediction_audit.final_win_prob` — the
+  published end-of-pipeline win % per runner, written by
+  `run_tips_pipeline.store_final_probs_in_audit` (the code also self-heals
+  the column at write time). `predicted_win_prob` remains the MC-stage value
+  logged by mc_api.
 
 ### Created inline by Python
 

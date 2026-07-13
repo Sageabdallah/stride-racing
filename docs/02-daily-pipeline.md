@@ -83,9 +83,11 @@ Then, **per race** (~14 steps):
 `selection_contract` totals, convergence summary.
 
 **Persistence:** ~107-column rows into `selections` (bet-worthy picks only; prior
-rows deactivated), convergence rows into `convergence_output`, and the full JSON to
-`racecards/tips_<date>.json` — written atomically (tmp file + rename), with
-track-filtered runs merging into the canonical file after a timestamped backup.
+rows deactivated), convergence rows into `convergence_output`, the published
+final win % for every runner into `prediction_audit.final_win_prob`, and the
+full JSON to `racecards/tips_<date>.json` — written atomically (tmp file +
+rename), with track-filtered runs merging into the canonical file after a
+timestamped backup.
 
 ---
 

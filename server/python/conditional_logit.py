@@ -67,10 +67,11 @@ def _softmax(u):
 class ConditionalLogitBlend:
     """Two-parameter race-conditional blend of model and market probabilities."""
 
-    def __init__(self, model_path=None):
+    def __init__(self, model_path=None, stage="mc"):
         self.model_path = Path(model_path) if model_path else DEFAULT_MODEL_PATH
         self.alpha = None  # weight on ln(model prob)
         self.beta = None   # weight on ln(market prob)
+        self.stage = stage  # which pipeline quantity the fit consumed ('mc'|'final')
         self.meta = {}
 
     @property
@@ -174,8 +175,8 @@ class ConditionalLogitBlend:
     # --------------------------------------------------------- persistence
     def save(self):
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"alpha": self.alpha, "beta": self.beta, "meta": self.meta,
-                   "version": 1}
+        payload = {"alpha": self.alpha, "beta": self.beta, "stage": self.stage,
+                   "meta": self.meta, "version": 2}
         with open(self.model_path, "w") as f:
             json.dump(payload, f, indent=2)
         print(f"[CL] Saved to {self.model_path}")
@@ -186,6 +187,9 @@ class ConditionalLogitBlend:
                 payload = json.load(f)
             self.alpha = float(payload["alpha"])
             self.beta = float(payload["beta"])
+            # version-1 artifacts predate the stage tag; they were fitted on
+            # training_view_v2 predictions, i.e. the MC stage.
+            self.stage = payload.get("stage", "mc")
             self.meta = payload.get("meta", {})
             return True
         except Exception:
@@ -204,6 +208,10 @@ def _load_db_url():
     return ""
 
 
+# MC-stage inputs: training_view_v2.predicted_win_prob is populated (for
+# full fields) from prediction_audit, which mc_api logs BEFORE the wrapper's
+# isotonic/ML-blend/market-anchor stages. An artifact fitted here must be
+# served at the same stage (run_tips_pipeline applies it on entry).
 _FIT_SQL = """
     SELECT race_date::text AS race_date, track, race_number::int AS race_number,
            predicted_win_prob::float8 AS predicted_win_prob,
@@ -216,19 +224,41 @@ _FIT_SQL = """
     ORDER BY race_date, track, race_number
 """
 
+# Final-stage inputs: prediction_audit.final_win_prob is the published
+# end-of-pipeline probability, recorded by run_tips_pipeline
+# (store_final_probs_in_audit) from the day the column ships. No pipeline
+# hook consumes a final-stage artifact yet — analysis only.
+_FIT_SQL_FINAL = """
+    SELECT race_date::text AS race_date, track, race_number::int AS race_number,
+           final_win_prob::float8 AS predicted_win_prob,
+           market_odds::float8 AS odds,
+           (actual_position = 1)::int AS is_winner
+    FROM prediction_audit
+    WHERE final_win_prob IS NOT NULL
+      AND actual_position IS NOT NULL
+      AND market_odds > 1
+    ORDER BY race_date, track, race_number
+"""
 
-def _fetch_rows_pg(db_url):
+STAGE_SQL = {"mc": _FIT_SQL, "final": _FIT_SQL_FINAL}
+STAGE_MODEL_PATHS = {
+    "mc": DEFAULT_MODEL_PATH,
+    "final": SCRIPT_DIR / "models" / "conditional_logit_final.json",
+}
+
+
+def _fetch_rows_pg(db_url, sql=_FIT_SQL):
     import psycopg2
     conn = psycopg2.connect(db_url, connect_timeout=10)
     cur = conn.cursor()
-    cur.execute(_FIT_SQL)
+    cur.execute(sql)
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return rows
 
 
-def _fetch_rows_neon_http(db_url, page_size=50000):
+def _fetch_rows_neon_http(db_url, sql=_FIT_SQL, page_size=50000):
     """
     Fallback for networks where Postgres TCP (5432) is blocked but HTTPS is
     open: Neon's SQL-over-HTTPS endpoint (the serverless driver protocol) —
@@ -240,7 +270,7 @@ def _fetch_rows_neon_http(db_url, page_size=50000):
     host = db_url.split("@", 1)[1].split("/", 1)[0].split("?", 1)[0]
     rows, offset = [], 0
     while True:
-        page_sql = f"{_FIT_SQL} LIMIT {int(page_size)} OFFSET {int(offset)}"
+        page_sql = f"{sql} LIMIT {int(page_size)} OFFSET {int(offset)}"
         resp = requests.post(
             f"https://{host}/sql",
             headers={"Neon-Connection-String": db_url,
@@ -302,34 +332,44 @@ def _rows_to_races(rows, min_field=4):
     return races
 
 
-def fit_from_database(holdout_frac=0.2, min_field=4):
+def fit_from_database(holdout_frac=0.2, min_field=4, stage="mc"):
     """
-    Fit alpha/beta from stored predictions in training_view_v2:
-    the model's pre-race predicted_win_prob vs the SP-implied market
-    probability, grouped per race, ordered by race_date.
+    Fit alpha/beta from stored predictions vs the market-implied probability,
+    grouped per race, ordered by race_date.
+
+    stage='mc'    — training_view_v2.predicted_win_prob (MC-stage; the
+                    artifact the STRIDE_CL_BLEND pipeline hook consumes)
+    stage='final' — prediction_audit.final_win_prob (published end-of-
+                    pipeline probability; analysis only, no hook yet)
 
     Uses a direct Postgres connection when possible, falling back to Neon's
     SQL-over-HTTPS endpoint when port 5432 is unreachable (e.g. sandboxed /
     proxy-only networks).
     """
+    if stage not in STAGE_SQL:
+        raise ValueError(f"Unknown stage {stage!r} — expected one of {sorted(STAGE_SQL)}")
+
     db_url = _load_db_url()
     if not db_url:
         print("[CL] DATABASE_URL not set — cannot fit from database", file=sys.stderr)
         return None
 
+    sql = STAGE_SQL[stage]
     try:
-        rows = _fetch_rows_pg(db_url)
+        rows = _fetch_rows_pg(db_url, sql)
     except Exception as pg_err:
         print(f"[CL] Direct Postgres connection failed ({type(pg_err).__name__}) — "
               f"trying Neon SQL-over-HTTPS", file=sys.stderr)
-        rows = _fetch_rows_neon_http(db_url)
+        rows = _fetch_rows_neon_http(db_url, sql)
 
     races = _rows_to_races(rows, min_field=min_field)
 
-    print(f"[CL] Usable races: {len(races)}")
-    blend = ConditionalLogitBlend()
+    print(f"[CL] Usable races ({stage} stage): {len(races)}")
+    blend = ConditionalLogitBlend(model_path=STAGE_MODEL_PATHS[stage], stage=stage)
     report = blend.fit(races, holdout_frac=holdout_frac)
     blend.save()
+    if stage == "final":
+        print("[CL] NOTE: no pipeline hook consumes a final-stage artifact yet — analysis only.")
     return report
 
 
@@ -407,7 +447,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Conditional-logit blend fitter")
     parser.add_argument("--fit", action="store_true",
-                        help="Fit alpha/beta from training_view_v2 and save the model")
+                        help="Fit alpha/beta from the database and save the model")
+    parser.add_argument("--stage", choices=["mc", "final"], default="mc",
+                        help="Which stored probability to fit on: 'mc' = "
+                             "training_view_v2 predictions (consumed by the "
+                             "STRIDE_CL_BLEND hook), 'final' = "
+                             "prediction_audit.final_win_prob (analysis only)")
     parser.add_argument("--csv", metavar="PATH",
                         help="Fit from a CSV export instead of a live DB "
                              "(columns: race_date,track,race_number,"
@@ -419,6 +464,6 @@ if __name__ == "__main__":
     if args.csv:
         fit_from_csv(args.csv, holdout_frac=args.holdout)
     elif args.fit:
-        fit_from_database(holdout_frac=args.holdout)
+        fit_from_database(holdout_frac=args.holdout, stage=args.stage)
     else:
         _self_test()

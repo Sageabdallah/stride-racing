@@ -33,11 +33,15 @@ Per runner, in order:
    **`modelEdge = winPercentage − true_market`** (edge is computed from the
    *calibrated* probability, so a flat MC run can't fabricate edge).
 
-   *Opt-in alternative:* with `STRIDE_CL_BLEND=true` and a fitted
-   `models/conditional_logit.json`, this linear anchor is replaced by a
-   Benter-style race-conditional softmax over `α·ln(model) + β·ln(market)`
-   (`conditional_logit.py`). Edge semantics and every downstream gate are
-   unchanged; default behaviour without the flag/model is byte-identical.
+   *Opt-in conditional-logit calibration:* with `STRIDE_CL_BLEND=true` and a
+   fitted `models/conditional_logit.json`, a race-conditional softmax over
+   `α·ln(model) + β·ln(market)` (`conditional_logit.py`) is applied **on
+   entry to `calibrate_and_score`, to the incoming MC probability** — the
+   same stage the artifact was fitted on (`prediction_audit` values) — and
+   it replaces step 1's isotonic correction when active. Steps 2–3 (ML blend
+   and this market anchor) then run unchanged, so prices stay
+   market-tethered. Artifacts carry a stage tag; a mismatched artifact is
+   refused. Default behaviour without the flag/model is byte-identical.
    See [Hit-rate research](12-hit-rate-research.md).
 4. **Context multipliers.** Fitness readiness and track-bias points each map
    0–100 → ×0.95–1.05; jockey momentum ×0.85–1.20.
@@ -181,11 +185,18 @@ evolves — importing the live functions so logic can't drift.
 ### Per race (see `examples/sample_race.json` for a real instance)
 
 `track`, `race_number`, `race_name`, `distance`, `going`, `race_class`,
-`field_size`, `top_picks[]` (ranked pick objects), `raw_model_leader`, `bet_pick`
+`field_size`, `predictability` (race-level selectivity block — score,
+category `highly_predictable/normal/chaotic`, confidence modifier 0.5–1.2,
+key factors; computed from pre-race market/card facts only),
+`top_picks[]` (ranked pick objects), `raw_model_leader`, `bet_pick`
 (or null), `coverage_pick`, `primary_pick`, `bet_status`, `bet_status_reason`, and
 `full_field[]` — every runner with win/place %, raw model %, edge, selection score,
 form flags, `is_tipped`/`tip_rank`, and either `ai_insight` (tipped) or
 `brief_assessment` (not tipped).
+
+Best-bets ordering: by selection score (historical behaviour); with
+`STRIDE_PREDICTABILITY_GATE=true` the score is weighted by the race's
+predictability modifier — ordering only, never BET/NO_BET decisions.
 
 ### Pick object (the load-bearing fields)
 
@@ -206,7 +217,9 @@ recalibration deltas, sectional MC fields, track-bias breakdown, pace scenario J
 AI reasoning JSON, luckless JSON, and all consensus/convergence fields. Previous
 selections for the same date+track are soft-deactivated (`is_active=false`) first.
 Every runner's convergence row also lands in `convergence_output` for shadow-P&L
-evaluation.
+evaluation, and every runner's published final win % is recorded into
+`prediction_audit.final_win_prob` (`store_final_probs_in_audit`) — the
+input for future final-stage calibration fits.
 
 ---
 

@@ -78,7 +78,7 @@ Sources: [Bolton & Chapman 1986](https://pubsonline.informs.org/doi/abs/10.1287/
 | Positional market features | `market_odds`, steam/drift in the contract; `odds_rank`/`fair_implied_prob` computed in mc_api's adjustment layer but **absent from the trained contract** | Ensemble blind to the favourite ladder |
 | Learning-to-rank | Not present | Roadmap |
 | Sectional-adjusted ratings | Extensive (Phase 2 primitives, five quant engines) | Already strong |
-| Race selectivity (bet where the top pick is most reliable) | `predictability_meta_model.py` exists but is **not wired** into tips output | Roadmap — cheap hit-rate lever |
+| Race selectivity (bet where the top pick is most reliable) | **Wired (§4c):** predictability attached to every race entry; best-bets ordering behind `STRIDE_PREDICTABILITY_GATE` | Done — validate with shadow tracking |
 
 ## 4. Implemented in this change
 
@@ -120,16 +120,45 @@ python conditional_logit.py --fit      # fit α, β from training_view_v2;
 STRIDE_CL_BLEND=true                   # enable in run_tips_pipeline
 ```
 
-The pipeline hook replaces only the linear market-anchor arithmetic; edge
-remains `calibrated − market`, and every downstream gate (confidence ladder,
-bet contract, convergence) is untouched. With the flag off — or on but with
-no fitted model — behaviour is verified **byte-identical** to before.
+**Where the hook applies (train/serve consistency):** the fit consumes
+`training_view_v2.predicted_win_prob`, which for full fields comes from
+`prediction_audit` — logged by mc_api **before** the wrapper's isotonic /
+ML-blend / market-anchor stages. The pipeline hook therefore applies the
+transform at exactly that point: on entry to `calibrate_and_score`, to the
+incoming MC `winPercentage` (replacing the early isotonic step when active).
+The ML blend and the market anchor then run unchanged — so even a β=0
+artifact keeps prices market-tethered (verified: MC 34.0% → CL 46.0% →
+anchored 41.1% on the test fixture). Artifacts carry a `stage` tag and the
+MC-stage hook refuses a mismatched artifact. With the flag off — or on but
+with no fitted model — behaviour is verified **byte-identical** to before.
 
 Synthetic self-test result (1,200 races, market sharper than model, holdout
 400 races): model-only top-pick hit 34.5%, market-only 40.7%, **blend 42.0%**
 with lower log-loss than both — the Benter phenomenon reproduced end-to-end.
 The `--fit` report gives you the same three-way comparison on *your* data
 before you flip the flag.
+
+### 4c. Implemented in the follow-up pass (selectivity, instrumentation, CI)
+
+- **Race-predictability selectivity** — `predictability_meta_model` is now
+  wired into the tips output: every race entry carries a `predictability`
+  block (score, category, confidence modifier, key factors), computed from
+  **pre-race information only** (current market and card facts — leak-free
+  by construction; heuristic fallback is deterministic without a fitted
+  meta-model). With `STRIDE_PREDICTABILITY_GATE=true`, best-bets ordering
+  weights the selection score by the race's confidence modifier (0.5–1.2)
+  so best bets prefer races where the top pick is most likely to be right.
+  Ordering only — BET/NO_BET decisions, edges and stakes are never touched;
+  default off preserves the historical order exactly.
+- **Final-probability instrumentation** — `store_final_probs_in_audit`
+  records the published end-of-pipeline win % for *every* runner into
+  `prediction_audit.final_win_prob` after each card (self-healing column;
+  `migrations/final_prob_audit.sql`). This is the input the future
+  final-stage blend fit needs (`conditional_logit.py --fit --stage final`,
+  artifact kept separate and refused by the MC-stage hook).
+- **CI** — `.github/workflows/ci.yml` compiles the whole repository and runs
+  the four module self-tests on every push: the regression net that would
+  have caught the silent stacking breakage years earlier.
 
 ### Verification performed
 
@@ -160,28 +189,29 @@ Ordered by expected hit-rate return per unit of risk:
    **First real fit (2026-07-13, 1,227 races, 245-race temporal holdout):**
    model-only top-pick hit 42.9% / log-loss 1.7039; market-only (SP
    favourite) 40.4% / 1.7499; fitted blend α=1.296, β=0.000 → hit 42.9% /
-   log-loss 1.6866. Two conclusions: (a) the live pipeline's top pick beats
-   the favourite baseline in its own operating window, and the stored
-   probabilities are too flat at the top (α>1 sharpening improves log-loss
-   ~1% — consistent with the README calibration table's under-predicted
-   0.20–0.30 bin; refitting `isotonic_calibrator.pkl` captures this safely);
-   (b) **β=0 is a train/serve artifact, so do not enable `STRIDE_CL_BLEND`
-   from this fit**: the view's `predicted_win_prob` is the *final*,
-   already-market-anchored output, so the market carries no incremental
-   information *conditional on it* — while at inference the blend applies to
-   the raw pre-anchor probability, meaning this artifact would remove the
-   market tether entirely. Prerequisite before the next fit: persist the
-   full-field raw `rawModelProb` (pre market anchor) alongside the final
-   probability in `prediction_audit`, accumulate a few weeks, refit.
+   log-loss 1.6866. Interpretation: (a) the fitted quantity is the stored
+   **MC-stage** probability (what mc_api logs to `prediction_audit`) — in
+   the live window its top pick beats the SP favourite 42.9% vs 40.4%, and
+   it is too flat at the top: the α≈1.3 race-conditional sharpening improves
+   log-loss ~1% with the top pick unchanged (consistent with the README
+   calibration table's under-predicted 0.20–0.30 bin). (b) With the hook
+   now applied at the matching MC stage (see §4b), **this artifact is safe
+   to enable**: it acts as a race-softmax sharpener of the MC probability
+   and the downstream market anchor is untouched. Re-run the fit
+   (`--stage mc`) and A/B a card before switching it on in production.
+   (c) β=0 says only that the SP market adds nothing *conditional on the
+   MC-stage probability, which already embeds market information* — the
+   true independent market weight needs final-stage inputs, which the
+   pipeline now records (`prediction_audit.final_win_prob`, §4c); once a
+   few weeks accumulate, fit with `--stage final` for that estimate.
 2. **Retrain with Phase-5 features** — the next `retrain_v2.py` run picks
    them up; check the printed feature importances and walk-forward AUC, and
    extend `run_ablation` to toggle the Phase-5 trio if a clean read is wanted.
-3. **Race-selectivity gate ("bet the reliable races")** — wire the existing
-   `predictability_meta_model` into the tips summary so best-bets prefer
-   races classified highly predictable (dominant favourite strength, low odds
-   concentration entropy, small clean fields). Restricting selections to the
-   most predictable third of races is the cheapest large hit-rate lever and
-   needs no new modelling.
+3. **Race-selectivity gate ("bet the reliable races")** — **done, see §4c**
+   (fields always on, ordering influence behind `STRIDE_PREDICTABILITY_GATE`).
+   Remaining: once a few weeks of results accumulate, use shadow tracking to
+   measure best-bet hit rate with the gate on vs off, and consider fitting
+   the meta-model itself (`fav_won` target) to replace the heuristic.
 4. **LambdaRank ensemble member** — add an `LGBMRanker`
    (`objective=lambdarank`, grouped by race, GroupKFold walk-forward) as a
    fourth model whose score enters the ensemble as a within-race ranking

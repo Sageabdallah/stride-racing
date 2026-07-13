@@ -566,21 +566,54 @@ def calibrate_and_score(horses, overround, race_class=""):
     except Exception:
         pass
 
-    # Optional Benter-style conditional-logit blend (STRIDE_CL_BLEND=true).
-    # Requires a fitted models/conditional_logit.json; otherwise (and by
-    # default) the linear odds-band market anchor below runs unchanged.
+    # Optional conditional-logit calibration (STRIDE_CL_BLEND=true).
+    # The fit consumes prediction_audit probabilities, which mc_api logs at
+    # exactly this stage (pre-isotonic, pre-ML-blend, pre-market-anchor), so
+    # the transform is applied HERE to the incoming MC winPercentage — train
+    # and serve stay on the same quantity (docs/12-hit-rate-research.md §4b).
+    # It replaces the early isotonic stage when active; the downstream ML
+    # blend and market anchor run unchanged, so prices remain market-
+    # tethered even for a beta=0 fit. Default: off, byte-identical.
     _cl_blend = None
     if os.environ.get("STRIDE_CL_BLEND", "false").strip().lower() in ("true", "1", "yes"):
         try:
             from conditional_logit import ConditionalLogitBlend
             _cl = ConditionalLogitBlend()
-            if _cl.load():
+            if _cl.load() and getattr(_cl, "stage", "mc") == "mc":
                 _cl_blend = _cl
-                print(f"    [CL_BLEND] Active (alpha={_cl.alpha:.2f} model, beta={_cl.beta:.2f} market)", file=sys.stderr)
+                print(f"    [CL_BLEND] Active at MC stage (alpha={_cl.alpha:.2f} model, beta={_cl.beta:.2f} market)", file=sys.stderr)
+            elif _cl.is_fitted:
+                print(f"    [CL_BLEND] Fitted artifact is stage='{getattr(_cl, 'stage', '?')}' — MC-stage hook refuses it", file=sys.stderr)
             else:
-                print("    [CL_BLEND] Enabled but no fitted models/conditional_logit.json — using default blend", file=sys.stderr)
+                print("    [CL_BLEND] Enabled but no fitted models/conditional_logit.json — using default stages", file=sys.stderr)
         except Exception as _cl_err:
-            print(f"    [CL_BLEND] Unavailable ({_cl_err}) — using default blend", file=sys.stderr)
+            print(f"    [CL_BLEND] Unavailable ({_cl_err}) — using default stages", file=sys.stderr)
+
+    if _cl_blend is not None:
+        _quoted = []
+        for h in horses:
+            try:
+                _o = float(h.get("marketOdds") or 0)
+            except (TypeError, ValueError):
+                _o = 0.0
+            if _o > 1 and h.get("winPercentage", 0) > 0:
+                _quoted.append((h, _o))
+        if len(_quoted) >= 2:
+            try:
+                _imp = [1.0 / o for _, o in _quoted]
+                _imp_sum = sum(_imp)
+                _blended = _cl_blend.transform_race(
+                    [h["winPercentage"] / 100.0 for h, _ in _quoted],
+                    [x / _imp_sum for x in _imp],
+                )
+                for (h, _o), _p in zip(_quoted, _blended):
+                    h["_mcWinBeforeCl"] = h["winPercentage"]
+                    h["winPercentage"] = round(float(_p) * 100.0, 2)
+                    h["_cl_blended"] = True
+                # CL supersedes the early isotonic correction — never both.
+                _calibrator = None
+            except Exception as _cl_terr:
+                print(f"    [CL_BLEND] transform failed (non-fatal): {_cl_terr}", file=sys.stderr)
 
     # Preserve the upstream MC engine's own ranking so the wrapper can refine it
     # rather than accidentally replacing it with a market-following score.
@@ -653,25 +686,6 @@ def calibrate_and_score(horses, overround, race_class=""):
             h["trueMarketProb"] = 0
             h["fairOdds"] = None
             h["modelEdge"] = 0
-
-    # Opt-in fitted replacement for the linear market anchor above: a
-    # race-conditional softmax over alpha·ln(model) + beta·ln(market)
-    # (Benter two-stage). Edge stays calibrated − market. Default: off.
-    if _cl_blend is not None:
-        _quoted = [h for h in horses
-                   if h.get("trueMarketProb", 0) > 0 and h.get("rawModelProb", 0) > 0]
-        if len(_quoted) >= 2:
-            try:
-                _blended = _cl_blend.transform_race(
-                    [h["rawModelProb"] / 100.0 for h in _quoted],
-                    [h["trueMarketProb"] / 100.0 for h in _quoted],
-                )
-                for h, _p in zip(_quoted, _blended):
-                    h["winPercentage"] = round(float(_p) * 100.0, 2)
-                    h["modelEdge"] = round(h["winPercentage"] - h["trueMarketProb"], 2)
-                    h["_cl_blended"] = True
-            except Exception as _cl_terr:
-                print(f"    [CL_BLEND] transform failed (non-fatal): {_cl_terr}", file=sys.stderr)
 
     raw_probs = [h.get("rawModelProb", 0) for h in horses]
     mc_spread = (max(raw_probs) - min(raw_probs)) if len(raw_probs) > 1 else 0
@@ -948,6 +962,47 @@ def compute_confidence(h, pace_clarity=None):
             result = "medium"
 
     return result
+
+
+def compute_race_predictability(runners, race_class, distance_m, going):
+    """
+    Race-level predictability assessment (selectivity signal, docs/12 §5).
+    Uses ONLY pre-race information — the current market and card facts, no
+    historical lookups — so it is leak-free by construction. Deterministic
+    heuristic when no fitted meta-model exists. Returns the predictability
+    dict ({predictability_score, category, confidence_modifier, ...}) or
+    None when unavailable.
+    """
+    try:
+        from predictability_meta_model import get_predictability_model
+        odds_list = [o for o in (extract_odds(r) for r in runners) if o and o > 1]
+        if len(odds_list) < 2:
+            return None
+        race_info = {
+            "n_runners": len(runners),
+            "race_class": race_class or "",
+            "distance_m": int(distance_m or 1400),
+            "going": going or "",
+            "favourite_odds": min(odds_list),
+            "odds_list": odds_list,
+        }
+        return get_predictability_model().predict_predictability(race_info)
+    except Exception:
+        return None
+
+
+def best_bet_sort_score(pick):
+    """
+    Ordering key for best_bets. Default: the historical pure selection-score
+    order. With STRIDE_PREDICTABILITY_GATE=true, the score is weighted by
+    the race's predictability confidence modifier (0.5–1.2) so best bets
+    prefer races where the top pick is most likely to be right. Bet/NO_BET
+    decisions, edges and stakes are never affected — ordering only.
+    """
+    score = pick.get("selection_score", 0) or 0
+    if os.environ.get("STRIDE_PREDICTABILITY_GATE", "false").strip().lower() in ("true", "1", "yes"):
+        score = score * (pick.get("_predictability_mod", 1.0) or 1.0)
+    return score
 
 
 def compute_staking(h):
@@ -1511,6 +1566,49 @@ def store_selections_in_db(race_tips, date_str):
     print(f"  [DB] Stored {inserted} selections for {date_str}", file=sys.stderr)
 
 
+def store_final_probs_in_audit(race_tips, date_str):
+    """
+    Persist the wrapper-final win probability for EVERY runner into
+    prediction_audit.final_win_prob. mc_api already logs the MC-stage
+    probability at simulation time; this adds the published end-of-pipeline
+    number so future conditional-logit fits can use genuinely final inputs
+    (docs/12-hit-rate-research.md §5 item 1). Non-fatal and idempotent —
+    a plain UPDATE keyed on the audit's unique (date, track, race, horse).
+    """
+    rows = []
+    for race in race_tips:
+        track = race.get("track")
+        race_num = race.get("race_number")
+        for f in race.get("full_field", []) or []:
+            win_pct = f.get("win_pct")
+            horse = f.get("horse")
+            if track and race_num and horse and win_pct is not None:
+                rows.append((float(win_pct), date_str, str(track), int(race_num), str(horse)))
+    if not rows:
+        return
+    conn = None
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE prediction_audit ADD COLUMN IF NOT EXISTS final_win_prob NUMERIC")
+        cur.executemany("""
+            UPDATE prediction_audit SET final_win_prob = %s
+            WHERE race_date = %s AND LOWER(track) = LOWER(%s)
+              AND race_number = %s AND LOWER(horse_name) = LOWER(%s)
+        """, rows)
+        conn.commit()
+        print(f"  [DB] final_win_prob recorded for {len(rows)} runners", file=sys.stderr)
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"  [DB] final_win_prob update failed (non-fatal): {e}", file=sys.stderr)
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
 def load_racecard(date_str):
     """Load racecard JSON for the given date."""
     racecard_path = RACECARDS_DIR / f"racecard_{date_str}.json"
@@ -1975,7 +2073,7 @@ def merge_tips_into_canonical(new_output, canonical_path, track_filter):
 
     ranked = sorted(
         [p for p in all_picks if p.get("rank") == 1 and p.get("edge_pct", 0) > 0],
-        key=lambda x: x.get("selection_score", 0),
+        key=best_bet_sort_score,
         reverse=True,
     )
     best_bets = [p for p in ranked if p.get("confidence") == "high"][:3]
@@ -2734,6 +2832,8 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                             _ff_entry["commercial_mentions"] = _ff_cons.get("commercial_mentions", 0)
                             _ff_entry["total_mentions"] = _ff_cons.get("total_mentions", 0)
 
+            _predictability = compute_race_predictability(runners, race_class, distance_m, going)
+
             all_race_tips.append({
                 "track": track,
                 "race_number": race_num,
@@ -2742,6 +2842,15 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 "going": going,
                 "race_class": race_class,
                 "field_size": field_size,
+                "predictability": (
+                    {
+                        "score": _predictability.get("predictability_score"),
+                        "category": _predictability.get("category"),
+                        "confidence_modifier": _predictability.get("confidence_modifier"),
+                        "key_factors": _predictability.get("key_factors", []),
+                    }
+                    if _predictability else None
+                ),
                 "top_picks": picks,
                 "raw_model_leader": raw_model_leader,
                 "bet_pick": bet_pick,
@@ -2774,19 +2883,25 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
 
     all_picks = []
     for rt in all_race_tips:
+        _rp = rt.get("predictability") or {}
         for p in rt["top_picks"]:
-            all_picks.append({**p, "track": rt["track"], "race_number": rt["race_number"]})
+            all_picks.append({
+                **p, "track": rt["track"], "race_number": rt["race_number"],
+                "race_predictability": _rp.get("score"),
+                "race_predictability_category": _rp.get("category"),
+                "_predictability_mod": _rp.get("confidence_modifier", 1.0) or 1.0,
+            })
 
     best_bets = sorted(
         [p for p in all_picks if p["confidence"] == "high"],
-        key=lambda x: x["selection_score"],
+        key=best_bet_sort_score,
         reverse=True,
     )[:3]
 
     if not best_bets:
         best_bets = sorted(
             [p for p in all_picks if p["confidence"] == "medium" and p["edge_pct"] > 0],
-            key=lambda x: x["selection_score"],
+            key=best_bet_sort_score,
             reverse=True,
         )[:2]
 
@@ -2878,6 +2993,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
 
     if store_in_db:
         store_selections_in_db(all_race_tips, date_str)
+        store_final_probs_in_audit(all_race_tips, date_str)
     else:
         print("  [DB] Skipping selection storage by request", file=sys.stderr)
 

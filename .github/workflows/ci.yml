@@ -1,0 +1,41 @@
+# Continuous integration: syntax-compiles the entire repository and runs the
+# self-testing modules. The repo has no external test suite; these built-in
+# self-tests are the regression net that would have caught silent breakages
+# like the stacking-fit NameError (see docs/05 §8). Fast by design: only the
+# lightweight scientific deps are installed — the heavy training stack
+# (xgboost/lightgbm/catboost) is not needed by any self-test.
+
+name: ci
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install --quiet numpy scipy pandas
+
+      - name: Syntax-compile entire repository
+        run: python -m compileall -q .
+
+      - name: Module self-tests
+        run: |
+          set -euo pipefail
+          cd server/python
+          python relative_market.py
+          python conditional_logit.py
+          python glicko2_elo.py
+          python temporal_staleness.py
