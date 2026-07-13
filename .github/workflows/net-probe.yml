@@ -1,0 +1,65 @@
+# Collector-maintenance probe: fetch a list of URLs from a GitHub runner and
+# print status / content-type / first bytes / any sectional-or-csv hrefs.
+# Read-only GETs with a real browser User-Agent — exists because collector
+# failures like "No CSV found" collapse 403/404/moved into one message
+# (docs/12 §4c found Racing Queensland CSVs missing even for the newest
+# week; this tool tells apart bot-blocked vs gone vs relocated).
+#
+# No secrets, no database. URLs are passed as a dispatch input (public in
+# run metadata — fine, they are public racing pages).
+
+name: net-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "URLs to probe (whitespace/newline separated)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe URLs
+        env:
+          PROBE_URLS: ${{ inputs.urls }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, urllib.request, urllib.error
+
+          UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+          for url in os.environ["PROBE_URLS"].split():
+              print("=" * 78)
+              print(url)
+              print("=" * 78)
+              req = urllib.request.Request(url, headers={
+                  "User-Agent": UA,
+                  "Accept": "text/html,application/xhtml+xml,text/csv,*/*;q=0.8",
+                  "Accept-Language": "en-AU,en;q=0.9",
+              })
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      body = resp.read(400_000)
+                      text = body.decode("utf-8", errors="replace")
+                      print(f"  status       : {resp.status}")
+                      print(f"  content-type : {resp.headers.get('Content-Type')}")
+                      print(f"  bytes        : {len(body)}")
+                      print(f"  head         : {text[:200]!r}")
+                      hrefs = re.findall(r'href="([^"]*(?:[Ss]ectional|\.csv|\.zip)[^"]*)"', text)
+                      if hrefs:
+                          print(f"  matching hrefs ({min(len(hrefs), 40)} of {len(hrefs)}):")
+                          for h in hrefs[:40]:
+                              print(f"    {h}")
+              except urllib.error.HTTPError as e:
+                  print(f"  HTTP ERROR   : {e.code} {e.reason}")
+                  print(f"  head         : {e.read(300)!r}")
+              except Exception as e:
+                  print(f"  ERROR        : {type(e).__name__}: {e}")
+          EOF
