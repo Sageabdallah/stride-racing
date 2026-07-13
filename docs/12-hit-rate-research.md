@@ -121,10 +121,14 @@ STRIDE_CL_BLEND=true                   # enable in run_tips_pipeline
 ```
 
 **Where the hook applies (train/serve consistency):** the fit consumes
-`training_view_v2.predicted_win_prob`, which for full fields comes from
-`prediction_audit` — logged by mc_api **before** the wrapper's isotonic /
-ML-blend / market-anchor stages. The pipeline hook therefore applies the
-transform at exactly that point: on entry to `calibrate_and_score`, to the
+`training_view_v2.predicted_win_prob`. At design time this was believed to
+be `prediction_audit` output for full fields — logged by mc_api **before**
+the wrapper's isotonic / ML-blend / market-anchor stages. The 2026-07
+coverage report (§4c) later showed the audit table is nearly empty and the
+historical full-field values are actually **imported `training_data`
+predictions** — see the hold note in §5.1. The hook itself remains
+stage-correct for audit-sourced fits: it applies the transform on entry to
+`calibrate_and_score`, to the
 incoming MC `winPercentage` (replacing the early isotonic step when active).
 The ML blend and the market anchor then run unchanged — so even a β=0
 artifact keeps prices market-tethered (verified: MC 34.0% → CL 46.0% →
@@ -190,6 +194,21 @@ before you flip the flag.
   session is opened read-only and the self-test asserts every query is a
   SELECT — the workflow cannot mutate the database.
 
+  **Findings (first run, 2026-07-13):** `prediction_audit` contains **260
+  rows total**, all written 2026-03-07→15 (~3.4 rows per race — partial
+  fields; 21 of 260 horse names unmatched against the results spine). The
+  2024-12→2025-12 full-field coverage in the view is **imported
+  `training_data`, ending Dec 2025**. `selections` exist only for Feb–Apr
+  2026, and **every table stops at ~2026-04-18** — either the production
+  pipeline has been down since mid-April or it writes to a different
+  database than the one behind `DATABASE_URL`. Repo-side fix shipped:
+  mc_api audit-write failures now warn on stderr once per process (they
+  were debug-only, which is how 15 months of missing rows stayed
+  invisible). Box-side actions, outside this repo: confirm the daily
+  pipeline and results collectors are running and that their
+  `DATABASE_URL` points at this database — the new warning will surface
+  any remaining audit failure on the first real run.
+
 ### Verification performed
 
 - `relative_market.py` and `conditional_logit.py` self-tests pass.
@@ -219,23 +238,31 @@ Ordered by expected hit-rate return per unit of risk:
    **First real fit (2026-07-13, 1,227 races, 245-race temporal holdout):**
    model-only top-pick hit 42.9% / log-loss 1.7039; market-only (SP
    favourite) 40.4% / 1.7499; fitted blend α=1.296, β=0.000 → hit 42.9% /
-   log-loss 1.6866. Interpretation: (a) the fitted quantity is the stored
-   **MC-stage** probability (what mc_api logs to `prediction_audit`) — in
-   the live window its top pick beats the SP favourite 42.9% vs 40.4%, and
-   it is too flat at the top: the α≈1.3 race-conditional sharpening improves
-   log-loss ~1% with the top pick unchanged (consistent with the README
-   calibration table's under-predicted 0.20–0.30 bin). (b) With the hook
-   now applied at the matching MC stage (see §4b), **this artifact is safe
-   to enable**: it acts as a race-softmax sharpener of the MC probability
-   and the downstream market anchor is untouched. Re-run the fit
-   (`--stage mc`) and A/B a card before switching it on in production.
-   (c) β=0 says only that the SP market adds nothing *conditional on the
-   MC-stage probability, which already embeds market information* — the
-   true independent market weight needs final-stage inputs, which the
+   log-loss 1.6866. Interpretation: (a) the fitted quantity is
+   `training_view_v2.predicted_win_prob` — **provenance corrected by the
+   2026-07 coverage report (§4c): those full-field values are overwhelmingly
+   imported `training_data` predictions, not mc_api audit logs**
+   (`prediction_audit` held one week of rows). On the holdout window that
+   stored pick beats the SP favourite 42.9% vs 40.4% and is too flat at the
+   top: the α≈1.3 race-conditional sharpening improves log-loss ~1% with
+   the top pick unchanged (consistent with the README calibration table's
+   under-predicted 0.20–0.30 bin). (b) **HOLD enablement.** The hook is
+   stage-correct for MC-stage inputs, but this artifact was fitted on the
+   imported predictions, whose generating stage is unknown — the
+   train/serve match that would make it safe to enable is not established.
+   Do not flip `STRIDE_CL_BLEND` on this artifact. Green-light path: once
+   audit logging is confirmed writing again (§4c loud-failure patch) and a
+   few weeks of true MC-stage rows accumulate, re-fit `--stage mc`
+   restricted to `prediction_source = 'prediction_audit'` rows and A/B a
+   card. (c) β=0 says only that the SP market adds nothing *conditional on
+   the stored model probability, which already embeds market information* —
+   the true independent market weight needs final-stage inputs, which the
    pipeline now records (`prediction_audit.final_win_prob`, §4c); once a
    few weeks accumulate, fit with `--stage final` for that estimate.
 
-   **Enablement runbook (production box):** grab the fitted artifact from
+   **Enablement runbook (production box — gated on the re-fit above; the
+   mechanics below are ready the day a clean-provenance artifact exists):**
+   grab the fitted artifact from
    the `fit-conditional-logit` run — either the uploaded Actions artifact
    or by decoding the base64 block printed between the log markers
    (artifacts expire after ~90 days; re-dispatching the fit regenerates it
@@ -314,12 +341,16 @@ Ordered by expected hit-rate return per unit of risk:
    signal from its odds features while the raw favourite baseline can't —
    exactly the failure mode the same-race H2H was added to catch. Re-test
    only after a genuinely new information source lands (e.g. §5.5 late
-   odds). Side-finding worth fixing: full-field stored-prob coverage is
-   only 1,199 of 8,472 usable races and dries up after ~Nov 2025 (folds
-   22–30 had zero H2H races) — `prediction_audit` full-field coverage
-   should be restored/backfilled, since it is the raw material for every
-   future same-race evidence read (the `final_win_prob` logging added in
-   §4c rebuilds the final-stage record going forward).
+   odds). Side-finding, resolved by the §4c coverage report: the 1,199
+   covered races are **imported `training_data` predictions ending Dec
+   2025**, not audit logs — `prediction_audit` held one week of rows
+   (2026-03-07→15, 260 rows), so the "stored production model" in this
+   H2H is the imported historical prediction set. The verdict stands (the
+   ranker loses decisively to that benchmark), but the live pipeline's own
+   MC-stage record effectively does not exist yet — the mc_api
+   loud-failure patch plus a running pipeline are what will create it (and
+   the `final_win_prob` logging from §4c builds the final-stage record in
+   parallel).
 5. **Capture a close-to-jump odds snapshot** — the current market pillar uses
    overnight/8am prices; late money is the sharpest public information. A
    T-5-minute snapshot upgrading `market_odds`/Phase-5 features at scoring

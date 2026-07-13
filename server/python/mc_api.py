@@ -681,6 +681,22 @@ def log_feature_snapshots(snapshot_rows: list):
             pass
 
 
+# The 2026-07 coverage report (docs/12 §4c) found prediction_audit held one
+# week of rows after 15 months of daily runs — failures here were visible
+# only with debug_mode on. Audit failures now warn on stderr once per
+# process; still non-blocking.
+_AUDIT_WARNED = {"done": False}
+
+
+def _warn_audit_failure(reason: str):
+    if not _AUDIT_WARNED["done"]:
+        _AUDIT_WARNED["done"] = True
+        print(f"[WARN] prediction_audit logging FAILED: {reason} — "
+              f"training_view_v2 gains no full-field rows while this persists "
+              f"(further failures this run at debug level only)",
+              file=sys.stderr)
+
+
 def log_prediction_audit(audit_rows: list):
     """
     Batch insert prediction audit entries into the database.
@@ -689,6 +705,8 @@ def log_prediction_audit(audit_rows: list):
     try:
         conn = get_db_connection()
         if not conn:
+            _warn_audit_failure(
+                "no database connection (DATABASE_URL unset/unreachable, or psycopg2 missing)")
             return
         cur = conn.cursor()
         for row in audit_rows:
@@ -706,6 +724,7 @@ def log_prediction_audit(audit_rows: list):
         cur.close()
         conn.close()
     except Exception as e:
+        _warn_audit_failure(str(e))
         log_debug(f"Prediction audit logging error: {e}")
         try:
             conn.close()
