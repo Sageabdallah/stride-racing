@@ -306,8 +306,16 @@ def parse_rq_csv(csv_text, track_name=None):
 
 
 def download_csv(date_str, track_variants):
+    """
+    Returns (content, variant, diagnosis). On success diagnosis is None.
+    On failure content/variant are None and diagnosis names WHY — the old
+    code swallowed every exception and returned a bare None, so a site-wide
+    Cloudflare block (see the 2026-07 net-probe finding, docs/12 §4c) looked
+    identical to a genuinely absent file. The caller logs the diagnosis.
+    """
     date_formatted = date_str.replace("-", "")
-    
+    reasons = []
+
     for variant in track_variants:
         url = f"{RQ_BASE_URL}{date_formatted}_{variant}_T.csv"
         try:
@@ -315,14 +323,27 @@ def download_csv(date_str, track_variants):
                 "User-Agent": "Mozilla/5.0 (compatible; RacingAnalytics/1.0)"
             })
             with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.status == 200:
-                    content = resp.read().decode('utf-8', errors='replace')
-                    if content.strip() and "RaceNumber" in content:
-                        return content, variant
-        except (urllib.error.URLError, urllib.error.HTTPError, Exception):
-            continue
-    
-    return None, None
+                content = resp.read().decode('utf-8', errors='replace')
+                if resp.status == 200 and content.strip() and "RaceNumber" in content:
+                    return content, variant, None
+                if "Just a moment" in content or "cf-" in content:
+                    reasons.append(f"{variant}: anti-bot challenge page")
+                else:
+                    reasons.append(f"{variant}: {resp.status} but not a sectional CSV")
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read(400).decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            if e.code == 403 or "Just a moment" in body:
+                reasons.append(f"{variant}: HTTP 403 anti-bot challenge (Cloudflare)")
+            else:
+                reasons.append(f"{variant}: HTTP {e.code}")
+        except Exception as e:
+            reasons.append(f"{variant}: {type(e).__name__}")
+
+    return None, None, "; ".join(reasons) if reasons else "no variants tried"
 
 
 def match_to_race_results(records, db_url):
@@ -584,10 +605,10 @@ def collect_for_date_track(date_str, track_name, db_url, verbose=True):
             print(f"  Unknown QLD track: {track_name}")
         return 0, 0, 0, 0
 
-    csv_text, matched_variant = download_csv(date_str, track_variants)
+    csv_text, matched_variant, diagnosis = download_csv(date_str, track_variants)
     if not csv_text:
         if verbose:
-            print(f"  No CSV found for {track_name} on {date_str}")
+            print(f"  No CSV for {track_name} on {date_str} — {diagnosis}")
         return 0, 0, 0, 0
 
     records = parse_rq_csv(csv_text, track_name)

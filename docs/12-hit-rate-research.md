@@ -232,10 +232,23 @@ before you flip the flag.
   (prediction-quality breakdown after rebuild: 106,193 none / 12,590
   imported_historical / 794 live_model). Two source findings from the
   runs: (a) Racing Queensland's sectional CSV endpoint returned "No CSV
-  found" for every date **including the most recent week** — the
-  `sectional_times_collector` URL pattern appears dead, so production's
-  daily QLD collection has presumably been failing too; the collector
-  needs re-pointing at whatever RQ serves now. (b) VIC/SA sectionals
+  found" for every date **including the most recent week**. Diagnosed via
+  the `net-probe` workflow (2026-07-13): the URL pattern is **correct and
+  the files are not gone** — the entire `racingqueensland.com.au` site is
+  now behind a **Cloudflare interactive anti-bot challenge**. Every URL
+  (the sectionals page, recent CSVs, and a 2025 control file that provably
+  imported before) returns `403` with a "Just a moment…" challenge page,
+  under both plain `urllib` and a browser-TLS-impersonating client
+  (`curl_cffi impersonate=chrome`) — so RQ changed their access *policy*,
+  which is also why production's daily QLD collection silently stopped.
+  `download_csv` now reports this distinctly ("HTTP 403 anti-bot
+  challenge") instead of a bare "No CSV found", so absence and blocking
+  are never conflated again. **The fix is an access decision, not a code
+  tweak:** the above-board path is official RQ industry data access
+  (feed/API or an authenticated/allowlisted route), not an escalating
+  challenge-bypass on production infrastructure. Until then, QLD
+  sectionals stay a known hole; NSW (pidata) and VIC/SA (racing.com, with
+  the key) are unaffected. (b) VIC/SA sectionals
   remain pending the optional `RACING_COM_API_KEY` secret — once added,
   idempotent re-dispatches over the same chunks recover them without
   duplicating anything. 2026-07-13 itself was fetched mid-day; the daily
