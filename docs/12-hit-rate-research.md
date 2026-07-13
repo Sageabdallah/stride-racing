@@ -228,8 +228,21 @@ Ordered by expected hit-rate return per unit of risk:
    few weeks accumulate, fit with `--stage final` for that estimate.
 2. **Retrain with Phase-5 features** — the `retrain-model` GitHub Action now
    runs this next to the DB (staged artifact + CV/ablation report in the run
-   log). Check the printed feature importances and walk-forward AUC, and
-   extend `run_ablation` to toggle the Phase-5 trio if a clean read is wanted.
+   log).
+
+   **First real run (2026-07-13, 78,169 rows / 8,995 races, 30 walk-forward
+   folds):** mean AUC **0.7871** (±0.0441), mean Brier 0.0841. The Phase-5
+   trio ranked **#3 / #6 / #11 of 113** by final-model importance
+   (`fair_implied_prob` 0.112, `odds_rank` 0.053, `odds_rank_pct` 0.015 —
+   collectively ~0.18, on par with raw `market_odds` at 0.160), computed for
+   8,541 of 8,995 races. Two caveats: importance proves the trees *use* the
+   encoding, not that it adds skill — `run_ablation` has therefore been
+   extended with a third arm that drops the trio on identical folds, so the
+   next run prints the causal `Phase 5 delta`. Same run also produced the
+   first clean read on the Phase-2 sectionals: **−0.0005 AUC** (noise-level
+   against fold std 0.044) — they carry mid-table importance but no marginal
+   AUC on this dataset, plausibly because sectional coverage is only ~47% of
+   rows. Staged artifact uploaded; live model untouched.
 3. **Race-selectivity gate ("bet the reliable races")** — **done, see §4c**
    (fields always on, ordering influence behind `STRIDE_PREDICTABILITY_GATE`).
    Remaining: once a few weeks of results accumulate, use shadow tracking to

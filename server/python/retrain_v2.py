@@ -108,6 +108,14 @@ PHASE2_FEATURES = [
     "sectional_rank_at_distance",  # Phase 4: within-race closing rank at distance, NaN when missing
 ]
 
+# Phase 5 within-race relative-market trio (relative_market.py) — ablated as
+# a unit so the walk-forward delta isolates their causal contribution
+PHASE5_FEATURES = [
+    "fair_implied_prob",
+    "odds_rank",
+    "odds_rank_pct",
+]
+
 # Features that preserve NaN (like PHASE2) but are NOT ablated with sectionals
 NAN_PRESERVE_FEATURES = [
     "runs_since_peak",   # NaN when <5 prior runs; tree models exploit missingness
@@ -1083,30 +1091,45 @@ def run_ablation(
     y: pd.Series,
     dates: pd.Series,
 ) -> Dict[str, Any]:
-    """Compare AUC with all 77 features vs without the 8 Phase 2 sectional features."""
+    """
+    Compare AUC of the full feature set against (a) the set without the
+    Phase 2 sectional features and (b) the set without the Phase 5
+    relative-market trio — each toggled as a unit on identical folds, so
+    the deltas are causal reads on each group's marginal contribution.
+    """
     print("\n" + "=" * 70)
-    print("ABLATION STUDY: with vs without Phase 2 sectional features")
+    print("ABLATION STUDY: full set vs -Phase2 (sectionals) vs -Phase5 (relative market)")
     print("=" * 70)
 
     all_features = [c for c in FEATURE_COLUMNS if c in X.columns]
     base_features = [c for c in all_features if c not in PHASE2_FEATURES]
+    no_p5_features = [c for c in all_features if c not in PHASE5_FEATURES]
 
     print(f"\n  Full feature set : {len(all_features)} features")
     print(f"  Base feature set : {len(base_features)} features (Phase 2 excluded)")
+    print(f"  -Phase5 set      : {len(no_p5_features)} features (relative-market trio excluded)")
 
     results_full = run_walk_forward_cv(X, y, dates, all_features, label="WITH Phase2")
     results_base = run_walk_forward_cv(X, y, dates, base_features, label="WITHOUT Phase2")
+    results_no_p5 = run_walk_forward_cv(X, y, dates, no_p5_features, label="WITHOUT Phase5")
 
     delta = results_full["mean_auc"] - results_base["mean_auc"]
+    delta_p5 = results_full["mean_auc"] - results_no_p5["mean_auc"]
     print("\n  ABLATION RESULT:")
     print(f"    AUC WITH    Phase 2 : {results_full['mean_auc']:.4f}")
     print(f"    AUC WITHOUT Phase 2 : {results_base['mean_auc']:.4f}")
     print(f"    Delta (improvement) : {delta:+.4f}")
+    print(f"    AUC WITHOUT Phase 5 : {results_no_p5['mean_auc']:.4f}")
+    print(f"    Phase 5 delta       : {delta_p5:+.4f}  "
+          f"(Brier full {results_full['mean_brier']:.4f} vs "
+          f"-P5 {results_no_p5['mean_brier']:.4f})")
 
     return {
         "with_phase2": results_full,
         "without_phase2": results_base,
+        "without_phase5": results_no_p5,
         "delta_auc": delta,
+        "delta_auc_phase5": delta_p5,
     }
 
 
@@ -1470,6 +1493,10 @@ def main():
     print(f"  AUC delta (Phase 2 impact) : {abl['delta_auc']:+.4f}")
     print(f"    WITH Phase 2    : {abl['with_phase2']['mean_auc']:.4f}")
     print(f"    WITHOUT Phase 2 : {abl['without_phase2']['mean_auc']:.4f}")
+    if "delta_auc_phase5" in abl:
+        print(f"  AUC delta (Phase 5 impact) : {abl['delta_auc_phase5']:+.4f}")
+        print(f"    WITH Phase 5    : {abl['with_phase2']['mean_auc']:.4f}")
+        print(f"    WITHOUT Phase 5 : {abl['without_phase5']['mean_auc']:.4f}")
     print(f"  Model saved to  : {output_model_path}")
     print()
 
