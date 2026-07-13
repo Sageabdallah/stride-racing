@@ -686,6 +686,7 @@ def log_feature_snapshots(snapshot_rows: list):
 # only with debug_mode on. Audit failures now warn on stderr once per
 # process; still non-blocking.
 _AUDIT_WARNED = {"done": False}
+_AUDIT_INDEX_ENSURED = {"done": False}
 
 
 def _warn_audit_failure(reason: str):
@@ -695,6 +696,36 @@ def _warn_audit_failure(reason: str):
               f"training_view_v2 gains no full-field rows while this persists "
               f"(further failures this run at debug level only)",
               file=sys.stderr)
+
+
+def _ensure_audit_unique_index(conn):
+    """
+    The upsert below names ON CONFLICT (track, race_number, race_date,
+    horse_name), but the live table was created without that unique key, so
+    PostgreSQL rejected every audit insert outright (root cause of the
+    near-empty table — audit-smoke run, 2026-07-13). Self-heal once per
+    process, mirroring store_final_probs_in_audit's ALTER pattern; the
+    reviewable version is migrations/prediction_audit_unique_key.sql.
+    """
+    if _AUDIT_INDEX_ENSURED["done"]:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_prediction_audit_race_horse
+            ON prediction_audit (track, race_number, race_date, horse_name)
+        """)
+        conn.commit()
+        cur.close()
+        _AUDIT_INDEX_ENSURED["done"] = True
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _warn_audit_failure(
+            f"could not create unique index for the audit upsert (duplicate "
+            f"rows? run migrations/prediction_audit_unique_key.sql): {e}")
 
 
 def log_prediction_audit(audit_rows: list):
@@ -708,6 +739,7 @@ def log_prediction_audit(audit_rows: list):
             _warn_audit_failure(
                 "no database connection (DATABASE_URL unset/unreachable, or psycopg2 missing)")
             return
+        _ensure_audit_unique_index(conn)
         cur = conn.cursor()
         for row in audit_rows:
             cur.execute("""

@@ -224,6 +224,19 @@ before you flip the flag.
   training contamination): a pass isolates any remaining audit silence to
   the production box's own environment.
 
+  **Root cause, found by audit-smoke run 1 (2026-07-13):** the audit
+  upsert names `ON CONFLICT (track, race_number, race_date, horse_name)`
+  but the live table has **no unique key on those columns**, and
+  PostgreSQL rejects such an INSERT outright — so *every* mc_api audit
+  insert has failed, in every environment, with the error hidden behind
+  debug-only logging. This is a schema bug, not a box/env problem (the
+  260 March rows predate the public history and its upsert clause).
+  Fixed twice over: `log_prediction_audit` now self-heals by creating
+  `uq_prediction_audit_race_horse` once per process (loud warning if
+  duplicates block it), and `migrations/prediction_audit_unique_key.sql`
+  is the reviewable version including a dedupe pass. Verification =
+  re-running the `audit-smoke` workflow to green.
+
 ### Verification performed
 
 - `relative_market.py` and `conditional_logit.py` self-tests pass.
