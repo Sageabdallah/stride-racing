@@ -157,8 +157,16 @@ before you flip the flag.
   final-stage blend fit needs (`conditional_logit.py --fit --stage final`,
   artifact kept separate and refused by the MC-stage hook).
 - **CI** — `.github/workflows/ci.yml` compiles the whole repository and runs
-  the four module self-tests on every push: the regression net that would
+  the module self-tests on every push: the regression net that would
   have caught the silent stacking breakage years earlier.
+- **LambdaRank evidence harness** — `rank_model.py` trains an `LGBMRanker`
+  (`objective=lambdarank`, races as query groups, binary relevance) on the
+  **same 113-column matrix and walk-forward regime as retrain_v2**
+  (60/14/14/14 days, purge-gapped, race-level splits — no leakage) and
+  reports top-pick hit rate against the market-favourite baseline fold by
+  fold. Run it next to the DB with the `train-rank-model` GitHub Action.
+  Evidence only: no pipeline hook consumes the artifact (§5 item 4 states
+  the integration criterion).
 
 ### Verification performed
 
@@ -212,12 +220,14 @@ Ordered by expected hit-rate return per unit of risk:
    Remaining: once a few weeks of results accumulate, use shadow tracking to
    measure best-bet hit rate with the gate on vs off, and consider fitting
    the meta-model itself (`fav_won` target) to replace the heuristic.
-4. **LambdaRank ensemble member** — add an `LGBMRanker`
-   (`objective=lambdarank`, grouped by race, GroupKFold walk-forward) as a
-   fourth model whose score enters the ensemble as a within-race ranking
-   signal. Research (2024) finds pairwise rankers beat pointwise
-   classification for this exact task; CatBoost's ranker is the strongest
-   single reported.
+4. **LambdaRank ensemble member** — harness built (§4c): run the
+   `train-rank-model` Action and read the walk-forward report. Integration
+   criterion before any pipeline wiring: the ranker's holdout top-1 hit
+   must beat both the market favourite and the current model's stored
+   top-1 (42.9% on the July window) across folds — then integrate as a
+   within-race ordering signal (not a probability), so calibration is
+   untouched. Research (2024) finds pairwise rankers beat pointwise
+   classification for this exact task.
 5. **Capture a close-to-jump odds snapshot** — the current market pillar uses
    overnight/8am prices; late money is the sharpest public information. A
    T-5-minute snapshot upgrading `market_odds`/Phase-5 features at scoring

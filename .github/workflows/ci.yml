@@ -26,7 +26,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install test dependencies
-        run: pip install --quiet numpy scipy pandas
+        run: pip install --quiet numpy scipy pandas lightgbm
 
       - name: Syntax-compile entire repository
         run: python -m compileall -q .
@@ -39,3 +39,4 @@ jobs:
           python conditional_logit.py
           python glicko2_elo.py
           python temporal_staleness.py
+          python rank_model.py

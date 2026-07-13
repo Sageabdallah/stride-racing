@@ -1,0 +1,49 @@
+# Trains the LambdaRank winner-ranking model (server/python/rank_model.py)
+# on a GitHub-hosted runner with direct access to the Neon database, and
+# prints the walk-forward evidence report (ranker top-pick hit rate vs the
+# market-favourite baseline, fold by fold, purge-gapped — no leakage).
+#
+# Requires the repository secret DATABASE_URL. The artifact is evidence
+# only: no pipeline hook consumes it until the report clears the
+# integration criterion in docs/12-hit-rate-research.md §5 item 4.
+
+name: train-rank-model
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet numpy scipy pandas scikit-learn psycopg2-binary requests lightgbm xgboost catboost
+
+      - name: Train ranker with walk-forward report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          cd server/python
+          python rank_model.py --train
+
+      - name: Upload ranker artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank-model-v1
+          path: server/python/models/rank_model_v1.pkl

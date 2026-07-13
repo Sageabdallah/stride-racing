@@ -106,6 +106,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `feature_drift_monitor.py` | Importance-drift monitoring (JS divergence bands) |
 | `compare_features.py` | Training-vs-inference feature parity audit |
 | `ml_status.py` | CLI: print model status JSON |
+| `rank_model.py` | LambdaRank winner-ranking evidence harness (retrain_v2 matrix + walk-forward; no pipeline hook) — has self-test |
 
 ## Monte Carlo & simulation
 
