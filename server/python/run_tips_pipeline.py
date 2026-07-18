@@ -31,6 +31,19 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from tips_day_aggregates import (
+    best_bet_sort_score,
+    build_convergence_summary,
+    build_selection_contract,
+    build_summary,
+    collect_day_picks,
+    merge_tips_into_canonical,
+    select_bankers,
+    select_best_bets,
+    select_value_plays,
+)
+from validate_tips import validate_file as validate_tips_file
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 RACECARDS_DIR = PROJECT_ROOT / "racecards"
@@ -991,20 +1004,6 @@ def compute_race_predictability(runners, race_class, distance_m, going):
         return None
 
 
-def best_bet_sort_score(pick):
-    """
-    Ordering key for best_bets. Default: the historical pure selection-score
-    order. With STRIDE_PREDICTABILITY_GATE=true, the score is weighted by
-    the race's predictability confidence modifier (0.5–1.2) so best bets
-    prefer races where the top pick is most likely to be right. Bet/NO_BET
-    decisions, edges and stakes are never affected — ordering only.
-    """
-    score = pick.get("selection_score", 0) or 0
-    if os.environ.get("STRIDE_PREDICTABILITY_GATE", "false").strip().lower() in ("true", "1", "yes"):
-        score = score * (pick.get("_predictability_mod", 1.0) or 1.0)
-    return score
-
-
 def compute_staking(h):
     """EV-mapped staking: high=2u, medium=1u, low=skip."""
     conf = h.get("confidence", "low")
@@ -1259,8 +1258,22 @@ def store_selections_in_db(race_tips, date_str):
                 "UPDATE selections SET is_active = false WHERE race_date = %s AND track = %s",
                 (date_str, t),
             )
-    except Exception:
-        pass
+    except Exception as deact_err:
+        # Inserting anyway would leave the previous picks live alongside the
+        # new ones (duplicate active selections for the same date+track), so
+        # the store aborts loudly and leaves the DB in its previous state.
+        print(
+            f"  [DB] Selection store ABORTED for {date_str}: could not "
+            f"deactivate previous selections for {tracks_in_batch}: {deact_err}",
+            file=sys.stderr,
+        )
+        try:
+            conn.rollback()
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+        return
 
     inserted = 0
     for race in race_tips:
@@ -2017,75 +2030,6 @@ def derive_no_bet_reason(raw_model_leader, coverage_pick):
     if coverage_pick and str(coverage_pick.get("horse", "")).strip().lower() != str(raw_model_leader.get("horse", "")).strip().lower():
         return "NO BET — a safer coverage horse exists, but it is not the raw model leader."
     return "NO BET — the race does not present a clean model-backed edge."
-
-
-def merge_tips_into_canonical(new_output, canonical_path, track_filter):
-    """
-    Merge new track-specific results into an existing canonical tips file.
-
-    Replaces only races whose track matches the filter; preserves all others.
-    Returns the merged output dict.
-    """
-    if not canonical_path.exists() or not track_filter:
-        return new_output
-
-    try:
-        with canonical_path.open("r", encoding="utf-8") as f:
-            existing = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"  [MERGE] Could not read existing file, overwriting: {e}", file=sys.stderr)
-        return new_output
-
-    tf_lower = {t.lower() for t in track_filter}
-
-    def _track_matches_filter(track_name):
-        tn = (track_name or "").lower()
-        return any(tf in tn or tn in tf for tf in tf_lower)
-
-    kept_races = [
-        r for r in existing.get("races", [])
-        if not _track_matches_filter(r.get("track", ""))
-    ]
-
-    merged_races = kept_races + new_output.get("races", [])
-    new_output["races"] = merged_races
-
-    all_picks = []
-    for rt in merged_races:
-        for p in rt.get("top_picks", []):
-            all_picks.append({**p, "track": rt.get("track"), "race_number": rt.get("race_number")})
-
-    high_count = sum(1 for p in all_picks if p.get("confidence") == "high" and p.get("rank") == 1)
-    pos_edge = sum(1 for p in all_picks if p.get("edge_pct", 0) > 0 and p.get("rank") == 1)
-    total_units = sum(
-        int(p["staking"].replace("u", ""))
-        for p in all_picks if p.get("rank") == 1 and p.get("staking", "0u") != "0u"
-    )
-
-    new_output["summary"] = {
-        "total_races": len(merged_races),
-        "total_selections": sum(1 for p in all_picks if p.get("rank") == 1),
-        "positive_edge": pos_edge,
-        "high_confidence": high_count,
-        "total_units": total_units,
-        "mc_time_seconds": new_output.get("summary", {}).get("mc_time_seconds", 0),
-    }
-
-    ranked = sorted(
-        [p for p in all_picks if p.get("rank") == 1 and p.get("edge_pct", 0) > 0],
-        key=best_bet_sort_score,
-        reverse=True,
-    )
-    best_bets = [p for p in ranked if p.get("confidence") == "high"][:3]
-    if not best_bets:
-        best_bets = [p for p in ranked if p.get("confidence") == "medium"][:2]
-    new_output["best_bets"] = best_bets
-
-    print(
-        f"  [MERGE] {len(new_output['races']) - len(kept_races)} new + {len(kept_races)} existing = {len(merged_races)} total races",
-        file=sys.stderr,
-    )
-    return new_output
 
 
 def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
@@ -2881,107 +2825,42 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
         for r in failed_races:
             print(f"    - {r['track']} R{r['race_number']}: {r['error']}", file=sys.stderr)
 
-    all_picks = []
-    for rt in all_race_tips:
-        _rp = rt.get("predictability") or {}
-        for p in rt["top_picks"]:
-            all_picks.append({
-                **p, "track": rt["track"], "race_number": rt["race_number"],
-                "race_predictability": _rp.get("score"),
-                "race_predictability_category": _rp.get("category"),
-                "_predictability_mod": _rp.get("confidence_modifier", 1.0) or 1.0,
-            })
+    all_picks = collect_day_picks(all_race_tips)
 
-    best_bets = sorted(
-        [p for p in all_picks if p["confidence"] == "high"],
-        key=best_bet_sort_score,
-        reverse=True,
-    )[:3]
-
-    if not best_bets:
-        best_bets = sorted(
-            [p for p in all_picks if p["confidence"] == "medium" and p["edge_pct"] > 0],
-            key=best_bet_sort_score,
-            reverse=True,
-        )[:2]
-
-    value_plays = sorted(
-        [p for p in all_picks if p["edge_pct"] > 3 and 4 <= (p.get("odds") or 0) <= 15 and p["rank"] == 1],
-        key=lambda x: x["edge_pct"],
-        reverse=True,
-    )[:5]
-
-    bankers = [
-        p for p in all_picks
-        if p["confidence"] == "high" and (p.get("odds") or 999) <= 4
-    ]
-
-    high_count = sum(1 for p in all_picks if p["confidence"] == "high" and p["rank"] == 1)
-    pos_edge = sum(1 for p in all_picks if p["edge_pct"] > 0 and p["rank"] == 1)
-    total_units = sum(
-        int(p["staking"].replace("u", ""))
-        for p in all_picks if p["rank"] == 1 and p["staking"] != "0u"
+    day_summary = build_summary(
+        all_race_tips, all_picks, total_races=total_races,
+        mc_time=round(total_mc_time, 1),
+        db_time=round(total_db_time, 1),
+        llm_time=round(total_llm_time, 1),
     )
+    high_count = day_summary["high_confidence"]
+    pos_edge = day_summary["positive_edge"]
+    total_units = day_summary["total_units"]
 
     output = {
         "date": date_str,
         "generated_at": datetime.now().isoformat(),
         "races": all_race_tips,
-        "best_bets": best_bets,
-        "value_plays": value_plays,
-        "bankers": bankers,
-        "summary": {
-            "total_races": total_races,
-            "total_selections": len([p for p in all_picks if p["rank"] == 1]),
-            "positive_edge": pos_edge,
-            "high_confidence": high_count,
-            "total_units": total_units,
-            "mc_time_seconds": round(total_mc_time, 1),
-            "db_time_seconds": round(total_db_time, 1),
-            "llm_time_seconds": round(total_llm_time, 1),
-        },
+        "best_bets": select_best_bets(all_picks),
+        "value_plays": select_value_plays(all_picks),
+        "bankers": select_bankers(all_picks),
+        "summary": day_summary,
     }
 
-    bet_races = sum(1 for r in all_race_tips if r.get("bet_pick"))
-    no_bet_races = sum(1 for r in all_race_tips if not r.get("bet_pick"))
-    output["selection_contract"] = {
-        "version": "v2-explicit-bet-coverage",
-        "bet_races": bet_races,
-        "no_bet_races": no_bet_races,
-    }
+    output["selection_contract"] = build_selection_contract(all_race_tips)
 
     if _convergence_enabled:
-        _confirmed_count = sum(1 for p in all_picks if p.get("crowd_classification") == "CONFIRMED")
-        _crowd_only_count = sum(1 for p in all_picks if p.get("crowd_classification") in ("CROWD_ONLY", "CROWD_ONLY_WEAK"))
-        _model_only_count = sum(1 for p in all_picks if p.get("crowd_classification") == "MODEL_ONLY")
-        _rejected_count = sum(1 for p in all_picks if p.get("crowd_classification") == "REJECTED")
-        _gated_no_bet_count = sum(1 for p in all_picks if p.get("convergence_gate"))
         _crowd_override_count = sum(1 for r in all_convergence_rows if r.get("convergence_tier") == "CROWD_ONLY_WEAK")
-
-        _full_stake = sum(1 for p in all_picks if p.get("stake_recommendation") == "FULL")
-        _standard_stake = sum(1 for p in all_picks if p.get("stake_recommendation") == "STANDARD")
-        _reduced_stake = sum(1 for p in all_picks if p.get("stake_recommendation") == "REDUCED")
-
-        output["convergence_summary"] = {
-            "confirmed": _confirmed_count,
-            "crowd_only": _crowd_only_count,
-            "model_only": _model_only_count,
-            "rejected": _rejected_count,
-            "crowd_overrides_tracked": _crowd_override_count,
-            "gated_no_bet": _gated_no_bet_count,
-            "pillars_available": _pillars_available,
-            "stake_distribution": {
-                "full": _full_stake,
-                "standard": _standard_stake,
-                "reduced": _reduced_stake,
-            },
-        }
+        _cs = build_convergence_summary(all_picks, _pillars_available, _crowd_override_count)
+        output["convergence_summary"] = _cs
         print(
             f"  [CROWD-FIRST] V3: "
-            f"{_confirmed_count} CONFIRMED | {_crowd_only_count} CROWD_ONLY | "
-            f"{_model_only_count} MODEL_ONLY | {_rejected_count} REJECTED | "
-            f"{_gated_no_bet_count} gated NO_BET | "
-            f"Stakes: {_full_stake}F/{_standard_stake}S/{_reduced_stake}R",
+            f"{_cs['confirmed']} CONFIRMED | {_cs['crowd_only']} CROWD_ONLY | "
+            f"{_cs['model_only']} MODEL_ONLY | {_cs['rejected']} REJECTED | "
+            f"{_cs['gated_no_bet']} gated NO_BET | "
+            f"Stakes: {_cs['stake_distribution']['full']}F/"
+            f"{_cs['stake_distribution']['standard']}S/"
+            f"{_cs['stake_distribution']['reduced']}R",
             file=sys.stderr,
         )
 
@@ -3019,6 +2898,32 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             Path(tmp_path).unlink(missing_ok=True)
             raise
         print(f"\n  Tips saved to {tips_path}", file=sys.stderr)
+
+        # Contract gate on the file just published: the same invariants
+        # validate_tips.py asserts, run automatically so a broken document
+        # is loud on the day it is produced. Non-fatal by design — a
+        # validator problem must not kill a race-day run.
+        try:
+            _val = validate_tips_file(tips_path)
+            if _val["errors"]:
+                print(
+                    f"  [VALIDATE] FAIL {tips_path.name}: "
+                    f"{len(_val['errors'])} contract error(s)",
+                    file=sys.stderr,
+                )
+                for _v_err in _val["errors"]:
+                    print(f"    ERROR: {_v_err}", file=sys.stderr)
+            else:
+                _warn_note = (
+                    f", {len(_val['warnings'])} warning(s)" if _val.get("warnings") else ""
+                )
+                print(
+                    f"  [VALIDATE] PASS {tips_path.name}: {_val['total']} races "
+                    f"({_val['bet']} BET, {_val['no_bet']} NO BET{_warn_note})",
+                    file=sys.stderr,
+                )
+        except Exception as _val_err:
+            print(f"  [VALIDATE] Could not validate tips file: {_val_err}", file=sys.stderr)
     except Exception as e:
         print(f"\n  [WARN] Could not save tips: {e}", file=sys.stderr)
 

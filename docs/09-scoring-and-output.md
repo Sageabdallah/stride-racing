@@ -156,13 +156,15 @@ Then the **crowd-first convergence gate** (see
 `validate_tips.py` asserts the contract invariants on the saved file (every race
 exactly one of BET/NO_BET; `selection_contract` counts match; picks carry
 `should_bet`), and `backfill_tips_contract.py` re-stamps old files when the contract
-evolves — importing the live functions so logic can't drift.
+evolves — importing the live functions so logic can't drift. Validation runs
+automatically after every save (loud, non-fatal) and again as
+`run_full_pipeline`'s final step; the CLI remains for ad-hoc checks.
 
 ---
 
 ## 6. Output documents
 
-### `racecards/tips_<date>.json` (written atomically; per-track runs merge into the canonical file with a timestamped backup)
+### `racecards/tips_<date>.json` (written atomically; per-track runs merge into the canonical file with a timestamped backup, then every day-level block below is rebuilt over the merged race list)
 
 ```jsonc
 {
@@ -194,9 +196,15 @@ key factors; computed from pre-race market/card facts only),
 form flags, `is_tipped`/`tip_rank`, and either `ai_insight` (tipped) or
 `brief_assessment` (not tipped).
 
-Best-bets ordering: by selection score (historical behaviour); with
+Best-bets ordering: rank-1 picks only (a best bet is always its race's top
+pick), by selection score (historical behaviour); with
 `STRIDE_PREDICTABILITY_GATE=true` the score is weighted by the race's
-predictability modifier — ordering only, never BET/NO_BET decisions.
+predictability modifier — ordering only, never BET/NO_BET decisions. All
+day-level blocks — best bets, value plays, bankers, summary, selection
+contract, convergence summary — are built by `tips_day_aggregates.py`,
+shared by the full-day run and the per-track merge so the two publish
+paths cannot drift (the merge previously rebuilt only summary/best-bets,
+which shipped stale value plays and contract counts after a re-run).
 
 ### Pick object (the load-bearing fields)
 
@@ -215,7 +223,9 @@ inserted into **`selections`** — a ~107-column row capturing the full decision
 record: probabilities, edge, Kelly stake, franking + graph-franking fields, fitness,
 recalibration deltas, sectional MC fields, track-bias breakdown, pace scenario JSON,
 AI reasoning JSON, luckless JSON, and all consensus/convergence fields. Previous
-selections for the same date+track are soft-deactivated (`is_active=false`) first.
+selections for the same date+track are soft-deactivated (`is_active=false`) first;
+if that deactivation fails, the store aborts loudly rather than inserting new
+rows next to still-active stale picks.
 Every runner's convergence row also lands in `convergence_output` for shadow-P&L
 evaluation, and every runner's published final win % is recorded into
 `prediction_audit.final_win_prob` (`store_final_probs_in_audit`) — the

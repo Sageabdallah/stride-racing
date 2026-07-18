@@ -18,6 +18,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 |---|---|
 | **`run_full_pipeline.py`** | Race-day chain: download → tips → contract backfill |
 | **`run_tips_pipeline.py`** | The 2,915-line heart: per-race normalise→features→ML→MC→calibrate→score→filter→contract→convergence→publish |
+| **`tips_day_aggregates.py`** | Day-level blocks of the tips document (best bets, value plays, bankers, summary, selection contract, convergence summary) — single source shared by the full-day build and the per-track merge, so the two publish paths cannot drift; stdlib-only, self-testing |
 | **`stride_build.py`** | Nightly intelligence build: runs both STRIDE agents, verifies 8 output files, writes build log |
 | `run_full_pipeline.py --skip-*` flags | stage skipping for reruns |
 

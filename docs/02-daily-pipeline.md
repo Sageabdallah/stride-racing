@@ -97,6 +97,8 @@ timestamped backup.
   file (step 3 of `run_full_pipeline`).
 - `validate_tips.py <date> [--strict]` — asserts the contract invariants
   (BET + NO_BET == total, required fields present). The "hard gates" of the README.
+  Runs automatically after every tips save and as `run_full_pipeline`'s final
+  step; the CLI remains for ad-hoc checks.
 - `format_tips.py <date>` — human-readable console rendering.
 
 ---

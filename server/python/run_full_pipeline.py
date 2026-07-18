@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Full pipeline orchestrator: download -> tips -> backfill.
+Full pipeline orchestrator: download -> tips -> backfill -> validate.
 
 Usage:
     py run_full_pipeline.py 2026-03-28
@@ -66,6 +66,10 @@ def main():
         cmd = [py, "backfill_tips_contract.py", args.date]
         rc = run_step("BACKFILL", cmd)
         exit_codes.append(("backfill", rc))
+
+    cmd = [py, "validate_tips.py", args.date]
+    rc = run_step("VALIDATE", cmd)
+    exit_codes.append(("validate", rc))
 
     print(f"\n{'='*60}")
     print(f"  PIPELINE SUMMARY")
