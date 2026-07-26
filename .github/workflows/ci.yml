@@ -43,3 +43,4 @@ jobs:
           python audit_coverage_report.py
           python backfill_results.py
           python tips_day_aggregates.py
+          python walk_forward_backtest.py --self-test
