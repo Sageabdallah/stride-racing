@@ -17,6 +17,15 @@ all bets, and a seeded percentile bootstrap CI for ROI resampled over BETS. The
 pre-existing `ci_95` in `aggregate_metrics` is a t-interval across FOLDS and
 answers a different question; both are reported.
 
+Purge-gap inconsistency, unreconciled on purpose: this harness defaults to
+`gap_days=7` while `retrain_v2.DateWindowSplitter` defaults to
+`purge_gap_days=14` (`retrain_v2.py:706`). Both are defensible and neither is
+wrong, but a feature validated at 7 days has not been validated under the
+window the production trainer actually uses. Neither value is changed here —
+altering either would silently move every historical comparison — but the
+figure is recorded in `config.gap_days` on every report so the two can never be
+compared without the difference being visible.
+
 Scope caveat, carried into every report under `config.model_under_test`: this
 harness refits `RacingMLModel` per fold. It does not load the production
 `retrain_v2` artifact, and it does not exercise `calibrate_and_score`,

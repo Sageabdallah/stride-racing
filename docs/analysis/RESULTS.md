@@ -135,6 +135,7 @@ self-test rather than by a backtest, so they stand independent of §2.
 | Settling at `starting_price` credits the backtest with the closing line | `STRIDE_WFB_PRICE_AT_TIP` settles at the racecard price instead |
 | The pre-existing `ci_95` is a t-interval across folds, not a statement about the bet population | bootstrap over bets added alongside; both reported |
 | The harness could not be imported without `psycopg2` | import guarded; `_load_data` raises a clear error only when actually called |
+| The diagnostics reporter exited 0 with every query failing | `run_report` now returns `(ok, failed)` and the CLI exits non-zero; self-tests drive it through clean / total-failure / single-failure modes |
 | **The conditional-logit β = 0.000 result is not interpretable as reported** | `conditional_logit.py` box-constrained β to `[0.0, 5.0]`, so β cannot go below zero. A clamped corner and a genuine interior zero are indistinguishable in the stored report. Self-test demonstrates the ambiguity on an adversarial fixture: clamped β = 0.000 (`at_bound = lower`) vs unconstrained β = −0.425, with a **better** NLL (1.41115 → 1.39340) |
 
 ### The β = 0 re-reading
@@ -159,3 +160,114 @@ per the standing hold in docs/12 §5.1.
 **Next action (needs the database):** re-run
 `python conditional_logit.py --fit --allow-negative-beta` and record β's sign
 here. If negative, docs/12 §5.1's interpretation (c) needs revising.
+
+---
+
+## 5. First live diagnostics — 2026-07-27
+
+`selection-diagnostics` run #2 against production, 365-day window.
+**10 of 10 queries returned rows, 0 failed.** These are measurements of the
+live `selections` table, not backtests — they describe what the wrapper did,
+not what it would earn.
+
+### 5.1 The calibrator IS loaded — the biggest open assumption is closed
+
+| calibration_state | runners |
+|---|---|
+| differs (calibrator fired) | **1,390** |
+| identical (calibrator inert or absent) | 4 |
+
+SYSTEM_MAP §9 Q1 called this "the single biggest assumption in the system": if
+`models/isotonic_calibrator.pkl` were absent in production, the isotonic layer
+would silently no-op and every edge figure would derive from an uncalibrated
+probability. **It is present and firing.** That assumption can be retired.
+
+### 5.2 The model is overconfident, and calibration is doing real work
+
+| metric | value |
+|---|---|
+| runners | 1,394 (100% recalibrated) |
+| mean raw win% | 13.77 |
+| mean calibrated win% | **11.66** |
+| mean absolute shift | 2.63 pp |
+| max absolute shift | **26.35 pp** |
+
+Calibration pulls probabilities **down** by ~2.1 pp on average. That is the
+signature the research predicted — a pointwise binary model over-predicting
+win probability — and it is being corrected. The 26 pp maximum shift means the
+correction is not cosmetic on individual runners.
+
+### 5.3 The confidence ladder is NOT monotone in edge
+
+| confidence | runners | avg edge (pp) | avg price | avg kelly_stake | live stake |
+|---|---|---|---|---|---|
+| low | 1,040 | −2.47 | 7.72 | 0.141 | 0u |
+| medium | 295 | **−7.98** | 4.55 | 0.600 | 1u |
+| high | 59 | **+10.95** | 6.21 | 0.763 | 2u |
+
+**`medium` has a worse average edge than `low`** — −7.98 pp versus −2.47 pp —
+yet `low` is staked at 0u and `medium` at 1u. On these figures the ladder
+directs real money at the worst-edge bucket in the system. `high` behaves as
+intended (+10.95 pp).
+
+This is a live, measured finding about the staking ladder at
+`run_tips_pipeline.py:1007-1015`, and it needs explaining before any staking
+work proceeds. Two readings are possible and the data here cannot separate
+them: either `confidence` is keyed on something other than edge (so the
+ordering is intentional), or the ladder is mis-assigning stake. **Do not act on
+this without checking how `compute_confidence` derives its label.**
+
+### 5.4 The best-edge bucket sits right under the price ceiling
+
+| value_rating | runners | avg edge (pp) | avg price |
+|---|---|---|---|
+| Poor | 986 | −6.27 | 4.43 |
+| Fair | 120 | +0.79 | 10.71 |
+| Good | 94 | +2.21 | 12.21 |
+| Excellent | 194 | **+8.28** | **13.99** |
+
+Edge rises monotonically with price band, and `Excellent` averages **$13.99** —
+immediately below the `odds > 15` hard ceiling at `run_tips_pipeline.py:1812`.
+SYSTEM_MAP §9 Q8 flagged that ceiling as "the largest ROI constraint in the code
+with no supporting measurement". This is the first evidence bearing on it, and
+it is suggestive rather than conclusive: the value the model finds clusters
+against the wall that rejects it. Whether raising the ceiling helps or simply
+admits longshot noise cannot be answered without settled P&L.
+
+### 5.5 Selections stopped being stored after 2026-04
+
+| month | race days | races | runners | runners/race |
+|---|---|---|---|---|
+| 2026-02 | 1 | 26 | 26 | 1.0 |
+| 2026-03 | 8 | 215 | 1,038 | 4.8 |
+| 2026-04 | 7 | 330 | 330 | **1.0** |
+
+Two problems, both new:
+
+1. **Nothing has been stored for roughly three months.** The window is 365 days
+   and the most recent row is April. Either the pipeline has not run, or
+   `store_selections_in_db` has been failing.
+2. **The rows-per-race pattern changed between March and April** — from ~4.8
+   runners per race to exactly 1.0. A clean 1.0 suggests only the bet pick is
+   being stored where previously the top picks were.
+
+Both are consistent with the repo's recurring failure mode: a fault that
+presents as slightly less output rather than as an error.
+
+### 5.6 `prediction_audit` is still stalled, and a migration was never applied
+
+`prediction_audit` holds **260 rows, all in 2026-03** — unchanged from what the
+2026-07 coverage report found. Separately, `prediction_audit.final_win_prob`
+**does not exist in the database**, though `migrations/final_prob_audit.sql`
+adds it and `docs/12` §4c describes it as a column the pipeline already
+records. That migration has not been applied.
+
+This matters for the conditional-logit work: `docs/12` §5.1's green-light path
+for `STRIDE_CL_BLEND` requires "a few weeks of true MC-stage rows" to
+accumulate. None have.
+
+### 5.7 What these findings do NOT establish
+
+No ROI, no strike rate, no P&L. `selections` records what was published, not
+what it returned. §2's baseline remains unmeasured and every ship-criteria
+verdict still evaluates to `NOT REPORTABLE`.
