@@ -51,6 +51,18 @@ DEFAULT_DAYS = 90
 
 
 QUERIES = [
+    ("Schema — actual column types, so nothing below has to guess", """
+        SELECT table_name, column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name IN ('selections', 'prediction_audit', 'selection_ledger')
+          AND column_name IN ('race_date', 'market_odds', 'edge', 'expected_value',
+                              'raw_win_prob', 'calibrated_win_prob', 'final_win_prob',
+                              'predicted_win_prob', 'win_percentage')
+          AND %(days)s = %(days)s
+        ORDER BY table_name, column_name
+    """),
+
     ("Q8 — price ceiling: selections by price band (the odds>15 rule)", """
         SELECT CASE
                  WHEN market_odds IS NULL       THEN 'no quote'
@@ -64,7 +76,7 @@ QUERIES = [
                ROUND(AVG(edge)::numeric, 3)               AS avg_edge_pp,
                ROUND(AVG(win_percentage)::numeric, 2)     AS avg_win_pct
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY price_band
         ORDER BY price_band
     """),
@@ -76,7 +88,7 @@ QUERIES = [
                ROUND(AVG(edge)::numeric, 3)               AS avg_edge_pp,
                ROUND(AVG(expected_value)::numeric, 4)     AS avg_ev
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY convergence_gate
         ORDER BY runners DESC
     """),
@@ -95,7 +107,7 @@ QUERIES = [
                ROUND(AVG(market_odds)::numeric, 2)        AS avg_price,
                ROUND(AVG(win_percentage)::numeric, 2)     AS avg_win_pct
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY edge_band
         ORDER BY edge_band
     """),
@@ -110,7 +122,7 @@ QUERIES = [
                ROUND(MAX(ABS(COALESCE(recalibration_shift, 0)))::numeric, 4)
                                                                     AS max_abs_shift
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
     """),
 
     ("Q10/Q11 — confidence ladder and the staking it drives", """
@@ -120,7 +132,7 @@ QUERIES = [
                ROUND(AVG(market_odds)::numeric, 2)        AS avg_price,
                ROUND(AVG(edge)::numeric, 3)               AS avg_edge_pp
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY confidence
         ORDER BY runners DESC
     """),
@@ -131,7 +143,7 @@ QUERIES = [
                ROUND(AVG(edge)::numeric, 3)               AS avg_edge_pp,
                ROUND(AVG(market_odds)::numeric, 2)        AS avg_price
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY value_rating
         ORDER BY runners DESC
     """),
@@ -142,7 +154,7 @@ QUERIES = [
                COUNT(DISTINCT (track, race_number, race_date)) AS races,
                COUNT(*)                                   AS runners
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY month
         ORDER BY month
     """),
@@ -157,17 +169,19 @@ QUERIES = [
                END AS calibration_state,
                COUNT(*)                                   AS runners
         FROM selections
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY calibration_state
         ORDER BY runners DESC
     """),
 
+    # No reference to final_win_prob: migrations/final_prob_audit.sql adds it,
+    # but naming a column that may not exist takes the whole query down. The
+    # schema probe above reports whether it is there.
     ("Q13 — prediction_audit fill rate (was near-empty; migration may be pending)", """
         SELECT left(race_date::text, 7)                   AS month,
-               COUNT(*)                                   AS rows,
-               COUNT(final_win_prob)                      AS with_final_prob
+               COUNT(*)                                   AS rows
         FROM prediction_audit
-        WHERE race_date >= CURRENT_DATE - INTERVAL '%(days)s days'
+        WHERE race_date::text >= to_char(CURRENT_DATE - INTERVAL '%(days)s days', 'YYYY-MM-DD')
         GROUP BY month
         ORDER BY month
     """),
@@ -199,8 +213,19 @@ def _fmt_table(columns, rows):
 
 
 def run_report(conn, days=DEFAULT_DAYS):
+    """Run every query, returning (ok, failed).
+
+    Individual queries are allowed to fail — a partial report beats none, and a
+    column that does not exist should not take the other eight down. But the
+    caller MUST act on the counts: the first version of this reporter printed
+    nine 'QUERY FAILED' blocks and still exited 0, so the workflow that ran it
+    reported success while producing nothing. That is the exact failure mode
+    this module exists to detect elsewhere in the system, and silence has to
+    cost something here too.
+    """
     conn.set_session(readonly=True)  # server-side guarantee, not just convention
     cur = conn.cursor()
+    ok, failed = 0, []
     for title, sql in QUERIES:
         print("\n" + "=" * 72)
         print(f"{title}   [last {days} days]")
@@ -209,10 +234,19 @@ def run_report(conn, days=DEFAULT_DAYS):
             cur.execute(sql % {"days": int(days)})
             cols = [d[0] for d in cur.description]
             print(_fmt_table(cols, cur.fetchall()))
+            ok += 1
         except Exception as exc:  # print and continue: partial report > none
             conn.rollback()
+            failed.append(title)
             print(f"  QUERY FAILED: {exc}")
     cur.close()
+
+    print("\n" + "=" * 72)
+    print(f"SUMMARY: {ok} of {len(QUERIES)} queries returned rows, {len(failed)} failed")
+    print("=" * 72)
+    for title in failed:
+        print(f"  FAILED: {title}")
+    return ok, failed
 
 
 def _self_test():
@@ -246,6 +280,58 @@ def _self_test():
     assert "(no rows)" in _fmt_table(["a"], [])
     print("  formatter: alignment, None->'-', empty-result rendering")
 
+    # --- run_report must REPORT failure, not swallow it ---------------------
+    # The first version of this module printed nine "QUERY FAILED" blocks and
+    # returned nothing, so the caller exited 0 and the workflow showed a green
+    # tick over a report that said nothing at all. These assertions exist
+    # because that actually happened.
+    class _Cur:
+        def __init__(self, outer): self.outer, self.description = outer, [("c",)]
+        def execute(self, sql):
+            self.outer.executed.append(sql)
+            if self.outer.mode == "all_fail":
+                raise RuntimeError("operator does not exist: text >= timestamp")
+            if self.outer.mode == "one_fail" and len(self.outer.executed) == 2:
+                raise RuntimeError('column "final_win_prob" does not exist')
+        def fetchall(self): return [("x",)]
+        def close(self): pass
+
+    class _Conn:
+        def __init__(self, mode): self.mode, self.executed, self.rollbacks = mode, [], 0
+        def set_session(self, readonly=False): self.readonly = readonly
+        def cursor(self): return _Cur(self)
+        def rollback(self): self.rollbacks += 1
+
+    c_ok = _Conn("ok")
+    ok, failed = run_report(c_ok, days=30)
+    assert c_ok.readonly is True, "the session must be opened read-only"
+    assert ok == len(QUERIES) and failed == [], (ok, failed)
+    assert all("%(days)s" not in q for q in c_ok.executed), "window not substituted"
+
+    c_bad = _Conn("all_fail")
+    ok_b, failed_b = run_report(c_bad, days=30)
+    assert ok_b == 0, "total failure must report zero successes"
+    assert len(failed_b) == len(QUERIES), failed_b
+    assert c_bad.rollbacks == len(QUERIES), "each failure must roll back"
+
+    c_one = _Conn("one_fail")
+    ok_o, failed_o = run_report(c_one, days=30)
+    assert ok_o == len(QUERIES) - 1 and len(failed_o) == 1, (ok_o, failed_o)
+    print(f"  run_report: returns ({len(QUERIES)},0) clean, (0,{len(QUERIES)}) on total "
+          f"failure, ({len(QUERIES) - 1},1) on a single bad column — caller exits non-zero")
+
+    # The window predicate must not assume race_date is a DATE. It is TEXT in
+    # `selections`, which is what broke every query on the first live run.
+    for title, sql in QUERIES:
+        if "information_schema" in sql:
+            continue          # the schema probe reads catalogue metadata, not races
+        if "race_date" in sql and "WHERE" in sql:
+            assert "race_date::text >=" in sql, f"{title}: window assumes a date type"
+    assert not any("final_win_prob" in sql for _, sql in QUERIES
+                   if "prediction_audit" in sql and "information_schema" not in sql), \
+        "Q13 must not name a column that migrations/final_prob_audit.sql may not have applied"
+    print("  window predicate is type-agnostic; Q13 names no possibly-absent column")
+
     print("All selection_diagnostics self-tests passed.")
 
 
@@ -272,6 +358,18 @@ if __name__ == "__main__":
     import psycopg2
     connection = psycopg2.connect(db_url)
     try:
-        run_report(connection, days=args.days)
+        ok, failed = run_report(connection, days=args.days)
     finally:
         connection.close()
+
+    # Exit non-zero when the report is empty or degraded, so a CI run cannot
+    # show a green tick over a page of failures.
+    if ok == 0:
+        print("\nERROR: every query failed — this report says nothing about the "
+              "system. Check the schema probe output for the real column types.",
+              file=sys.stderr)
+        sys.exit(1)
+    if failed:
+        print(f"\nERROR: {len(failed)} of {len(QUERIES)} queries failed — the report "
+              "is partial and must not be read as complete.", file=sys.stderr)
+        sys.exit(1)
