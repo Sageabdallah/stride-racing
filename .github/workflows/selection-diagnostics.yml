@@ -1,0 +1,62 @@
+# Read-only counters for behaviour the selection wrapper exhibits daily and
+# nothing measures: the odds>15 ceiling, the convergence gate's classifications,
+# the edge distribution against the band gates, how far recalibration actually
+# moves a probability, and whether raw and calibrated probabilities differ at
+# all — the cheapest available evidence on whether a calibrator is loaded in
+# production. The run log IS the report.
+#
+# selection_diagnostics.py opens its session read-only and its self-test asserts
+# every query is a SELECT, so this workflow cannot mutate the database.
+#
+# Requires the repository secret DATABASE_URL.
+
+name: selection-diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Lookback window in days"
+        required: false
+        default: "90"
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet psycopg2-binary
+
+      - name: Verify the reporter cannot write
+        run: |
+          set -euo pipefail
+          cd server/python
+          python selection_diagnostics.py
+
+      - name: Run read-only selection diagnostics
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ github.event.inputs.days }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          cd server/python
+          python selection_diagnostics.py --run --days "${DAYS:-90}"
+          echo
+          echo "Read the 'is anything actually calibrated?' table first. If every"
+          echo "row lands in 'identical (calibrator inert or absent)', the"
+          echo "isotonic layer is not loaded in production and every edge figure"
+          echo "downstream derives from an uncalibrated probability."

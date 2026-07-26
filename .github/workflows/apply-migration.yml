@@ -1,0 +1,144 @@
+# Applies a single SQL migration from migrations/ to the Neon database.
+#
+# This is the only workflow in the repository that WRITES to the database, so
+# it will not run without an explicit typed confirmation. It applies exactly
+# one named file, prints it in full before executing, and verifies the result
+# afterwards.
+#
+# The migrations in this repository are additive and idempotent — CREATE TABLE
+# IF NOT EXISTS and CREATE INDEX IF NOT EXISTS — so re-running one is a no-op
+# rather than a hazard. That is a property of the current files, not a promise
+# about future ones: read the printed SQL before confirming.
+#
+# Requires the repository secret DATABASE_URL.
+
+name: apply-migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration:
+        description: "Filename in migrations/ (e.g. selection_ledger.sql)"
+        required: true
+        default: "selection_ledger.sql"
+      confirm:
+        description: "Type APPLY to confirm this writes to the database"
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet psycopg2-binary
+
+      - name: Check confirmation and show the SQL
+        env:
+          MIGRATION: ${{ github.event.inputs.migration }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${CONFIRM}" != "APPLY" ]; then
+            echo "::error::Confirmation not given. Re-run with confirm=APPLY to write to the database."
+            exit 1
+          fi
+          case "${MIGRATION}" in
+            */*|"") echo "::error::migration must be a bare filename inside migrations/"; exit 1 ;;
+          esac
+          if [ ! -f "migrations/${MIGRATION}" ]; then
+            echo "::error::migrations/${MIGRATION} does not exist."
+            ls -1 migrations/
+            exit 1
+          fi
+          echo "About to apply migrations/${MIGRATION}:"
+          echo "----------------------------------------------------------------"
+          cat "migrations/${MIGRATION}"
+          echo "----------------------------------------------------------------"
+
+      - name: Apply the migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION: ${{ github.event.inputs.migration }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          python - <<'PY'
+          import os, sys
+          import psycopg2
+
+          path = os.path.join("migrations", os.environ["MIGRATION"])
+          with open(path) as fh:
+              sql = fh.read()
+
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          try:
+              with conn.cursor() as cur:
+                  cur.execute(sql)
+              conn.commit()
+          except Exception:
+              conn.rollback()
+              raise
+          finally:
+              conn.close()
+
+          print(f"Applied {path}")
+          PY
+
+      - name: Verify the result
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION: ${{ github.event.inputs.migration }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import psycopg2
+
+          # A positive assertion, not the absence of an error. prediction_audit
+          # sat near-empty for months because failures presented as silence.
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          conn.set_session(readonly=True)
+          with conn.cursor() as cur:
+              cur.execute("""
+                  SELECT table_name
+                  FROM information_schema.tables
+                  WHERE table_schema = 'public'
+                  ORDER BY table_name
+              """)
+              tables = [r[0] for r in cur.fetchall()]
+
+              if os.environ["MIGRATION"] == "selection_ledger.sql":
+                  assert "selection_ledger" in tables, "selection_ledger was not created"
+                  cur.execute("""
+                      SELECT indexname FROM pg_indexes
+                      WHERE tablename = 'selection_ledger'
+                      ORDER BY indexname
+                  """)
+                  idx = [r[0] for r in cur.fetchall()]
+                  print("selection_ledger indexes:", ", ".join(idx))
+                  assert "uq_selection_ledger_race_horse" in idx, (
+                      "the arbiter index is missing — the ledger upsert would fail "
+                      "silently, exactly as prediction_audit's did")
+                  cur.execute("SELECT COUNT(*) FROM selection_ledger")
+                  print("selection_ledger rows:", cur.fetchone()[0])
+
+          print(f"{len(tables)} tables in public schema")
+          conn.close()
+          PY
+          echo
+          echo "The ledger table exists but nothing writes to it yet."
+          echo "Set STRIDE_LEDGER_WRITE=true in the pipeline environment to begin recording."

@@ -65,8 +65,20 @@ output, never like an error.
 
 ## The three things only a human can do
 
-Each is one command or one file. Each answers a question nobody currently knows
-the answer to. None of them changes how the system behaves.
+**You do not need a local database for any of these.** Each runs as a GitHub
+Action on a hosted runner using the `DATABASE_URL` repository secret, the same
+mechanism `audit-coverage` and `fit-conditional-logit` already use. Go to
+**Actions → (workflow) → Run workflow**. The run log is the report.
+
+| Action | Workflow | Writes? |
+|---|---|---|
+| 1. Diagnose the β bound | `fit-conditional-logit` with `diagnose_beta_bound` ticked | no |
+| 2. Apply the ledger migration | `apply-migration`, confirm `APPLY` | **yes** |
+| 3. Run the diagnostics | `selection-diagnostics` | no |
+
+The commands below are the local equivalents if you'd rather run them
+yourself. Each answers a question nobody currently knows the answer to, and
+none of them changes how the system behaves.
 
 ### 1. Re-run the conditional-logit fit
 
@@ -209,5 +221,6 @@ been flagged rather than started.
 
 ## If you only do one thing
 
-**Run the diagnostics.** It is read-only, it cannot break anything, and it tells
-you whether your calibration layer exists in production.
+**Run the `selection-diagnostics` workflow.** Actions → selection-diagnostics →
+Run workflow. It needs nothing installed, it is read-only, it cannot break
+anything, and it tells you whether your calibration layer exists in production.

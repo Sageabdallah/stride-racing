@@ -13,6 +13,12 @@ name: fit-conditional-logit
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnose_beta_bound:
+        description: "Diagnostic: widen beta's lower bound to -5.0. Prints the report and uploads NO artifact."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +38,7 @@ jobs:
         run: pip install --quiet numpy scipy psycopg2-binary requests
 
       - name: Fit conditional-logit blend
+        if: ${{ github.event.inputs.diagnose_beta_bound != 'true' }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
@@ -48,8 +55,47 @@ jobs:
           echo "===== END_FITTED_MODEL ====="
 
       - name: Upload fitted model artifact
-        if: success()
+        if: ${{ success() && github.event.inputs.diagnose_beta_bound != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: conditional-logit-model
           path: server/python/models/conditional_logit.json
+
+      # Diagnostic mode. beta is box-constrained to [0.0, 5.0] in the standard
+      # fit, so a reported beta of exactly 0.000 is indistinguishable from a
+      # clamped corner solution — and the two mean opposite things (docs/12
+      # §5.1 reads it as "the market adds nothing"; a clamped corner would mean
+      # the model probability already over-weights the market). This widens the
+      # bound only to learn beta's sign.
+      #
+      # The resulting JSON is deleted and never uploaded: an artifact fitted
+      # under non-standard bounds must not be mistaken for a deployable one,
+      # and STRIDE_CL_BLEND stays off on this artifact regardless (docs/12 §5.1).
+      - name: Diagnose the beta bound (no artifact produced)
+        if: ${{ github.event.inputs.diagnose_beta_bound == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          cd server/python
+          echo "--- standard bounds: beta in [0.0, 5.0] ---"
+          python conditional_logit.py --fit
+          echo
+          echo "--- diagnostic bounds: beta in [-5.0, 5.0] ---"
+          python conditional_logit.py --fit --allow-negative-beta
+          echo
+          rm -f models/conditional_logit.json
+          echo "Diagnostic artifact deleted — this run produces nothing deployable."
+          echo
+          echo "Compare the two beta values above."
+          echo "  unchanged at ~0.000  -> zero is a genuine optimum; docs/12 §5.1 stands."
+          echo "  negative             -> the stored fit was clamped. The model probability"
+          echo "                          already over-weights the market, the anchor blend"
+          echo "                          counts it twice, and docs/12 §5.1 interpretation (c)"
+          echo "                          needs revising."
+          echo
+          echo "Record the sign in docs/analysis/RESULTS.md."
