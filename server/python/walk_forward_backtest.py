@@ -236,6 +236,167 @@ def compute_ece(y_true: np.ndarray, y_pred: np.ndarray, n_bins: int = 10) -> flo
     return float(ece)
 
 
+def _equal_mass_bins(sorted_pred: np.ndarray, n_bins: int) -> List[Tuple[int, int]]:
+    """Equal-mass bin edges over sorted predictions that never split a tie.
+
+    Runs of identical predictions must land in one bin. If a boundary falls
+    inside such a run, the rows either side carry the same forecast but
+    different observed rates, and the decomposition reads that purely random
+    difference as resolution the model does not have — a constant forecast
+    would score as if it discriminated. Boundaries therefore advance to the
+    next change in value, exactly as fold boundaries advance to a race start.
+    """
+    n = sorted_pred.size
+    if n == 0:
+        return []
+    n_bins = max(1, min(n_bins, n))
+
+    bins: List[Tuple[int, int]] = []
+    start = 0
+    for i in range(1, n_bins + 1):
+        end = int(round(i * n / n_bins))
+        while 0 < end < n and sorted_pred[end] == sorted_pred[end - 1]:
+            end += 1
+        end = min(end, n)
+        if end > start:
+            bins.append((start, end))
+            start = end
+        if start >= n:
+            break
+    if start < n:
+        bins.append((start, n))
+    return bins
+
+
+def compute_ece_quantile(y_true: np.ndarray, y_pred: np.ndarray,
+                         n_bins: int = 10) -> Optional[float]:
+    """ECE over equal-MASS bins rather than equal-width bins.
+
+    Racing win probabilities pile up below 0.20, so equal-width binning puts
+    almost every runner in the first two bins and leaves the rest nearly empty:
+    the reported ECE then reflects the bin layout as much as the model. Equal-
+    mass bins give every bin the same weight in the average.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    n = y_true.size
+    if n == 0:
+        return None
+
+    order = np.argsort(y_pred, kind='mergesort')
+    yt, yp = y_true[order], y_pred[order]
+
+    ece = 0.0
+    for lo, hi in _equal_mass_bins(yp, n_bins):
+        chunk_t, chunk_p = yt[lo:hi], yp[lo:hi]
+        ece += (chunk_t.size / n) * abs(chunk_p.mean() - chunk_t.mean())
+    return float(ece)
+
+
+def brier_decomposition(y_true: np.ndarray, y_pred: np.ndarray,
+                        n_bins: int = 10) -> Dict[str, Any]:
+    """Murphy decomposition: Brier = reliability - resolution + uncertainty.
+
+    A single Brier number cannot say whether a model is badly calibrated or
+    simply undiscriminating, and the two call for opposite fixes:
+
+      reliability  how far predicted rates sit from observed rates. Lower is
+                   better, and a calibrator can fix it.
+      resolution   how far the model moves away from the base rate at all.
+                   HIGHER is better; no calibrator can create it.
+      uncertainty  the base rate's own variance — a property of the races, not
+                   of the model, and the score any constant forecast achieves.
+
+    Equal-mass bins, for the reason given in compute_ece_quantile.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    n = y_true.size
+    if n == 0:
+        return {'reliability': None, 'resolution': None, 'uncertainty': None,
+                'brier': None, 'recomposition_error': None, 'n_bins_used': 0}
+
+    base = float(y_true.mean())
+    uncertainty = base * (1.0 - base)
+
+    order = np.argsort(y_pred, kind='mergesort')
+    yt, yp = y_true[order], y_pred[order]
+
+    reliability, resolution, used = 0.0, 0.0, 0
+    for lo, hi in _equal_mass_bins(yp, n_bins):
+        chunk_t, chunk_p = yt[lo:hi], yp[lo:hi]
+        k = chunk_t.size
+        used += 1
+        obs, pred = chunk_t.mean(), chunk_p.mean()
+        reliability += (k / n) * (pred - obs) ** 2
+        resolution += (k / n) * (obs - base) ** 2
+
+    brier = float(np.mean((y_pred - y_true) ** 2))
+    return {
+        'reliability': round(float(reliability), 6),
+        'resolution': round(float(resolution), 6),
+        'uncertainty': round(float(uncertainty), 6),
+        'brier': round(brier, 6),
+        # Binning makes the identity approximate; a large error means the bin
+        # layout is distorting the split and the parts should not be trusted.
+        'recomposition_error': round(
+            float(abs((reliability - resolution + uncertainty) - brier)), 6),
+        'n_bins_used': used,
+    }
+
+
+def calibration_slope_intercept(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+    """Cox calibration: regress the outcome on logit(p).
+
+    Perfect calibration is slope 1.0, intercept 0.0.
+      slope < 1  predictions are too extreme — the model is overconfident and
+                 its tails are the part that misprices bets.
+      slope > 1  predictions are too timid.
+      intercept  systematic over- or under-prediction of the base rate.
+
+    This is 'weak calibration' in the Van Calster hierarchy, and it catches the
+    failure that a single Brier or ECE number hides.
+    """
+    if not SKLEARN_AVAILABLE:
+        return {'slope': None, 'intercept': None, 'ok': False,
+                'reason': 'scikit-learn not available'}
+
+    y_true = np.asarray(y_true, dtype=int)
+    y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.size < 2 or len(np.unique(y_true)) < 2:
+        return {'slope': None, 'intercept': None, 'ok': False,
+                'reason': 'need both outcomes present'}
+
+    eps = 1e-6
+    p = np.clip(y_pred, eps, 1 - eps)
+    logit = np.log(p / (1 - p)).reshape(-1, 1)
+    if np.allclose(logit, logit[0]):
+        return {'slope': None, 'intercept': None, 'ok': False,
+                'reason': 'predictions are constant'}
+
+    try:
+        from sklearn.linear_model import LogisticRegression
+        # Effectively unpenalised: regularisation would shrink the slope toward
+        # zero and manufacture the very overconfidence this is meant to detect.
+        # A huge C rather than penalty=None, which is deprecated from sklearn
+        # 1.8 and removed in 1.10 — this spelling works across all versions.
+        lr = LogisticRegression(C=1e12, solver='lbfgs', max_iter=1000)
+        lr.fit(logit, y_true)
+        slope = float(lr.coef_[0][0])
+        intercept = float(lr.intercept_[0])
+    except Exception as err:
+        return {'slope': None, 'intercept': None, 'ok': False, 'reason': str(err)}
+
+    return {
+        'slope': round(slope, 6),
+        'intercept': round(intercept, 6),
+        'ok': True,
+        'reason': None,
+        'verdict': ('overconfident' if slope < 0.9 else
+                    'underconfident' if slope > 1.1 else 'well-scaled'),
+    }
+
+
 def compute_bet_pnl(bet_won: np.ndarray, bet_odds: np.ndarray,
                     stake: float = 100.0, commission_rate: float = 0.0) -> np.ndarray:
     """Per-bet profit, net of commission on winnings only.
@@ -349,6 +510,24 @@ def compute_fold_metrics(y_true: np.ndarray, y_pred_proba: np.ndarray,
         metrics['ece'] = compute_ece(y_true, y_pred_proba, n_bins=10)
     except Exception:
         metrics['ece'] = None
+
+    # Probability-quality detail. Additive: nothing downstream reads these yet,
+    # and a single Brier/ECE figure cannot separate miscalibration (fixable by
+    # a calibrator) from low resolution (not fixable by one).
+    try:
+        metrics['ece_quantile'] = compute_ece_quantile(y_true, y_pred_proba, n_bins=10)
+    except Exception:
+        metrics['ece_quantile'] = None
+
+    try:
+        metrics['brier_decomposition'] = brier_decomposition(y_true, y_pred_proba, n_bins=10)
+    except Exception:
+        metrics['brier_decomposition'] = None
+
+    try:
+        metrics['calibration'] = calibration_slope_intercept(y_true, y_pred_proba)
+    except Exception:
+        metrics['calibration'] = None
 
     stake = 100.0
     roi_at_thresholds = {}
@@ -906,6 +1085,8 @@ def _self_test():
     m = compute_fold_metrics(y_true, y_pred, odds_arr, bootstrap_n=200)
     for legacy_key in ('auc_roc', 'brier', 'log_loss', 'ece', 'roi_at_thresholds'):
         assert legacy_key in m, legacy_key
+    for new_key in ('ece_quantile', 'brier_decomposition', 'calibration'):
+        assert new_key in m, new_key
     t = m['roi_at_thresholds']['0.10']
     for k in ('threshold', 'n_bets', 'hit_rate', 'avg_odds_winners', 'roi_pct', 'profit',
               'avg_odds_all', 'max_drawdown', 'max_drawdown_pct', 'profit_factor',
@@ -915,6 +1096,70 @@ def _self_test():
     assert empty['roi_at_thresholds']['0.90']['n_bets'] == 0
     assert 'profit_factor' in empty['roi_at_thresholds']['0.90'], "zero-bet branch must match schema"
     print("  compute_fold_metrics: legacy keys intact, 6 new keys present, zero-bet branch matches schema")
+
+    # --- probability quality: decomposition, quantile ECE, calibration slope ---
+    rng_q = np.random.default_rng(5)
+    n_q = 6000
+    p_true = rng_q.uniform(0.02, 0.5, n_q)
+    y_perfect = (rng_q.random(n_q) < p_true).astype(int)
+
+    dec = brier_decomposition(y_perfect, p_true)
+    assert dec['recomposition_error'] < 5e-3, dec
+    assert dec['reliability'] < 0.005, f"a calibrated model must have low reliability: {dec}"
+    assert dec['resolution'] > 0, dec
+    base = y_perfect.mean()
+    assert abs(dec['uncertainty'] - base * (1 - base)) < 1e-6   # reported to 6 dp
+    print(f"  brier_decomposition: rel={dec['reliability']:.5f} "
+          f"res={dec['resolution']:.5f} unc={dec['uncertainty']:.5f} "
+          f"(recomposition err {dec['recomposition_error']:.5f})")
+
+    # A constant forecast at the base rate: zero resolution, Brier = uncertainty.
+    flat_dec = brier_decomposition(y_perfect, np.full(n_q, base))
+    assert flat_dec['n_bins_used'] == 1, \
+        f"tied predictions must collapse to one bin, got {flat_dec['n_bins_used']}"
+    assert flat_dec['resolution'] < 1e-9, flat_dec
+    assert flat_dec['reliability'] < 1e-9, flat_dec
+    assert abs(flat_dec['brier'] - flat_dec['uncertainty']) < 1e-6, flat_dec
+    assert brier_decomposition(np.array([]), np.array([]))['brier'] is None
+    print(f"  constant forecast: 1 bin, resolution={flat_dec['resolution']:.2e}, "
+          f"brier==uncertainty ({flat_dec['brier']:.5f})")
+
+    # Half the field on one tied value: the tie stays whole, the rest splits.
+    tied = np.concatenate([np.full(2000, 0.10), np.linspace(0.11, 0.60, 2000)])
+    tied_y = (np.random.default_rng(9).random(4000) < tied).astype(int)
+    tied_bins = _equal_mass_bins(np.sort(tied), 10)
+    assert all(hi > lo for lo, hi in tied_bins)
+    assert sum(hi - lo for lo, hi in tied_bins) == 4000, "bins must partition the data"
+    first_lo, first_hi = tied_bins[0]
+    assert first_hi >= 2000, "the 2000-row tie must not be split across bins"
+    assert brier_decomposition(tied_y, tied)['recomposition_error'] < 5e-3
+    print(f"  tie handling: {len(tied_bins)} bins partition 4000 rows, "
+          f"the 2000-row tie stays whole (first bin ends at {first_hi})")
+
+    # Overconfident predictions must show slope < 1; calibrated ones ~1.
+    cal_ok = calibration_slope_intercept(y_perfect, p_true)
+    assert cal_ok['ok'] and 0.85 < cal_ok['slope'] < 1.15, cal_ok
+    logit_true = np.log(p_true / (1 - p_true))
+    p_sharp = 1.0 / (1.0 + np.exp(-logit_true * 1.8))     # deliberately too extreme
+    cal_bad = calibration_slope_intercept(y_perfect, p_sharp)
+    assert cal_bad['ok'] and cal_bad['slope'] < 0.9, cal_bad
+    assert cal_bad['verdict'] == 'overconfident', cal_bad
+    assert calibration_slope_intercept(np.ones(10), np.full(10, 0.3))['ok'] is False
+    assert calibration_slope_intercept(y_perfect[:20], np.full(20, 0.3))['ok'] is False
+    print(f"  calibration slope: calibrated={cal_ok['slope']:.3f} ('{cal_ok['verdict']}'), "
+          f"sharpened={cal_bad['slope']:.3f} ('{cal_bad['verdict']}')")
+
+    # Equal-mass binning must not collapse when everything piles into one
+    # equal-width bin — the actual shape of racing probabilities.
+    skewed_p = np.clip(rng_q.beta(1.2, 12.0, 4000), 0.001, 0.999)
+    skewed_y = (rng_q.random(4000) < skewed_p).astype(int)
+    ew = compute_ece(skewed_y, skewed_p, n_bins=10)
+    qt = compute_ece_quantile(skewed_y, skewed_p, n_bins=10)
+    assert qt is not None and qt >= 0
+    assert compute_ece_quantile(np.array([]), np.array([])) is None
+    assert compute_ece_quantile(np.array([1]), np.array([0.5]), n_bins=10) is not None
+    print(f"  ece on a skewed field: equal-width={ew:.5f} vs equal-mass={qt:.5f} "
+          f"(90% of mass below p={np.quantile(skewed_p, 0.9):.3f})")
 
     # --- flags default OFF (env save/restore, per tips_day_aggregates.py) ---
     prev_rs = os.environ.pop('STRIDE_WFB_RACE_SAFE_SPLIT', None)

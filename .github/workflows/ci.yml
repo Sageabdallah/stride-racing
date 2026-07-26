@@ -50,3 +50,4 @@ jobs:
           python portfolio_risk.py --self-test
           python selection_ledger.py
           python selection_diagnostics.py
+          python ship_criteria.py
