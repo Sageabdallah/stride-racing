@@ -108,3 +108,27 @@ self-test rather than by a backtest, so they stand independent of §2.
 | Settling at `starting_price` credits the backtest with the closing line | `STRIDE_WFB_PRICE_AT_TIP` settles at the racecard price instead |
 | The pre-existing `ci_95` is a t-interval across folds, not a statement about the bet population | bootstrap over bets added alongside; both reported |
 | The harness could not be imported without `psycopg2` | import guarded; `_load_data` raises a clear error only when actually called |
+| **The conditional-logit β = 0.000 result is not interpretable as reported** | `conditional_logit.py` box-constrained β to `[0.0, 5.0]`, so β cannot go below zero. A clamped corner and a genuine interior zero are indistinguishable in the stored report. Self-test demonstrates the ambiguity on an adversarial fixture: clamped β = 0.000 (`at_bound = lower`) vs unconstrained β = −0.425, with a **better** NLL (1.41115 → 1.39340) |
+
+### The β = 0 re-reading
+
+`docs/12` §5.1 reads the 2026-07-13 fit (α = 1.296, **β = 0.000**) as *"the SP
+market adds nothing conditional on the stored model probability"*. That reading
+is only available if zero is an interior optimum. It was not tested, because the
+optimiser could not return anything lower.
+
+The two possibilities carry different consequences:
+
+| If β = 0 is… | It means | Consequence |
+|---|---|---|
+| an interior optimum | the market genuinely adds nothing once the model probability is known | docs/12's reading stands |
+| a clamped corner | the unconstrained optimum is **negative** — the stored model probability *over-weights* market information and the fit wants to subtract some back out | the market-anchor blend is double-counting the market, which bears directly on the `mw` ladder |
+
+`fit()` now always reports `at_bound`, and `--allow-negative-beta` runs the
+diagnostic refit. **Default bounds are unchanged**, so no existing fit moves.
+This is a diagnostic only — `STRIDE_CL_BLEND` stays off on the current artifact
+per the standing hold in docs/12 §5.1.
+
+**Next action (needs the database):** re-run
+`python conditional_logit.py --fit --allow-negative-beta` and record β's sign
+here. If negative, docs/12 §5.1's interpretation (c) needs revising.

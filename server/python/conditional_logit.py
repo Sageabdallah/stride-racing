@@ -93,7 +93,7 @@ class ConditionalLogitBlend:
         return _softmax(u)
 
     # ------------------------------------------------------------- fitting
-    def fit(self, races, holdout_frac=0.2, verbose=True):
+    def fit(self, races, holdout_frac=0.2, verbose=True, allow_negative_beta=False):
         """
         races: list of (model_probs, market_probs, winner_index) tuples,
         ordered oldest→newest so the holdout is strictly the most recent
@@ -102,6 +102,21 @@ class ConditionalLogitBlend:
         Fits alpha/beta by L-BFGS-B on the training slice and reports
         top-pick hit rate and mean log-loss of model-only / market-only /
         blend on the holdout. Returns the report dict.
+
+        `allow_negative_beta` widens beta's lower bound from 0.0 to -5.0 and is
+        DIAGNOSTIC ONLY — it exists to disambiguate a reported beta of exactly
+        0.000. Under the default bounds beta cannot go below zero, so a
+        clamped corner solution and a genuine interior optimum at zero are
+        indistinguishable, and they mean different things:
+
+          * interior zero — the market adds nothing once the model probability
+            is known, which is how docs/12 §5.1 reads the 2026-07-13 fit;
+          * clamped corner — the unconstrained optimum is negative, i.e. the
+            model probability already over-weights market information and the
+            fit wants to subtract some back out.
+
+        The report always carries `at_bound` so the distinction is visible
+        without changing anyone's fit. Default behaviour is unchanged.
         """
         from scipy.optimize import minimize
 
@@ -131,9 +146,19 @@ class ConditionalLogitBlend:
                 total -= u[w] - np.log(np.exp(u).sum())
             return total / len(train)
 
+        beta_lo = -5.0 if allow_negative_beta else 0.0
+        bounds = [(0.0, 5.0), (beta_lo, 5.0)]
         res = minimize(nll, x0=np.array([0.5, 0.7]), method="L-BFGS-B",
-                       bounds=[(0.0, 5.0), (0.0, 5.0)])
+                       bounds=bounds)
         self.alpha, self.beta = float(res.x[0]), float(res.x[1])
+
+        tol = 1e-6
+        at_bound = {
+            name: ("lower" if abs(val - lo) <= tol else
+                   "upper" if abs(val - hi) <= tol else None)
+            for name, val, (lo, hi) in (("alpha", self.alpha, bounds[0]),
+                                        ("beta", self.beta, bounds[1]))
+        }
 
         report = {
             "alpha": round(self.alpha, 4),
@@ -141,6 +166,9 @@ class ConditionalLogitBlend:
             "n_train_races": len(train),
             "n_holdout_races": len(hold),
             "train_nll": round(float(res.fun), 5),
+            "bounds": {"alpha": list(bounds[0]), "beta": list(bounds[1])},
+            "at_bound": at_bound,
+            "allow_negative_beta": bool(allow_negative_beta),
         }
         if hold:
             report["holdout"] = {
@@ -153,6 +181,15 @@ class ConditionalLogitBlend:
         if verbose:
             print(f"[CL] Fitted alpha={self.alpha:.3f} (model), beta={self.beta:.3f} (market) "
                   f"on {len(train)} races")
+            for name, side in at_bound.items():
+                if side:
+                    print(f"[CL]   WARNING: {name} sits on its {side} bound "
+                          f"({bounds[0] if name == 'alpha' else bounds[1]}) — this is a corner "
+                          f"solution, not necessarily the unconstrained optimum")
+            if at_bound["beta"] == "lower" and not allow_negative_beta:
+                print("[CL]   beta is clamped at 0.0. Re-run with --allow-negative-beta "
+                      "to learn whether the unconstrained optimum is negative; a negative "
+                      "beta would mean the model probability already over-weights the market.")
             for mode, stats in report.get("holdout", {}).items():
                 print(f"[CL]   holdout {mode:12s}: top-pick hit "
                       f"{stats['hit_rate']:.3f} | log-loss {stats['log_loss']:.4f}")
@@ -332,7 +369,8 @@ def _rows_to_races(rows, min_field=4):
     return races
 
 
-def fit_from_database(holdout_frac=0.2, min_field=4, stage="mc"):
+def fit_from_database(holdout_frac=0.2, min_field=4, stage="mc",
+                      allow_negative_beta=False):
     """
     Fit alpha/beta from stored predictions vs the market-implied probability,
     grouped per race, ordered by race_date.
@@ -366,14 +404,16 @@ def fit_from_database(holdout_frac=0.2, min_field=4, stage="mc"):
 
     print(f"[CL] Usable races ({stage} stage): {len(races)}")
     blend = ConditionalLogitBlend(model_path=STAGE_MODEL_PATHS[stage], stage=stage)
-    report = blend.fit(races, holdout_frac=holdout_frac)
+    report = blend.fit(races, holdout_frac=holdout_frac,
+                       allow_negative_beta=allow_negative_beta)
     blend.save()
     if stage == "final":
         print("[CL] NOTE: no pipeline hook consumes a final-stage artifact yet — analysis only.")
     return report
 
 
-def fit_from_csv(csv_path, holdout_frac=0.2, min_field=4):
+def fit_from_csv(csv_path, holdout_frac=0.2, min_field=4,
+                 allow_negative_beta=False):
     """
     Fit from a CSV export (e.g. the Neon console SQL editor) instead of a
     live connection. Required columns, matching the _FIT_SQL aliases:
@@ -397,7 +437,8 @@ def fit_from_csv(csv_path, holdout_frac=0.2, min_field=4):
     races = _rows_to_races(rows, min_field=min_field)
     print(f"[CL] Usable races from CSV: {len(races)}")
     blend = ConditionalLogitBlend()
-    report = blend.fit(races, holdout_frac=holdout_frac)
+    report = blend.fit(races, holdout_frac=holdout_frac,
+                       allow_negative_beta=allow_negative_beta)
     blend.save()
     return report
 
@@ -438,6 +479,46 @@ def _self_test():
     p2 = reloaded.transform_race([0.4, 0.3, 0.2, 0.1], [0.5, 0.25, 0.15, 0.10])
     assert np.allclose(p, p2)
 
+    # Interior optimum: nothing is clamped, so at_bound is all None.
+    assert report["at_bound"] == {"alpha": None, "beta": None}, report["at_bound"]
+    assert report["allow_negative_beta"] is False
+    assert report["bounds"]["beta"] == [0.0, 5.0]
+
+    # --- corner detection: a market that is actively misleading ---
+    # The model sees the truth; the market is anti-correlated with it. The
+    # unconstrained optimum for beta is therefore negative, and under the
+    # default bounds it can only be reported as exactly 0.0 — which is what a
+    # genuine "market adds nothing" result also looks like. The at_bound field
+    # is what tells the two apart.
+    rng2 = np.random.default_rng(11)
+    adversarial = []
+    for _ in range(600):
+        n = int(rng2.integers(6, 12))
+        strength = rng2.normal(0, 1, n)
+        true_p = _softmax(1.6 * strength)
+        winner = int(rng2.choice(n, p=true_p))
+        model_p = _softmax(1.6 * strength + rng2.normal(0, 0.4, n))
+        market_p = _softmax(-1.6 * strength + rng2.normal(0, 0.4, n))
+        adversarial.append((model_p, market_p, winner))
+
+    clamped = ConditionalLogitBlend(model_path="/tmp/cl_selftest_clamped.json")
+    rep_clamped = clamped.fit(adversarial, holdout_frac=1 / 3, verbose=False)
+    assert abs(clamped.beta) < 1e-6, f"expected beta pinned at 0, got {clamped.beta}"
+    assert rep_clamped["at_bound"]["beta"] == "lower", rep_clamped["at_bound"]
+
+    freed = ConditionalLogitBlend(model_path="/tmp/cl_selftest_freed.json")
+    rep_freed = freed.fit(adversarial, holdout_frac=1 / 3, verbose=False,
+                          allow_negative_beta=True)
+    assert freed.beta < -1e-3, f"unconstrained beta should be negative, got {freed.beta}"
+    assert rep_freed["at_bound"]["beta"] is None, rep_freed["at_bound"]
+    assert rep_freed["bounds"]["beta"] == [-5.0, 5.0]
+    assert rep_freed["train_nll"] < rep_clamped["train_nll"], \
+        "freeing a binding constraint must not worsen the fit"
+
+    print(f"  corner detection: clamped beta={clamped.beta:.3f} (at_bound=lower) vs "
+          f"unconstrained beta={freed.beta:.3f}; nll {rep_clamped['train_nll']:.5f} "
+          f"-> {rep_freed['train_nll']:.5f}")
+
     print("All conditional_logit self-tests passed "
           f"(blend beat both inputs on {hold['blend']['n']} holdout races).")
 
@@ -459,11 +540,17 @@ if __name__ == "__main__":
                              "predicted_win_prob,odds,is_winner)")
     parser.add_argument("--holdout", type=float, default=0.2,
                         help="Temporal holdout fraction for the fit report")
+    parser.add_argument("--allow-negative-beta", action="store_true",
+                        help="DIAGNOSTIC: widen beta's lower bound to -5.0 so a "
+                             "reported beta of 0.000 can be told apart from a "
+                             "clamped corner solution. Does not change the default fit.")
     args = parser.parse_args()
 
     if args.csv:
-        fit_from_csv(args.csv, holdout_frac=args.holdout)
+        fit_from_csv(args.csv, holdout_frac=args.holdout,
+                     allow_negative_beta=args.allow_negative_beta)
     elif args.fit:
-        fit_from_database(holdout_frac=args.holdout, stage=args.stage)
+        fit_from_database(holdout_frac=args.holdout, stage=args.stage,
+                          allow_negative_beta=args.allow_negative_beta)
     else:
         _self_test()

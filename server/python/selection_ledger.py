@@ -242,6 +242,84 @@ def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
     }
 
 
+# ---------------------------------------------------------------------------
+# Persistence — additive table, see migrations/selection_ledger.sql
+# ---------------------------------------------------------------------------
+
+LEDGER_COLUMNS = (
+    "race_date", "track", "race_number", "horse_name",
+    "selection_origin", "should_bet", "confidence",
+    "raw_model_prob", "calibrated_prob", "model_edge_pp", "ev_at_taken",
+    "fair_odds", "price_taken", "price_close", "clv_pct",
+    "has_real_market_odds", "stake_rule", "stake_units", "stake",
+    "commission_rate", "settled", "won", "pnl", "shadow_kelly_json",
+)
+
+# The upsert names uq_selection_ledger_race_horse, which the migration creates
+# in the same file as the table. prediction_audit sat near-empty for months
+# because its ON CONFLICT named an arbiter that did not exist and every insert
+# failed silently; _ensure_table below makes that impossible to repeat quietly.
+LEDGER_UPSERT_SQL = (
+    "INSERT INTO selection_ledger ({cols}) VALUES ({placeholders}) "
+    "ON CONFLICT (track, race_number, race_date, horse_name) DO UPDATE SET "
+    + ", ".join(f"{c} = EXCLUDED.{c}" for c in LEDGER_COLUMNS
+                if c not in ("track", "race_number", "race_date", "horse_name"))
+    + ", updated_at = NOW()"
+).format(cols=", ".join(LEDGER_COLUMNS),
+         placeholders=", ".join(["%s"] * len(LEDGER_COLUMNS)))
+
+
+def _row_to_tuple(row: Dict[str, Any]) -> tuple:
+    """Project a ledger dict onto LEDGER_COLUMNS, JSON-encoding the shadow plan."""
+    import json
+    out = []
+    for col in LEDGER_COLUMNS:
+        if col == "horse_name":
+            out.append(row.get("horse_name", row.get("horse")))
+        elif col == "shadow_kelly_json":
+            plan = row.get("shadow_kelly")
+            out.append(json.dumps(plan) if plan is not None else None)
+        else:
+            out.append(row.get(col))
+    return tuple(out)
+
+
+def persist_rows(conn, rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Upsert ledger rows. Returns a positive count — never a silent success.
+
+    Writing is opt-in: with STRIDE_LEDGER_WRITE unset this is a no-op that
+    reports why, so the module can be imported and exercised on a live box
+    without touching the database.
+    """
+    if not _stride_flag("STRIDE_LEDGER_WRITE"):
+        return {"written": 0, "skipped": len(rows), "reason": "STRIDE_LEDGER_WRITE is off"}
+    if not rows:
+        return {"written": 0, "skipped": 0, "reason": "no rows"}
+
+    payload = [_row_to_tuple(r) for r in rows]
+    cur = conn.cursor()
+    try:
+        cur.executemany(LEDGER_UPSERT_SQL, payload)
+        written = cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+    # A positive assertion, not the absence of an exception: SYSTEM_MAP §7b.2
+    # records that this repo has twice been bitten by failures that presented
+    # as slightly worse output rather than as an error.
+    print(f"  [LEDGER] upserted {written} of {len(rows)} row(s)")
+    if written <= 0:
+        raise RuntimeError(
+            f"selection_ledger upsert reported {written} rows for {len(rows)} "
+            "inputs — the arbiter index is probably missing; apply "
+            "migrations/selection_ledger.sql")
+    return {"written": int(written), "skipped": 0, "reason": None}
+
+
 def _self_test():
     print("selection_ledger self-test")
 
@@ -328,6 +406,75 @@ def _self_test():
     print(f"  weekly_metrics: {wm['n_bets']} bets, SR {wm['strike_rate']:.1%}, "
           f"ROI {wm['roi_pct']:.1f}%, CI {wm['roi_ci95_bootstrap']['ci_95']}, "
           f"reportable={wm['reportable']}")
+
+    # --- persistence: SQL shape and the write flag, without a database ---
+    import json as _json
+
+    assert LEDGER_UPSERT_SQL.count("%s") == len(LEDGER_COLUMNS)
+    assert "ON CONFLICT (track, race_number, race_date, horse_name)" in LEDGER_UPSERT_SQL
+    for key in ("track", "race_number", "race_date", "horse_name"):
+        assert f"{key} = EXCLUDED.{key}" not in LEDGER_UPSERT_SQL, \
+            f"{key} is part of the arbiter and must not be in the UPDATE set"
+    assert "updated_at = NOW()" in LEDGER_UPSERT_SQL
+
+    tup = _row_to_tuple(winner)
+    assert len(tup) == len(LEDGER_COLUMNS)
+    assert tup[LEDGER_COLUMNS.index("horse_name")] == "Alpha", "horse -> horse_name mapping"
+    assert tup[LEDGER_COLUMNS.index("pnl")] == 800.0
+    assert tup[LEDGER_COLUMNS.index("shadow_kelly_json")] is None
+
+    os.environ["STRIDE_SHADOW_KELLY"] = "true"
+    try:
+        with_k = build_ledger_row(pick, race, result={"won": True, "starting_price": 4.0})
+        enc = _row_to_tuple(with_k)[LEDGER_COLUMNS.index("shadow_kelly_json")]
+        assert _json.loads(enc)["applied"] is False, "shadow plan must serialise as not-applied"
+    finally:
+        os.environ.pop("STRIDE_SHADOW_KELLY", None)
+    print(f"  upsert SQL: {len(LEDGER_COLUMNS)} columns, arbiter excluded from the UPDATE set, "
+          f"shadow plan JSON-encoded")
+
+    class _FakeCursor:
+        def __init__(self, outer): self.outer, self.rowcount = outer, 0
+        def executemany(self, sql, payload):
+            self.outer.calls.append((sql, payload)); self.rowcount = len(payload)
+        def close(self): pass
+
+    class _FakeConn:
+        def __init__(self): self.calls, self.commits, self.rollbacks = [], 0, 0
+        def cursor(self): return _FakeCursor(self)
+        def commit(self): self.commits += 1
+        def rollback(self): self.rollbacks += 1
+
+    prev_w = os.environ.pop("STRIDE_LEDGER_WRITE", None)
+    try:
+        conn = _FakeConn()
+        res = persist_rows(conn, [winner, loser])
+        assert res["written"] == 0 and res["skipped"] == 2, res
+        assert not conn.calls, "flag off must not touch the database"
+
+        os.environ["STRIDE_LEDGER_WRITE"] = "true"
+        conn2 = _FakeConn()
+        res2 = persist_rows(conn2, [winner, loser])
+        assert res2["written"] == 2 and conn2.commits == 1, res2
+        assert len(conn2.calls[0][1]) == 2
+        assert persist_rows(conn2, [])["written"] == 0
+
+        class _ZeroCursor(_FakeCursor):
+            def executemany(self, sql, payload): self.rowcount = 0
+
+        class _ZeroConn(_FakeConn):
+            def cursor(self): return _ZeroCursor(self)
+
+        try:
+            persist_rows(_ZeroConn(), [winner])
+            raise AssertionError("a zero-row upsert must raise, not pass quietly")
+        except RuntimeError as err:
+            assert "arbiter index" in str(err), err
+    finally:
+        os.environ.pop("STRIDE_LEDGER_WRITE", None)
+        if prev_w is not None:
+            os.environ["STRIDE_LEDGER_WRITE"] = prev_w
+    print("  persist_rows: no-op when off, commits when on, RAISES on a zero-row upsert")
 
     print("All tests completed successfully.")
 

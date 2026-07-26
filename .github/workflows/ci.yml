@@ -49,3 +49,4 @@ jobs:
           python selection_policy.py
           python portfolio_risk.py --self-test
           python selection_ledger.py
+          python selection_diagnostics.py
