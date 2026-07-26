@@ -44,3 +44,8 @@ jobs:
           python backfill_results.py
           python tips_day_aggregates.py
           python walk_forward_backtest.py --self-test
+          python calibration_model.py
+          python fit_calibrator.py --self-test
+          python selection_policy.py
+          python portfolio_risk.py --self-test
+          python selection_ledger.py
