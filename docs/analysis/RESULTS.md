@@ -170,7 +170,27 @@ here. If negative, docs/12 §5.1's interpretation (c) needs revising.
 live `selections` table, not backtests — they describe what the wrapper did,
 not what it would earn.
 
-### 5.1 The calibrator IS loaded — the biggest open assumption is closed
+> ## ⚠️ PROVENANCE WARNING — read before using any figure below
+>
+> **Every row measured here predates this repository.** The stored data spans
+> **2026-02 → 2026-04**. This repository's first commit is **2026-05-19**.
+> There is no overlap, and `prediction_audit` agrees — 260 rows, all 2026-03.
+>
+> So these rows were written by a version of the pipeline that is **not in this
+> repository's git history at all**. Nothing below can be attributed to the code
+> as it stands today, and no current function can be held responsible for a
+> pattern in it.
+>
+> **There is no evidence in the database that the current code has ever run.**
+> That is a question for the operator, not something the data can settle.
+>
+> This warning was added after the first version of §5 drew conclusions about
+> current behaviour from these rows. That inference was invalid. The figures are
+> kept because they are real measurements of *something*, and because the
+> provenance limit is itself the most important finding — but every claim below
+> is now scoped to "the pre-repository pipeline", never to current code.
+
+### 5.1 A calibrator was firing in the pre-repository pipeline
 
 | calibration_state | runners |
 |---|---|
@@ -180,7 +200,17 @@ not what it would earn.
 SYSTEM_MAP §9 Q1 called this "the single biggest assumption in the system": if
 `models/isotonic_calibrator.pkl` were absent in production, the isotonic layer
 would silently no-op and every edge figure would derive from an uncalibrated
-probability. **It is present and firing.** That assumption can be retired.
+probability.
+
+**Correction.** An earlier version of this section said the assumption "can be
+retired". It cannot. These rows are from Feb–Apr 2026, before this repository
+existed, so they establish that *a* calibrator was loaded in *that* pipeline —
+not that one is loaded in the current one. Q1 stays **open** for the code as it
+stands.
+
+What this does establish is narrower but still useful: the calibration layer is
+not inherently inert. It has demonstrably fired in production at some point,
+against real cards, which rules out "the pickle has never existed anywhere".
 
 ### 5.2 The model is overconfident, and calibration is doing real work
 
@@ -210,12 +240,34 @@ yet `low` is staked at 0u and `medium` at 1u. On these figures the ladder
 directs real money at the worst-edge bucket in the system. `high` behaves as
 intended (+10.95 pp).
 
-This is a live, measured finding about the staking ladder at
-`run_tips_pipeline.py:1007-1015`, and it needs explaining before any staking
-work proceeds. Two readings are possible and the data here cannot separate
-them: either `confidence` is keyed on something other than edge (so the
-ordering is intentional), or the ladder is mis-assigning stake. **Do not act on
-this without checking how `compute_confidence` derives its label.**
+**Resolved — this is a provenance artifact, not a live defect.**
+
+`compute_confidence` (`run_tips_pipeline.py:950-977`) cannot produce these rows.
+Its logic is:
+
+```python
+if odds > 30:            return "low"
+if ev > 0.0 and edge > 1.0:  result = "high"
+elif edge > 0.0:             result = "medium"
+else:                        result = "low"
+```
+
+`medium` requires `edge > 0` **by construction**, so a medium row averaging
+−7.98 pp is impossible under the current code. And the stored `edge` column is
+`modelEdge` — `store_selections_in_db` binds `pick["edge_pct"]`
+(`run_tips_pipeline.py:1296`), which is set from `horse["modelEdge"]`
+(`:1691`) — so it is not a different quantity being compared.
+
+The explanation is the provenance warning above: these rows were written before
+this repository existed, by a `compute_confidence` that is not in its history.
+Today's thresholds simply do not describe them.
+
+**Consequence: do not "fix" the confidence ladder on the strength of this
+table.** The correct reading is the opposite of a defect report — the current
+logic is self-consistent, and the anomaly is evidence that stored rows and
+current code come from different eras. Any future comparison of `confidence`
+against `edge` must first establish that the rows were written by the code
+being tested.
 
 ### 5.4 The best-edge bucket sits right under the price ceiling
 
@@ -242,17 +294,24 @@ admits longshot noise cannot be answered without settled P&L.
 | 2026-03 | 8 | 215 | 1,038 | 4.8 |
 | 2026-04 | 7 | 330 | 330 | **1.0** |
 
-Two problems, both new:
+**Re-framed.** An earlier version of this section read the April cutoff as a
+fault — "storage stopped, either the pipeline is not running or
+`store_selections_in_db` is failing". That was wrong, and the mistake was
+comparing the data window against *today's date* instead of against the
+repository's own history.
 
-1. **Nothing has been stored for roughly three months.** The window is 365 days
-   and the most recent row is April. Either the pipeline has not run, or
-   `store_selections_in_db` has been failing.
-2. **The rows-per-race pattern changed between March and April** — from ~4.8
-   runners per race to exactly 1.0. A clean 1.0 suggests only the bet pick is
-   being stored where previously the top picks were.
+The data ends 2026-04. This repository begins **2026-05-19**. The rows do not
+stop mid-life; they simply end where the published codebase starts. Nothing
+here is evidence of a break.
 
-Both are consistent with the repo's recurring failure mode: a fault that
-presents as slightly less output rather than as an error.
+What remains genuinely open:
+
+1. **Has the current pipeline ever written a row?** No table shows one.
+   `selections` ends in April, `prediction_audit` in March. This is a question
+   for the operator — the database cannot answer whether the code is being run.
+2. **The rows-per-race change from ~4.8 to exactly 1.0** between March and
+   April is still unexplained, but it too occurred entirely inside the
+   pre-repository era, so it says nothing about current behaviour.
 
 ### 5.6 `prediction_audit` is still stalled, and a migration was never applied
 
