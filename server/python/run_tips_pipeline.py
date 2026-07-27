@@ -2155,6 +2155,19 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             field_size = len(runners)
             print(f"\n  {track} R{race_num} — {race_name} {distance} ({going}) | {field_size} runners", file=sys.stderr)
 
+            # ROI task 04: persist the odds actually knowable at prediction
+            # time — one tip_time row per runner per bookmaker. Measurement
+            # only: fire-and-forget, degrades to a no-op without a DB, and
+            # must never delay or break tipping (STRIDE_ODDS_SNAPSHOT_WRITE=0
+            # disables).
+            try:
+                from odds_snapshots import capture_tip_time_snapshots
+                capture_tip_time_snapshots(
+                    track=track, race_number=race_num, date_str=date_str,
+                    runners=runners, race=race)
+            except Exception:
+                pass
+
             try:
                 from race_normaliser import normalise_race as norm_race
                 race["course"] = track
