@@ -112,6 +112,9 @@ PHASE2_FEATURES = [
 NAN_PRESERVE_FEATURES = [
     "runs_since_peak",   # NaN when <5 prior runs; tree models exploit missingness
     "trial_recency",     # 999 = no trial; keep NaN rather than corrupt with 0 (0 = trial today)
+    # Winner-pattern gap priors: NaN when a runner has no prior sectional / cohort match
+    "cohort_fast_close_prior",
+    "pos400_win_prior",
 ]
 
 # Mapping: training_view_v2 column  ->  FEATURE_COLUMNS name
@@ -259,6 +262,12 @@ FEATURE_COLUMNS = [
     "trial_x_experience",      # best trial position percentile × (1/career_starts)
     "trainer_trial_pattern",   # post-trial win rate ÷ own first-up rate × credibility; 1.0 = neutral
     "trial_quality_score",     # quality_raw × field_multiplier × volume_factor; co-trialist strength
+    # Winner-pattern gap features (winner_pattern_features.py) — STRIDE feature roadmap
+    # priority 1-4; additive and NaN-safe. Populated by attach_features in the load path.
+    "prior_pb_close_underreaction",  # flagship: prior PB close + finish 3-5 + odds 6-12
+    "cohort_fast_close_prior",       # prior best last-200m vs cohort 25th-pctile bar (NaN-preserved)
+    "pos400_win_prior",              # win-rate uplift for usual 400m in-run bucket (NaN-preserved)
+    "jockey_wet_residual",           # jockey wet-minus-dry strike delta, on wet going only
 ]
 
 # Non-sectional features — fill NaN with 0 for these (exclude both PHASE2 and NAN_PRESERVE)
@@ -367,6 +376,15 @@ def load_training_data() -> pd.DataFrame:
         import traceback
         traceback.print_exc()
         df.attrs["_field_composition"] = {}
+
+    # Winner-pattern gap features (STRIDE feature roadmap priority 1-4).
+    # Fully defensive: on any failure the frame is returned unchanged so retrain never breaks.
+    try:
+        from winner_pattern_features import attach_features as _attach_winner_pattern_features
+        print("\n[1d] Attaching winner-pattern gap features ...")
+        df = _attach_winner_pattern_features(df)
+    except Exception as e:
+        print(f"    WARNING: winner-pattern feature attach failed: {e}")
 
     return df
 
@@ -555,6 +573,17 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             out[feat_col] = pd.to_numeric(df[view_col], errors="coerce")
 
     out["market_odds"] = df["_effective_odds"]
+
+    # Winner-pattern gap features are computed upstream (load path) and ride on df as
+    # plain columns; copy any that are present so build_feature_matrix keeps their values.
+    for _wp_col in (
+        "prior_pb_close_underreaction",
+        "cohort_fast_close_prior",
+        "pos400_win_prior",
+        "jockey_wet_residual",
+    ):
+        if _wp_col in df.columns:
+            out[_wp_col] = pd.to_numeric(df[_wp_col], errors="coerce")
 
     for col in FEATURE_COLUMNS:
         if col not in out.columns:

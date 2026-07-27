@@ -181,8 +181,15 @@ class RacingMLModel:
         'trial_x_experience',     # best trial position percentile × (1/career_starts); first-starter signal
         'trainer_trial_pattern',  # post-trial win rate ÷ own first-up rate × credibility; 1.0 = neutral
         'trial_quality_score',    # quality_raw × field_multiplier × volume_factor; co-trialist strength
+        # Winner-pattern gap features (winner_pattern_features.py) — STRIDE feature roadmap
+        # priority 1-4. Declared for schema lockstep with retrain_v2; the live pkl uses its
+        # own stored feature list, so this does not affect the current 110-feature model.
+        'prior_pb_close_underreaction',  # flagship: prior PB close + finish 3-5 + odds 6-12
+        'cohort_fast_close_prior',       # prior best last-200m vs cohort 25th-pctile bar
+        'pos400_win_prior',              # win-rate uplift for usual 400m in-run bucket
+        'jockey_wet_residual',           # jockey wet-minus-dry strike delta, on wet going only
     ]
-    
+
     def __init__(self, model_path: str = None):
         self.model_path = model_path or os.path.join(
             os.path.dirname(__file__), 'models', 'racing_ensemble_v2.pkl'
