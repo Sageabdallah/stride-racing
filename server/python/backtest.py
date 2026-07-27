@@ -8,6 +8,14 @@ import numpy as np
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import roi_stats  # shared backtest statistics (roi-roadmap task 02)
+
+# Commission for net ROI: STRIDE_COMMISSION_RATE, default 0.08 until task 01's
+# settlement plumbing merges.
+COMMISSION = roi_stats.commission_rate_from_env()
+
 DB_URL = os.environ.get('DATABASE_URL', '')
 
 try:
@@ -716,6 +724,10 @@ def evaluate_strategy(label, cfg, test_races, race_predictions):
 
     all_sps_list = [b['sp'] for b in bets]
     win_sps_list = [b['sp'] for b in bets if b['runner'].get('won', 0) == 1]
+    # Ordered per-bet outcomes (bets are appended in race order, i.e.
+    # chronologically) so drawdown/streaks reflect the lived P&L path.
+    bet_results = [(1 if b['runner'].get('won', 0) == 1 else 0, b['sp'])
+                   for b in bets]
 
     return {
         'label': label,
@@ -725,6 +737,7 @@ def evaluate_strategy(label, cfg, test_races, race_predictions):
         'total_placed': placed,
         'all_sps': all_sps_list,
         'win_sps': win_sps_list,
+        'bet_results': bet_results,
         'strike_rate': round(sr, 1),
         'place_rate': round(pr, 1),
         'total_staked': staked,
@@ -767,6 +780,7 @@ def merge_strategy_results(results_list):
             m['total_returned'] += r['total_returned']
             m['all_sps'].extend(r.get('all_sps', []))
             m['win_sps'].extend(r.get('win_sps', []))
+            m.setdefault('bet_results', []).extend(r.get('bet_results', []))
 
             for track, s in r.get('by_track', {}).items():
                 for k in ['bets', 'wins', 'staked', 'returned']:
@@ -787,7 +801,15 @@ def merge_strategy_results(results_list):
         avg_sp = float(np.mean(m['all_sps'])) if m['all_sps'] else 0
         avg_win_sp = float(np.mean(m['win_sps'])) if m['win_sps'] else 0
 
-        final.append({
+        # Full statistics block (CIs, drawdown, streaks, concentration,
+        # reportability) from the shared roi_stats module. CIs and
+        # reportability are on NET returns per the settlement contract.
+        bet_results = m.get('bet_results', [])
+        stats = roi_stats.summarise_bets(
+            [w for w, _ in bet_results], [sp for _, sp in bet_results],
+            commission=COMMISSION)
+
+        row = {
             'label': label,
             'config': m['config'],
             'total_bets': m['total_bets'],
@@ -803,7 +825,14 @@ def merge_strategy_results(results_list):
             'by_track': {k: dict(v) for k, v in m['by_track'].items()},
             'by_odds_range': {k: dict(v) for k, v in m['by_odds_range'].items()},
             'by_month': {k: dict(v) for k, v in m['by_month'].items()},
-        })
+        }
+        row.update({k: stats[k] for k in (
+            'roi_gross', 'roi_net', 'se', 'ci95', 'ci95_normal', 'z',
+            'p_roi_le_zero', 'max_drawdown', 'max_losing_streak',
+            'expected_max_losing_streak', 'roi_minus_top1', 'roi_minus_top2',
+            'roi_minus_top3', 'reportable', 'reportable_status',
+            'reportable_reason', 'bootstrap')})
+        final.append(row)
 
     return final
 
@@ -918,7 +947,18 @@ def print_result_detail(r):
     print(f"  {'='*60}")
     print(f"    Bets: {r['total_bets']} | Winners: {r['total_wins']} ({r['strike_rate']}%)")
     print(f"    Staked: ${r['total_staked']:,.0f} | Returned: ${r['total_returned']:,.0f}")
-    print(f"    P&L: ${r['pnl']:+,.0f} | ROI: {r['roi']:+.1f}%")
+    print(f"    P&L: ${r['pnl']:+,.0f} | ROI: {r['roi']:+.1f}% (gross)")
+    ci = r.get('ci95') or [None, None]
+    ci_str = f"[{ci[0]:+.1f}, {ci[1]:+.1f}]%" if None not in ci else "N/A"
+    net = r.get('roi_net')
+    print(f"    ROI net ({int(COMMISSION*100)}% comm): "
+          f"{net:+.1f}% | 95% CI (net): {ci_str} | "
+          f"{r.get('reportable_status', 'NOT_REPORTABLE')}")
+    print(f"    Max drawdown: {r.get('max_drawdown', 0):.1f}u | "
+          f"Max losing streak: {r.get('max_losing_streak', 0)} "
+          f"(expected {r.get('expected_max_losing_streak')}) | "
+          f"ROI minus top-1/2 winners: {r.get('roi_minus_top1')}% / "
+          f"{r.get('roi_minus_top2')}%")
     print(f"    Avg SP: ${r['avg_sp']:.2f} | Avg Winner SP: ${r['avg_win_sp']:.2f}")
 
     print(f"\n    BY TRACK:")
@@ -983,6 +1023,12 @@ def main():
     for r in sorted(all_results, key=lambda x: -x['roi']):
         print(f"  {r['label']:<40s} | {r['total_bets']:>5d} | {r['strike_rate']:>5.1f}% | {r['roi']:>+7.1f}% | ${r['pnl']:>+9,.0f}")
 
+    mc = roi_stats.multi_comparison_block(all_results)
+    if mc:
+        print(f"\n  MULTI-COMPARISON: {mc['n_strategies']} strategies on one window — "
+              f"Bonferroni requires z >= {mc['bonferroni_z_required']}, "
+              f"best observed z = {mc['best_observed_z']} ({mc['verdict']})")
+
     top3 = sorted(all_results, key=lambda x: -x['roi'])[:3]
     for r in top3:
         print_result_detail(r)
@@ -992,12 +1038,19 @@ def main():
     if best:
         print(f"\n\n  BEST STRATEGY: {best['label']}")
         print(f"    ROI: {best['roi']:+.1f}% | Win: {best['strike_rate']}% | Bets: {best['total_bets']} | P&L: ${best['pnl']:+,.0f}")
+        print(f"    95% CI (net): {best.get('ci95')} | {best.get('reportable_status')} ({best.get('reportable_reason')})")
 
+        stat_keys = ('roi_gross', 'roi_net', 'se', 'ci95', 'ci95_normal', 'z',
+                     'p_roi_le_zero', 'max_drawdown', 'max_losing_streak',
+                     'expected_max_losing_streak', 'roi_minus_top1',
+                     'roi_minus_top2', 'roi_minus_top3', 'reportable',
+                     'reportable_status', 'reportable_reason')
         output = {
             'available': True,
             'backtest_date': datetime.now().isoformat(),
             'methodology': 'Walk-forward ensemble backtest with 6-month rolling windows, no data leakage',
             'staking': 'Flat $100 per bet',
+            'commission_rate': COMMISSION,
             'test_period': f"{best.get('test_start', '')} to {best.get('test_end', '')}",
             'best_strategy': {
                 'label': best['label'],
@@ -1010,6 +1063,7 @@ def main():
                 'pnl': best['pnl'],
                 'avg_sp': best['avg_sp'],
                 'avg_win_sp': best['avg_win_sp'],
+                **{k: best.get(k) for k in stat_keys},
             },
             'all_strategies': [{
                 'label': r['label'],
@@ -1018,7 +1072,9 @@ def main():
                 'total_bets': r['total_bets'],
                 'pnl': r['pnl'],
                 'avg_sp': r['avg_sp'],
+                **{k: r.get(k) for k in stat_keys},
             } for r in sorted(all_results, key=lambda x: -x['roi'])],
+            'multi_comparison': mc,
             'best_by_track': best.get('by_track', {}),
             'best_by_month': best.get('by_month', {}),
             'best_by_odds': best.get('by_odds_range', {}),
