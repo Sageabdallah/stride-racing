@@ -75,7 +75,7 @@ Sources: [Bolton & Chapman 1986](https://pubsonline.informs.org/doi/abs/10.1287/
 |---|---|---|
 | Model within-race (conditional logit) | XGB/LGB/CatBoost are **pointwise binary** classifiers; field normalization happens only after the fact (mc_api renormalizes; backtests renormalize) | **Largest gap** — the ensemble never learns relative comparisons |
 | Two-stage log-space model+market blend | A **linear** per-runner blend with hand-tuned odds-band weights (`calibrate_and_score`, mw 0.80→0.30) | Heuristic approximation of Benter's fitted blend |
-| Positional market features | `market_odds`, steam/drift in the contract; `odds_rank`/`fair_implied_prob` computed in mc_api's adjustment layer but **absent from the trained contract** | Ensemble blind to the favourite ladder |
+| Positional market features | `market_odds`, steam/drift in the contract; `odds_rank`/`fair_implied_prob` **since added — both are in `retrain_v2.FEATURE_COLUMNS` as of 2026-07-27, 12 market-derived features of 113** | *Closed, and now the opposite concern: see the §5.1 correction on market double-counting* |
 | Learning-to-rank | Not present | Roadmap |
 | Sectional-adjusted ratings | Extensive (Phase 2 primitives, five quant engines) | Already strong |
 | Race selectivity (bet where the top pick is most reliable) | **Wired (§4c):** predictability attached to every race entry; best-bets ordering behind `STRIDE_PREDICTABILITY_GATE` | Done — validate with shadow tracking |
@@ -317,6 +317,31 @@ Ordered by expected hit-rate return per unit of risk:
    the true independent market weight needs final-stage inputs, which the
    pipeline now records (`prediction_audit.final_win_prob`, §4c); once a
    few weeks accumulate, fit with `--stage final` for that estimate.
+
+   > **CORRECTION (2026-07-27) — interpretation (c) above is refuted.**
+   > β = 0.000 was **not** an interior optimum. `conditional_logit.fit`
+   > box-constrained β to `[0.0, 5.0]`, so zero was the lowest value the
+   > optimiser could return, and a clamped corner was indistinguishable from a
+   > genuine zero. Re-fitting the same 1,227 races with the bound released
+   > gives **β = −17.850, α = 18.732, neither at a bound**. The fit does not
+   > find the market uninformative — it wants to **subtract** it.
+   >
+   > The mechanism: `retrain_v2.FEATURE_COLUMNS` contains **12 market-derived
+   > features of 113** (`market_odds`, `fair_implied_prob`, `odds_rank`,
+   > `odds_rank_pct`, the steam/drift set), so the model probability already
+   > embeds the market, and `calibrate_and_score` then anchors it to the market
+   > a second time. Since α ≈ −β, the fitted blend reduces to ranking on
+   > `ln(m/q)` — the value ratio.
+   >
+   > This does **not** license enabling `STRIDE_CL_BLEND`. Holdout log-loss
+   > degrades 1.6866 → 1.7809, failing the promotion bar in §5's own terms, and
+   > the provenance hold in this section is unaffected — it concerns what the
+   > fit consumed, which widening a bound does not change. The 62.0% holdout
+   > top-pick rate should be read as a possible leakage signal, not a result:
+   > if the stored `predicted_win_prob` came from an SP-trained model and `q`
+   > is SP-derived, `m/q` carries closing-line information on both sides.
+   >
+   > Full working: `docs/analysis/RESULTS.md` §6 and §7.
 
    **Enablement runbook (production box — gated on the re-fit above; the
    mechanics below are ready the day a clean-provenance artifact exists):**

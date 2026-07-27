@@ -397,3 +397,112 @@ this column at write time via `ADD COLUMN IF NOT EXISTS`, so the column being
 missing is independent evidence that `store_final_probs_in_audit` has never
 successfully run against this database — consistent with §5's provenance
 finding.
+
+---
+
+## 7. Identified fit, and the market double-count — 2026-07-27
+
+### 7.1 With both bounds widened, the fit is finally identified
+
+`fit-conditional-logit --diagnose_beta_bound`, run #6, same 1,227 races
+(982 train / 245 holdout), now `α ∈ [0, 50]`, `β ∈ [−50, 50]`:
+
+| bounds | α | β | at bound | holdout hit | holdout log-loss |
+|---|---|---|---|---|---|
+| standard `[0,5] / [0,5]` | 1.296 | 0.000 | β **lower** | 0.429 | 1.6866 |
+| first diagnostic `[0,5] / [−5,5]` | 5.000 | −3.950 | α **upper** | 0.506 | 1.7707 |
+| **identified `[0,50] / [−50,50]`** | **18.732** | **−17.850** | **neither** | **0.620** | 1.7809 |
+
+No bound warning fired on the third row. **That is the unconstrained optimum.**
+
+### 7.2 What α ≈ −β means
+
+`α / −β = 1.049` — the two are nearly equal and opposite. Substituting into the
+model's own form:
+
+```
+u = α·ln(m) + β·ln(q)   ≈   α·( ln m − ln q )   =   α·ln( m / q )
+```
+
+**The optimal within-race combination ranks on the model/market RATIO, not on
+the model probability.** `m/q > 1` is precisely "the model rates this runner
+above the market" — the value signal. The fit rediscovered STRIDE's own
+philosophy from the data, and applied an enormous sharpening (α ≈ 18.7) to it.
+
+### 7.3 Why it wants to subtract the market: the model is trained on it
+
+`retrain_v2.FEATURE_COLUMNS` carries **12 market-derived features out of 113
+(10.6%)**:
+
+```
+market_odds, odds_movement_pct, last_start_market_diff, avg_market_diff_3runs,
+market_trend_shortening, market_trend_drifting, market_confidence,
+field_market_agreement, market_efficiency_flag, fair_implied_prob,
+odds_rank, odds_rank_pct
+```
+
+So `rawModelProb` **already embeds the market**. Then `calibrate_and_score`
+blends it toward the market *again* (`run_tips_pipeline.py:679-697`):
+
+```
+mw = 0.80 / 0.70 / 0.50 / 0.45 / 0.40 / 0.30   at odds ≤ 3/6/10/15/30/>30
+calibrated = mw·raw + (1 − mw)·true_market
+modelEdge  = calibrated − true_market
+```
+
+At odds ≤ $3 the ladder nominally keeps 80% "model" — but that 80% is itself
+market-informed, so the **effective** market exposure is far above the stated
+20%. The market is counted twice, and `modelEdge` is the residual left after
+mixing the market in on both sides.
+
+Three previously separate observations collapse into this one mechanism:
+
+- edge is computed *from* the anchored probability, so it is mechanically
+  shrunk by `(1 − mw)` — the ladder and every edge threshold were never
+  independently tunable;
+- the top pick wins 33.7% against a 34.9% favourite baseline — the model adds
+  almost no top-1 skill beyond the market, which is what double-anchoring to
+  the market would produce;
+- the `mw` ladder was never fitted — no script for those six numbers exists.
+
+Also note: `docs/12` §3's audit table states `odds_rank` and `fair_implied_prob`
+are *"absent from the trained contract"*. **That is now stale** — both are in
+`FEATURE_COLUMNS`, presumably added by the Phase-5 relative-market work.
+
+### 7.4 ⚠️ Do not act on the 62% hit rate
+
+It is 62.0% against a 34.9% favourite baseline, which should invite suspicion
+rather than celebration. Two reasons to withhold judgement:
+
+1. **Provenance.** The fitted quantity is
+   `training_view_v2.predicted_win_prob`, which `docs/12` §5.1 records as
+   *"overwhelmingly imported `training_data` predictions"* of unknown
+   generating stage — and §5 of this document establishes those rows predate
+   this repository entirely.
+2. **Possible SP on both sides.** R5-F2 found training fits **starting price**
+   while inference serves the ~08:00 racecard price. If the stored `m` was
+   produced by an SP-trained model and `q` is also SP-derived, then `m/q`
+   contains closing-line information on both sides — information not available
+   when a bet is struck. A ratio that good, that easily, is what leakage looks
+   like.
+
+**Log-loss also degrades** (1.7039 → 1.7809), so even taken at face value this
+is a better *ranker* and a worse *probability estimator* — the α ≈ 18.7
+sharpening pushes probabilities toward 0/1. Under
+`ship_criteria.evaluate_ship_criteria` it remains a `HOLD`: constraint 18
+forbids degrading calibration, and a system that derives `edge` from the
+calibrated probability cannot spend a calibration regression to buy ranking.
+
+### 7.5 What to do about it
+
+Do **not** enable `STRIDE_CL_BLEND`. The right next step is not to ship this
+blend but to test the hypothesis it exposes: **the market is in the model
+twice.** Two cheap, source-level experiments, neither needing new data:
+
+1. **Ablate the 12 market features** from a retrain and measure whether
+   `modelEdge` becomes better behaved — this is the causal test the Phase-5
+   precedent (constraint 36) demands before believing any feature-importance
+   story.
+2. **Re-fit the CL on a market-feature-free model**, where `m ⊥ q` by
+   construction. If β then comes back *positive*, the double-count is
+   confirmed and the `mw` ladder is the thing to revisit.

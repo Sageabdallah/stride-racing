@@ -85,7 +85,7 @@ jobs:
           echo "--- standard bounds: beta in [0.0, 5.0] ---"
           python conditional_logit.py --fit
           echo
-          echo "--- diagnostic bounds: beta in [-5.0, 5.0] ---"
+          echo "--- diagnostic bounds: alpha in [0, 50], beta in [-50, 50] ---"
           python conditional_logit.py --fit --allow-negative-beta
           echo
           rm -f models/conditional_logit.json
