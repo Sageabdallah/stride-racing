@@ -2303,15 +2303,33 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                         feat["td_upset_rate"] = runner.get("td_upset_rate", 0.2)
                         feat["td_barrier_style_edge"] = runner.get("td_barrier_style_edge", 0)
                         feat["td_closing_speed_bias"] = runner.get("td_closing_speed_bias", 0)
-                        _crn = feat.get("campaign_run_number", 1)
-                        _fp = max(0, 1 - abs(_crn - 3) * 0.15)
-                        feat["fitness_x_distance"] = _fp * feat.get("distance_strike_rate", 0)
-                        _pps = runner.get("pace_pressure_score", 0.5)
-                        feat["barrier_x_pace_inv"] = runner.get("barrier_advantage", 0) * (1 - _pps)
-                        feat["sectional_x_going"] = runner.get("z_200m", 0) * feat.get("going_suitability", 0.5)
-                        feat["class_drop_x_trajectory"] = feat.get("is_class_drop", 0) * feat.get("form_direction_slope", 0)
-                        _cf = max(0, 1 - max(0, _crn - 5) * 0.2)
-                        feat["campaign_run_x_fitness"] = _crn * _cf
+                        # STRIDE_INTERACTION_PARITY: compute the five interaction
+                        # features from the same definitions training used
+                        # (feature_interactions.py) instead of restating them
+                        # here. barrier_x_pace_inv is inverted between the two —
+                        # training fits barrier_advantage * pace_pressure_score,
+                        # the inline version below serves
+                        # barrier_advantage * (1 - pace_pressure_score) — and the
+                        # two agree only at 0.5, which is the default used when
+                        # pace data is missing. Default OFF: enabling changes
+                        # which horses are tipped, so it needs a backtest first.
+                        if os.environ.get("STRIDE_INTERACTION_PARITY", "false").strip().lower() in ("true", "1", "yes"):
+                            from feature_interactions import compute_interactions
+                            _src = dict(feat)
+                            for _k in ("pace_pressure_score", "barrier_advantage", "z_200m"):
+                                if runner.get(_k) is not None:
+                                    _src[_k] = runner.get(_k)
+                            feat.update(compute_interactions(_src))
+                        else:
+                            _crn = feat.get("campaign_run_number", 1)
+                            _fp = max(0, 1 - abs(_crn - 3) * 0.15)
+                            feat["fitness_x_distance"] = _fp * feat.get("distance_strike_rate", 0)
+                            _pps = runner.get("pace_pressure_score", 0.5)
+                            feat["barrier_x_pace_inv"] = runner.get("barrier_advantage", 0) * (1 - _pps)
+                            feat["sectional_x_going"] = runner.get("z_200m", 0) * feat.get("going_suitability", 0.5)
+                            feat["class_drop_x_trajectory"] = feat.get("is_class_drop", 0) * feat.get("form_direction_slope", 0)
+                            _cf = max(0, 1 - max(0, _crn - 5) * 0.2)
+                            feat["campaign_run_x_fitness"] = _crn * _cf
                         import math as _math
                         _ddir = max(0, feat.get("distance_direction_flag", 0))
                         _dslope = feat.get("dist_sectional_slope", 0)

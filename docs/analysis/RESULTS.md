@@ -506,3 +506,78 @@ twice.** Two cheap, source-level experiments, neither needing new data:
 2. **Re-fit the CL on a market-feature-free model**, where `m ⊥ q` by
    construction. If β then comes back *positive*, the double-count is
    confirmed and the `mw` ladder is the thing to revisit.
+
+---
+
+## 8. Train/serve divergence in the interaction features — 2026-07-27
+
+Audited all ten interaction-style features in `retrain_v2.FEATURE_COLUMNS` for
+duplicated definitions. Five have a single shared implementation and are safe
+(`settling_pace_interaction` → `speed_mapping.py:938`; `prep_run_x_days_since`
+and `class_x_spell` → `temporal_staleness.py`; `fresh_x_trajectory` and
+`trial_x_experience` → `form_feature_builder.py`). Five were written twice.
+
+### 8.1 One of the five is inverted
+
+| feature | training (`retrain_v2`) | inference (`run_tips_pipeline`) | agree? |
+|---|---|---|---|
+| `fitness_x_distance` | `fitness_proxy(crn) * distance_strike_rate` | same | ✅ |
+| **`barrier_x_pace_inv`** | **`barrier_advantage * pace_pressure_score`** | **`barrier_advantage * (1 − pace_pressure_score)`** | ❌ |
+| `sectional_x_going` | `z_200m * going_suitability` | same | ✅ |
+| `class_drop_x_trajectory` | `is_class_drop * form_direction_slope` | same | ✅ |
+| `campaign_run_x_fitness` | `crn * campaign_freshness(crn)` | same | ✅ |
+
+**The model is served the inverse of the relationship it was fitted on.**
+
+### 8.2 Why it went unnoticed
+
+| pace_pressure_score | training | inference | Δ |
+|---|---|---|---|
+| 0.00 | 0.000 | 1.000 | −1.000 |
+| 0.25 | 0.250 | 0.750 | −0.500 |
+| **0.50** | **0.500** | **0.500** | **0.000** |
+| 0.75 | 0.750 | 0.250 | +0.500 |
+| 1.00 | 1.000 | 0.000 | +1.000 |
+
+The two formulas agree at **exactly one point: 0.5** — which is the default the
+inference path substitutes when the key is missing
+(`feat[k] = runner.get(k, 0.5)`). So the bug is invisible whenever pace data is
+absent, and **maximal precisely in the races where pace pressure is extreme**.
+Measured on 500 random rows, the divergence reaches **2.340**.
+
+### 8.3 Two secondary findings
+
+- **`step_up_x_dist_slope` is dead computation.** It is calculated at inference
+  (`run_tips_pipeline` ~:2319) but excluded from training ("excluded (RED
+  coverage)") and is **not in `FEATURE_COLUMNS`**, so `prepare_features`
+  discards it. Harmless, but it reads as a live feature and isn't.
+- **Null handling differed.** Training used `.fillna(...)`; inference used
+  `dict.get(key, default)`, which returns `None` when a key exists with a null
+  value rather than the default. The canonical module matches training.
+
+### 8.4 The fix, and why it is OFF by default
+
+`server/python/feature_interactions.py` holds one definition per feature,
+**reproducing the training formulas** — the training formula is what the
+artifact learned, so serving anything else feeds it a feature whose meaning it
+was never shown. Its self-test asserts the scalar implementations match
+training's vectorised expressions to <1e-9 over 500 rows, and separately proves
+the legacy inference formula disagrees.
+
+Wired into `run_tips_pipeline` behind **`STRIDE_INTERACTION_PARITY`, default
+off**. Correcting a train/serve mismatch is a correctness fix, but it changes
+the feature vector, therefore the predicted probability, therefore which horse
+is tipped. That is a real-money behaviour change and it needs a backtest before
+promotion, not a claim of obviousness.
+
+**Not touched:** the training formula itself. The name says `_inv` while the
+training expression is not inverted, which suggests the *intent* may have been
+the inference version. Deciding that is a retrain decision, not a parity
+decision — and if training is the side that changes, the fitted artifact must
+change with it.
+
+### 8.5 Ship criteria
+
+`NOT REPORTABLE` until a baseline exists. When one does, this is a `BOTH`-lever
+candidate: a correctly-oriented feature should improve ranking *and*
+calibration, so unlike the CL blend it is not buying one at the other's expense.
