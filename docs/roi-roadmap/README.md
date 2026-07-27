@@ -79,7 +79,7 @@ of accumulation. Every day delayed is a day added to the retrain date.
 
 | Task | Status | Date | Evidence link |
 |------|--------|------|---------------|
-| 01 | ⬜ | | |
+| 01 | 🟡 | 2026-07-27 | `roi/01-ledger-clv-net-settlement` |
 | 02 | ⬜ | | |
 | 03 | ⬜ | | |
 | 04 | ⬜ | | |
