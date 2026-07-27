@@ -83,7 +83,7 @@ of accumulation. Every day delayed is a day added to the retrain date.
 | 02 | ⬜ | | |
 | 03 | ⬜ | | |
 | 04 | ⬜ | | |
-| 05 | ⬜ | | |
+| 05 | 🟡 | 2026-07-27 | roi/05-calibrator-and-normalisation |
 | 06 | ⬜ | | |
 | 07 | ⬜ | | |
 | 08 | ⬜ | | |
