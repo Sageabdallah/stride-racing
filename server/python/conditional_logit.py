@@ -146,8 +146,15 @@ class ConditionalLogitBlend:
                 total -= u[w] - np.log(np.exp(u).sum())
             return total / len(train)
 
-        beta_lo = -5.0 if allow_negative_beta else 0.0
-        bounds = [(0.0, 5.0), (beta_lo, 5.0)]
+        # Freeing beta on the 2026-07-27 diagnostic pushed ALPHA onto its upper
+        # bound (alpha=5.000, beta=-3.950), so that fit is not identified either
+        # — the reported magnitudes are whatever the box allowed, not the
+        # optimum. The diagnostic therefore widens BOTH parameters; only then
+        # is a magnitude worth reading. Standard bounds are untouched.
+        if allow_negative_beta:
+            bounds = [(0.0, 50.0), (-50.0, 50.0)]
+        else:
+            bounds = [(0.0, 5.0), (0.0, 5.0)]
         res = minimize(nll, x0=np.array([0.5, 0.7]), method="L-BFGS-B",
                        bounds=bounds)
         self.alpha, self.beta = float(res.x[0]), float(res.x[1])
@@ -511,7 +518,15 @@ def _self_test():
                           allow_negative_beta=True)
     assert freed.beta < -1e-3, f"unconstrained beta should be negative, got {freed.beta}"
     assert rep_freed["at_bound"]["beta"] is None, rep_freed["at_bound"]
-    assert rep_freed["bounds"]["beta"] == [-5.0, 5.0]
+    assert rep_freed["bounds"]["beta"] == [-50.0, 50.0]
+    # The diagnostic must widen BOTH parameters: freeing beta alone pushed
+    # alpha onto its ceiling on the real 2026-07-27 fit, leaving that run
+    # unidentified too.
+    assert rep_freed["bounds"]["alpha"] == [0.0, 50.0], rep_freed["bounds"]
+    assert rep_freed["at_bound"]["alpha"] is None, \
+        f"alpha still pinned at {freed.alpha} — widen further"
+    assert rep_clamped["bounds"] == {"alpha": [0.0, 5.0], "beta": [0.0, 5.0]}, \
+        "standard bounds must be unchanged"
     assert rep_freed["train_nll"] < rep_clamped["train_nll"], \
         "freeing a binding constraint must not worsen the fit"
 
