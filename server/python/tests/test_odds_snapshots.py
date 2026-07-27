@@ -396,3 +396,32 @@ class TestWiring:
         # odds_source vocabulary per spec
         for label in ("'snapshot'", "'racecard'", "'sp_fallback'"):
             assert label in src
+
+    def test_training_view_odds_snap_is_tip_time_only(self):
+        # G2 regression guard: the odds_snap CTE must feed ONLY tip_time snapshots
+        # into training features. If a future edit drops or widens this filter,
+        # late_t5 / settled odds would leak into training (breaking the as-of
+        # guarantee) — fail loudly here rather than silently corrupt the retrain.
+        src = (SERVER_PYTHON / "refresh_training_view_v2.py").read_text()
+        start = src.index("odds_snap AS (")
+        cte = src[start:src.index("\n    )", start)]
+        assert "snapshot_kind = 'tip_time'" in cte, \
+            "odds_snap CTE must filter snapshot_kind = 'tip_time' (as-of guarantee)"
+        for leak_kind in ("late_t5", "morning", "baseline", "closing_sp"):
+            assert leak_kind not in cte, \
+                f"odds_snap CTE must not admit {leak_kind} — would leak non-as-of odds into training"
+
+    def test_full_pipeline_wires_capture_and_coverage(self):
+        # G1 regression guard: the daily orchestrator must launch the T-5min capture
+        # watcher and run the coverage monitor, and the watcher must be fire-and-forget
+        # (detached) so it can never delay or fail tipping.
+        src = (SERVER_PYTHON / "run_full_pipeline.py").read_text()
+        assert "capture_late_odds.py" in src and '"--watch"' in src
+        assert "odds_snapshot_coverage.py" in src
+        assert "start_new_session=True" in src, "late-odds watcher must be detached (fire-and-forget)"
+
+    def test_capture_late_odds_has_watch_mode(self):
+        # G1: the self-scheduling loop that lets a cron-less host actually run the
+        # per-race T-5 capture through the day.
+        src = (SERVER_PYTHON / "capture_late_odds.py").read_text()
+        assert "def watch(" in src and '"--watch"' in src

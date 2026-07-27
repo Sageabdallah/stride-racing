@@ -292,6 +292,48 @@ def run(date_str: str, dry_run: bool = False, now: Optional[datetime] = None,
     return summary
 
 
+WATCH_INTERVAL_SECONDS = 120   # poll cadence in --watch mode (matches the 1-2 min design)
+WATCH_MAX_HOURS = 14.0         # safety cap so a stray watcher can never run forever
+
+
+def watch(date_str: str, interval: int = WATCH_INTERVAL_SECONDS,
+          max_hours: float = WATCH_MAX_HOURS,
+          target_seconds: int = TARGET_SECONDS) -> int:
+    """Self-scheduling loop for hosts with no external cron.
+
+    Calls ``run`` every ``interval`` seconds until every race for the day is past
+    its post-jump grace (or ``max_hours`` elapses), then exits. Each iteration is
+    isolated in try/except — a capture job must never crash mid-day and abandon
+    the remaining races. Intended to be launched fire-and-forget by the daily
+    pipeline; the existing one-shot mode still works for a cron-per-tick host.
+    """
+    start = datetime.now(timezone.utc)
+    deadline = start + timedelta(hours=max_hours)
+    schedule = load_schedule(date_str)
+    if not schedule:
+        print(f"[LATE_ODDS][watch] no schedule for {date_str} — nothing to watch",
+              file=sys.stderr)
+        return 0
+    last_jump = max(r["jump_time"] for r in schedule)
+    print(f"[LATE_ODDS][watch] watching {len(schedule)} races for {date_str}; "
+          f"last jump {last_jump.isoformat()}, poll every {interval}s", file=sys.stderr)
+    while True:
+        now = datetime.now(timezone.utc)
+        try:
+            run(date_str, target_seconds=target_seconds, now=now)
+        except Exception as e:  # never let one bad pull kill the day's capture
+            print(f"[LATE_ODDS][watch] iteration failed (non-fatal): {e}", file=sys.stderr)
+        now = datetime.now(timezone.utc)
+        if now > last_jump + timedelta(seconds=POST_JUMP_GRACE_SECONDS):
+            print("[LATE_ODDS][watch] all races past post-jump grace — exiting",
+                  file=sys.stderr)
+            return 0
+        if now >= deadline:
+            print(f"[LATE_ODDS][watch] {max_hours}h cap reached — exiting", file=sys.stderr)
+            return 0
+        time.sleep(interval)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Capture late_t5 odds snapshots for races near their jump.")
@@ -301,7 +343,18 @@ def main() -> int:
                         help="Build and report rows without writing to the DB")
     parser.add_argument("--target-seconds", type=int, default=TARGET_SECONDS,
                         help="Aim this many seconds before the jump (default: 300)")
+    parser.add_argument("--watch", action="store_true",
+                        help="Self-scheduling loop: capture each race near its jump "
+                             "through the day, then exit (for hosts with no cron)")
+    parser.add_argument("--interval", type=int, default=WATCH_INTERVAL_SECONDS,
+                        help="Seconds between --watch iterations (default: 120)")
+    parser.add_argument("--max-hours", type=float, default=WATCH_MAX_HOURS,
+                        help="Safety cap on total --watch duration (default: 14)")
     args = parser.parse_args()
+
+    if args.watch:
+        return watch(args.date, interval=args.interval, max_hours=args.max_hours,
+                     target_seconds=args.target_seconds)
 
     summary = run(args.date, dry_run=args.dry_run, target_seconds=args.target_seconds)
     print(json.dumps(summary, indent=2, default=str))
