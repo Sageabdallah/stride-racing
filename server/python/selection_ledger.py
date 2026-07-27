@@ -409,6 +409,99 @@ def persist_rows(conn, rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     return {"written": int(written), "skipped": 0, "reason": None}
 
 
+# Pending = written at tip time and not yet touched by a settle pass. Rows
+# the settle pass has seen always carry sp (even dead-heated/scratched ones),
+# so this predicate never re-picks them; rows whose result simply is not
+# collected yet stay pending for the next run.
+_SETTLE_PENDING_SQL = """
+    SELECT race_date, track, race_number, horse_name, selection_origin,
+           should_bet, confidence, raw_model_prob, calibrated_prob,
+           model_edge_pp, fair_odds, price_taken, has_real_market_odds,
+           stake_rule, stake, commission_rate, refused
+    FROM selection_ledger
+    WHERE race_date = %s AND settled = FALSE AND pnl IS NULL AND sp IS NULL
+"""
+
+
+def settle_pending_rows(conn, race_date, results_map: Optional[Dict] = None) -> Dict[str, Any]:
+    """Settle pending ledger rows for race_date against collected results.
+
+    The missing half of the measurement spine (roi-roadmap 01, acceptance #1):
+    rows are written pending at tip time; this pass fills sp / clv_pct /
+    settled_pnl once results exist. It uses the SAME results source as the
+    shadow tracker (shadow_pl_tracker.fetch_results_map) and the SAME
+    settlement contract (build_ledger_row) — no third path.
+
+    Settlement uses the commission_rate recorded on the row at tip time, never
+    a re-read of today's env: historical truth is not rewritten.
+
+    Idempotent: only still-pending rows are touched, and the rebuild is a pure
+    function of the stored row plus the result, so re-running rewrites
+    identical values. Flag-gated exactly like persist_rows.
+    """
+    if not _stride_flag("STRIDE_LEDGER_WRITE"):
+        return {"settled": 0, "unmatched": 0, "pending": 0,
+                "reason": "STRIDE_LEDGER_WRITE is off"}
+    from shadow_pl_tracker import _normalize_name
+    if results_map is None:
+        from shadow_pl_tracker import fetch_results_map
+        results_map = fetch_results_map(conn, race_date)
+
+    cur = conn.cursor()
+    try:
+        cur.execute(_SETTLE_PENDING_SQL, (race_date,))
+        cols = [d[0] for d in cur.description]
+        pending = [dict(zip(cols, r)) for r in cur.fetchall()]
+    finally:
+        cur.close()
+
+    rebuilt, unmatched = [], 0
+    for row in pending:
+        key = (_normalize_name(row["track"]), row["race_number"],
+               _normalize_name(row["horse_name"]))
+        res = results_map.get(key)
+        if not res:
+            unmatched += 1
+            continue
+        pos = res.get("position")
+        result = {
+            "won": bool(res.get("won")) or pos == 1,
+            "placed": bool(res.get("placed")) or (isinstance(pos, int) and pos <= 3),
+            "starting_price": res.get("sp"),
+            "scratched": pos is None,
+            "dh": isinstance(pos, str) and "dh" in pos.lower(),
+        }
+        cal, raw = row.get("calibrated_prob"), row.get("raw_model_prob")
+        pick = {
+            "horse": row.get("horse_name"),
+            "win_pct": cal * 100.0 if cal is not None else None,
+            "raw_model_pct": raw * 100.0 if raw is not None else None,
+            "edge_pct": row.get("model_edge_pp"),
+            "odds": row.get("price_taken"),
+            "fair_odds": row.get("fair_odds"),
+            "staking": row.get("stake_rule"),
+            "should_bet": row.get("should_bet"),
+            "confidence": row.get("confidence"),
+            "has_real_market_odds": row.get("has_real_market_odds"),
+            "selection_origin": row.get("selection_origin"),
+        }
+        race = {"race_date": row.get("race_date"), "track": row.get("track"),
+                "race_number": row.get("race_number")}
+        units = STAKE_UNITS.get(str(row.get("stake_rule")), 0.0)
+        bankroll = (float(row["stake"]) * 100.0 / units) if units else 10000.0
+        commission = (float(row["commission_rate"])
+                      if row.get("commission_rate") is not None else None)
+        rebuilt.append(build_ledger_row(
+            pick, race, result=result, commission_rate=commission,
+            bankroll=bankroll, refused=bool(row.get("refused"))))
+
+    out = {"settled": 0, "unmatched": unmatched, "pending": len(pending),
+           "reason": None}
+    if rebuilt:
+        out["settled"] = persist_rows(conn, rebuilt)["written"]
+    return out
+
+
 def _self_test():
     print("selection_ledger self-test")
 
@@ -628,4 +721,18 @@ def _self_test():
 
 
 if __name__ == "__main__":
-    _self_test()
+    if len(sys.argv) >= 3 and sys.argv[1] == "settle":
+        # Settle pending rows against collected results, e.g.:
+        #   STRIDE_LEDGER_WRITE=true python selection_ledger.py settle 2026-03-28
+        from shadow_pl_tracker import _get_connection
+        conn = _get_connection()
+        try:
+            for _date in sys.argv[2:]:
+                _out = settle_pending_rows(conn, _date)
+                print(f"  [LEDGER] {_date}: settled={_out['settled']} "
+                      f"unmatched={_out['unmatched']} pending={_out['pending']}"
+                      + (f" ({_out['reason']})" if _out.get("reason") else ""))
+        finally:
+            conn.close()
+    else:
+        _self_test()

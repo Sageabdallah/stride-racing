@@ -242,3 +242,146 @@ def test_persist_rows_noop_when_flag_off():
     res = persist_rows(None, [build_ledger_row(PICK, RACE)])
     assert res["written"] == 0 and res["skipped"] == 1
     assert "STRIDE_LEDGER_WRITE" in res["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Settle pass: pending rows meet results (acceptance #1)
+# ---------------------------------------------------------------------------
+
+from selection_ledger import settle_pending_rows
+
+_SETTLE_COLS = ["race_date", "track", "race_number", "horse_name",
+                "selection_origin", "should_bet", "confidence",
+                "raw_model_prob", "calibrated_prob", "model_edge_pp",
+                "fair_odds", "price_taken", "has_real_market_odds",
+                "stake_rule", "stake", "commission_rate", "refused"]
+
+
+def _pending_row(**over):
+    row = ["2026-03-08", "Flemington", 5, "Alpha", "bet_pick", True, "high",
+           0.30, 0.25, 5.0, 4.0, 5.0, True, "2u", 200.0, 0.08, False]
+    d = dict(zip(_SETTLE_COLS, row))
+    d.update(over)
+    return tuple(d[c] for c in _SETTLE_COLS)
+
+
+class _SettleCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self.rowcount = 0
+
+    def execute(self, sql, params):
+        pass
+
+    @property
+    def description(self):
+        return [(c,) for c in _SETTLE_COLS]
+
+    def fetchall(self):
+        return self.conn.pending
+
+    def executemany(self, sql, payload):
+        self.conn.upserted.extend(payload)
+        self.rowcount = len(payload)
+
+    def close(self):
+        pass
+
+
+class _SettleConn:
+    def __init__(self, pending):
+        self.pending = pending
+        self.upserted = []
+        self.commits = 0
+
+    def cursor(self):
+        return _SettleCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+
+def _col(tup, name):
+    return tup[LEDGER_COLUMNS.index(name)]
+
+
+def test_settle_fills_both_prices_net_pnl_and_clv():
+    os.environ["STRIDE_LEDGER_WRITE"] = "true"
+    conn = _SettleConn([_pending_row()])
+    results = {("flemington", 5, "alpha"):
+               {"position": 1, "sp": 4.0, "won": True, "placed": True}}
+    out = settle_pending_rows(conn, "2026-03-08", results_map=results)
+    assert out == {"settled": 1, "unmatched": 0, "pending": 1, "reason": None}
+    assert len(conn.upserted) == 1 and conn.commits == 1
+    tup = conn.upserted[0]
+    assert _col(tup, "sp") == 4.0 and _col(tup, "price_taken") == 5.0
+    assert _col(tup, "clv_pct") == pytest.approx(25.0)
+    assert _col(tup, "pnl") == pytest.approx(736.0)  # settled at taken price, net 8%
+    assert _col(tup, "settled_pnl") == pytest.approx(736.0)
+    assert _col(tup, "settled") is True and _col(tup, "won") is True
+    assert _col(tup, "settled_at_sp_fallback") is False
+
+
+def test_settle_uses_the_commission_rate_recorded_at_tip_time():
+    os.environ["STRIDE_LEDGER_WRITE"] = "true"
+    os.environ["STRIDE_COMMISSION_RATE"] = "0.08"  # today's env must NOT rewrite history
+    conn = _SettleConn([_pending_row(commission_rate=0.10)])
+    results = {("flemington", 5, "alpha"):
+               {"position": 1, "sp": 4.0, "won": True, "placed": True}}
+    settle_pending_rows(conn, "2026-03-08", results_map=results)
+    tup = conn.upserted[0]
+    assert _col(tup, "commission_rate") == pytest.approx(0.10)
+    assert _col(tup, "pnl") == pytest.approx(720.0)  # 800 * 0.90, the booked rate
+
+
+def test_settle_leaves_unmatched_rows_pending():
+    os.environ["STRIDE_LEDGER_WRITE"] = "true"
+    conn = _SettleConn([_pending_row()])
+    out = settle_pending_rows(conn, "2026-03-08", results_map={})
+    assert out["settled"] == 0 and out["unmatched"] == 1
+    assert conn.upserted == [], "no result yet — the row stays pending for the next run"
+
+
+def test_settle_dead_heat_captures_sp_but_never_settles():
+    os.environ["STRIDE_LEDGER_WRITE"] = "true"
+    conn = _SettleConn([_pending_row()])
+    results = {("flemington", 5, "alpha"):
+               {"position": "1dh", "sp": 4.0, "won": True, "placed": True}}
+    settle_pending_rows(conn, "2026-03-08", results_map=results)
+    tup = conn.upserted[0]
+    assert _col(tup, "sp") == 4.0, "SP is captured so the row is not re-picked"
+    assert _col(tup, "settled") is False and _col(tup, "pnl") is None
+
+
+def test_settle_scratched_books_zero():
+    os.environ["STRIDE_LEDGER_WRITE"] = "true"
+    conn = _SettleConn([_pending_row()])
+    results = {("flemington", 5, "alpha"):
+               {"position": None, "sp": None, "won": False, "placed": False}}
+    settle_pending_rows(conn, "2026-03-08", results_map=results)
+    tup = conn.upserted[0]
+    assert _col(tup, "pnl") == 0.0 and _col(tup, "settled") is False
+    assert _col(tup, "settled_at_sp_fallback") is False
+
+
+def test_settle_refused_row_never_books_pnl_but_keeps_clv():
+    os.environ["STRIDE_LEDGER_WRITE"] = "true"
+    conn = _SettleConn([_pending_row(stake_rule="0u", stake=0.0,
+                                     should_bet=False, refused=True)])
+    results = {("flemington", 5, "alpha"):
+               {"position": 1, "sp": 4.0, "won": True, "placed": True}}
+    settle_pending_rows(conn, "2026-03-08", results_map=results)
+    tup = conn.upserted[0]
+    assert _col(tup, "refused") is True
+    assert _col(tup, "pnl") == 0.0, "a refused row never books P&L"
+    assert _col(tup, "clv_pct") == pytest.approx(25.0), "gate quality stays measurable"
+
+
+def test_settle_noop_when_flag_off():
+    conn = _SettleConn([_pending_row()])
+    out = settle_pending_rows(conn, "2026-03-08", results_map={})
+    assert out["reason"] and "STRIDE_LEDGER_WRITE" in out["reason"]
+    assert conn.upserted == []

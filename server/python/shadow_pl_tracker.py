@@ -265,6 +265,45 @@ def settle_shadow_row(pos, sp, tipped_odds, won, placed, dh=False,
     return "LOSS", -1, sp_fallback
 
 
+def fetch_results_map(conn, race_date):
+    """Results for race_date keyed by (track, race_number, horse), normalised.
+
+    prediction_audit (tipped horses, carrying won/placed flags) first, then
+    race_results_history fills in the rest of the field — prediction_audit only
+    contains tipped horses. This is the single results source for BOTH the
+    shadow tracker (cmd_results) and the selection-ledger settle pass
+    (selection_ledger.settle_pending_rows): the two settlement paths must
+    never disagree about what the result was.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT track, race_number, horse_name, actual_position, starting_price, won, placed
+            FROM prediction_audit
+            WHERE race_date = %s AND result_status = 'resulted'
+        """, (race_date,))
+        results_rows = cur.fetchall()
+
+        results_map = {}
+        if results_rows:
+            for track, rnum, horse, pos, sp, won, placed in results_rows:
+                key = (_normalize_name(track), rnum, _normalize_name(horse))
+                results_map[key] = {"position": pos, "sp": sp, "won": won, "placed": placed}
+
+        cur.execute("""
+            SELECT track, race_number, horse_name, position, sp_odds
+            FROM race_results_history
+            WHERE race_date = %s
+        """, (race_date,))
+        for track, rnum, horse, pos, sp in cur.fetchall():
+            key = (_normalize_name(track), rnum, _normalize_name(horse))
+            if key not in results_map:
+                results_map[key] = {"position": pos, "sp": sp}
+    finally:
+        cur.close()
+    return results_map
+
+
 def cmd_results(race_date):
     conn = _get_connection()
     ensure_schema(conn)
@@ -282,31 +321,10 @@ def cmd_results(race_date):
         cur.close()
         conn.close()
         return 0
+    cur.close()
 
-    cur.execute("""
-        SELECT track, race_number, horse_name, actual_position, starting_price, won, placed
-        FROM prediction_audit
-        WHERE race_date = %s AND result_status = 'resulted'
-    """, (race_date,))
-    results_rows = cur.fetchall()
-
-    results_map = {}
-    if results_rows:
-        for track, rnum, horse, pos, sp, won, placed in results_rows:
-            key = (_normalize_name(track), rnum, _normalize_name(horse))
-            results_map[key] = {"position": pos, "sp": sp, "won": won, "placed": placed}
-
-    # Always supplement with race_results_history for horses not in prediction_audit
-    # (prediction_audit only contains tipped horses, not the full field)
-    cur.execute("""
-        SELECT track, race_number, horse_name, position, sp_odds
-        FROM race_results_history
-        WHERE race_date = %s
-    """, (race_date,))
-    for track, rnum, horse, pos, sp in cur.fetchall():
-        key = (_normalize_name(track), rnum, _normalize_name(horse))
-        if key not in results_map:
-            results_map[key] = {"position": pos, "sp": sp}
+    results_map = fetch_results_map(conn, race_date)
+    cur = conn.cursor()
 
     if not results_map:
         print(f"  [SHADOW] 0 results matched — has results_collector run for {race_date}?",
