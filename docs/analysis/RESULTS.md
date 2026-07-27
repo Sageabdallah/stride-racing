@@ -330,3 +330,70 @@ accumulate. None have.
 No ROI, no strike rate, no P&L. `selections` records what was published, not
 what it returned. §2's baseline remains unmeasured and every ship-criteria
 verdict still evaluates to `NOT REPORTABLE`.
+
+---
+
+## 6. The β = 0 question, answered — 2026-07-27
+
+`fit-conditional-logit` with `diagnose_beta_bound`, run #5. Both fits on
+**identical data**: 1,227 usable races, 982 train / 245 holdout.
+
+| bounds | α | β | at bound | holdout hit | holdout log-loss |
+|---|---|---|---|---|---|
+| standard `β ∈ [0, 5]` | 1.296 | **0.000** | β at **lower** | 0.429 | 1.6866 |
+| diagnostic `β ∈ [−5, 5]` | **5.000** | **−3.950** | α at **upper** | **0.506** | 1.7707 |
+| *(model only)* | — | — | — | 0.429 | 1.7039 |
+| *(market only)* | — | — | — | 0.404 | 1.7499 |
+
+The standard row reproduces `docs/12` §5.1's recorded 2026-07-13 fit exactly
+(α = 1.296, β = 0.000, hit 42.9%, log-loss 1.6866), which validates the
+comparison.
+
+### 6.1 `docs/12` §5.1 interpretation (c) is refuted
+
+That section reads β = 0.000 as *"the SP market adds nothing conditional on the
+stored model probability"*. **It was a clamped corner.** Released, β goes to
+**−3.950** — the fit does not want to ignore the market, it wants to
+**actively subtract** it. The stored model probability already over-weights
+market information, and the downstream market anchor then counts it a second
+time.
+
+The `at_bound` field now reports this on every fit, so the ambiguity cannot
+recur silently.
+
+### 6.2 …but the diagnostic fit is not identified either
+
+Freeing β pushed **α onto its own upper bound** (5.000). A parameter resting on
+a box edge is whatever the box allowed, not an optimum, so **only the SIGN of β
+is trustworthy here — the magnitude −3.950 is not.**
+
+Fixed: `allow_negative_beta` now widens **both** parameters to
+`α ∈ [0, 50]`, `β ∈ [−50, 50]`, and the self-test asserts α is no longer pinned.
+Standard bounds are untouched. **The magnitudes above should be re-measured
+under the wider box before anyone reasons about their size.**
+
+### 6.3 This does NOT license enabling `STRIDE_CL_BLEND`
+
+Top-pick hit rate rises 42.9% → **50.6%** (+7.7 pp), which is large and well
+above the 34.9% AU favourite baseline. But **log-loss degrades 1.6866 → 1.7707**.
+The blend ranks better and calibrates worse.
+
+For a system that gates bets on `edge`, computed *from* the calibrated
+probability, that trade is the wrong way round — and it fails **SYSTEM_MAP
+constraint 18** outright, which requires a default-on change to raise hit rate
+*without* degrading calibration. Under `ship_criteria.evaluate_ship_criteria`
+this is a `HOLD`, not a `SHIP`.
+
+The provenance hold in `docs/12` §5.1 also still stands and is untouched by any
+of this: it concerns *what the fit consumed*, and widening a bound does not
+change that the fitted quantity is imported `training_data` predictions of
+unknown generating stage.
+
+### 6.4 `final_prob_audit.sql` applied
+
+`prediction_audit.final_win_prob` now exists (`apply-migration` run #2). Note
+what its absence implied: the migration header states the pipeline *self-heals*
+this column at write time via `ADD COLUMN IF NOT EXISTS`, so the column being
+missing is independent evidence that `store_final_probs_in_audit` has never
+successfully run against this database — consistent with §5's provenance
+finding.
