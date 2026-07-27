@@ -1,6 +1,6 @@
 # STRIDE — ACADEMIC FINDINGS (Phase 2 deliverable)
 
-**Assembled 2026-07-25** from five parallel research agents, branch `claude/latest-repo-commit-4j5ksq`.
+**Assembled 2026-07-25** from five parallel research streams.
 Companion to `docs/analysis/SYSTEM_MAP.md` (Phase 1). Input to Phase 3.
 
 ---

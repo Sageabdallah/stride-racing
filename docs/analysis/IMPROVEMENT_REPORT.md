@@ -1,6 +1,6 @@
 # STRIDE — IMPROVEMENT REPORT (Phase 3 deliverable)
 
-**Assembled 2026-07-25**, branch `claude/latest-repo-commit-4j5ksq`.
+**Assembled 2026-07-25**.
 Inputs read in full: `docs/analysis/SYSTEM_MAP.md` (Phase 1), `docs/analysis/ACADEMIC_FINDINGS.md`
 (Phase 2, including its **§ Citation audit**), `docs/12-hit-rate-research.md` (prior roadmap),
 `research/report.md` (prior research pass). Output: a ranked, bucketed, measurable change list for

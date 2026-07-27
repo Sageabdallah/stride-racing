@@ -2,7 +2,7 @@
 
 **Purpose.** This is the shared factual base for every later agent in this research run.
 It is written to be read *without* the repo open. Everything below was established by
-source reading on branch `claude/latest-repo-commit-4j5ksq` (HEAD `2763ea1`), synthesised
+source reading at HEAD `2763ea1`, synthesised
 from three independent recon passes (architecture, documentation, selection logic) plus
 targeted re-verification of every fact on which those passes disagreed.
 
