@@ -94,19 +94,10 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
 
 
-# Phase 2 sectional feature names (as they appear in FEATURE_COLUMNS)
-PHASE2_FEATURES = [
-    "z_200m",
-    "z_400m",
-    "z_600m",
-    "z_800m",
-    "lambda_decay",
-    "svi",
-    "rsi",
-    "trip_cost_seconds",
-    "sectional_trajectory",  # Phase 3: slope of last_200m_time, NaN when missing
-    "sectional_rank_at_distance",  # Phase 4: within-race closing rank at distance, NaN when missing
-]
+# Phase 2 sectional feature names and the NaN-preserve contract now live in
+# nan_contract.py — ONE definition shared with the serve path (ml_model.py
+# STRIDE_SERVE_NAN_CONTRACT). Task 03: single source of truth, do not restate.
+from nan_contract import PHASE2_FEATURES, NAN_PRESERVE_FEATURES, TRAINER_NAN_PRESERVE
 
 # Phase 5 within-race relative-market trio (relative_market.py) — ablated as
 # a unit so the walk-forward delta isolates their causal contribution
@@ -114,12 +105,6 @@ PHASE5_FEATURES = [
     "fair_implied_prob",
     "odds_rank",
     "odds_rank_pct",
-]
-
-# Features that preserve NaN (like PHASE2) but are NOT ablated with sectionals
-NAN_PRESERVE_FEATURES = [
-    "runs_since_peak",   # NaN when <5 prior runs; tree models exploit missingness
-    "trial_recency",     # 999 = no trial; keep NaN rather than corrupt with 0 (0 = trial today)
 ]
 
 # Mapping: training_view_v2 column  ->  FEATURE_COLUMNS name
@@ -274,8 +259,10 @@ FEATURE_COLUMNS = [
     "odds_rank_pct",
 ]
 
-# Non-sectional features — fill NaN with 0 for these (exclude both PHASE2 and NAN_PRESERVE)
-NON_SECTIONAL_FEATURES = [f for f in FEATURE_COLUMNS if f not in PHASE2_FEATURES and f not in NAN_PRESERVE_FEATURES]
+# Non-sectional features — fill NaN with 0 for these. NAN_PRESERVE_FEATURES
+# from nan_contract is the FULL preserve set (PHASE2 + trainer preserve list),
+# so this equals the old `not in PHASE2 and not in NAN_PRESERVE` exactly.
+NON_SECTIONAL_FEATURES = [f for f in FEATURE_COLUMNS if f not in NAN_PRESERVE_FEATURES]
 
 MODELS_DIR = os.path.join(SCRIPT_DIR, "models")
 os.makedirs(MODELS_DIR, exist_ok=True)

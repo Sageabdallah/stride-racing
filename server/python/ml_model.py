@@ -52,6 +52,17 @@ try:
 except ImportError:
     FOCAL_LOSS_AVAILABLE = False
 
+# NaN-preservation contract (single definition shared with retrain_v2.py).
+# Pure-stdlib module, always importable.
+from nan_contract import NAN_PRESERVE_SET
+
+
+def _serve_nan_contract_enabled() -> bool:
+    """STRIDE_SERVE_NAN_CONTRACT (default OFF) — when on, prepare_features
+    passes NaN through for the contract columns instead of zero-filling them,
+    matching what the trees were trained on. Off = exact legacy behaviour."""
+    return os.environ.get("STRIDE_SERVE_NAN_CONTRACT", "false").strip().lower() in ("true", "1", "yes")
+
 
 class RacingMLModel:
     """Ensemble ML model for horse racing predictions."""
@@ -211,11 +222,19 @@ class RacingMLModel:
         cols = getattr(self, '_trained_feature_columns', None) or self.FEATURE_COLUMNS
         features = pd.DataFrame()
 
+        # STRIDE_SERVE_NAN_CONTRACT (default off): columns in the shared
+        # NaN-preserve contract (nan_contract.NAN_PRESERVE_SET — sectional/
+        # z-score features, trial_recency, runs_since_peak) pass NaN through
+        # so tree models route missingness exactly as in training; every other
+        # column keeps the legacy zero-fill. Flag off = exact old behaviour.
+        preserve = NAN_PRESERVE_SET if _serve_nan_contract_enabled() else frozenset()
+
         for col in cols:
             if col in data.columns:
-                features[col] = pd.to_numeric(data[col], errors='coerce').fillna(0)
+                numeric = pd.to_numeric(data[col], errors='coerce')
+                features[col] = numeric if col in preserve else numeric.fillna(0)
             else:
-                features[col] = 0
+                features[col] = np.nan if col in preserve else 0
 
         # Enforce binary constraint on has_sectional_data
         if "has_sectional_data" in features.columns:
