@@ -92,10 +92,14 @@ def _bare_runner():
 
 
 def test_legacy_path_documents_the_defects(monkeypatch):
-    """Flags OFF = exact old behaviour. These assertions encode the defects
-    themselves: they are what the flag-on parity tests overturn."""
+    """Explicit rollback (STRIDE_INTERACTION_PARITY=false, NaN contract unset)
+    reproduces the exact old behaviour. These assertions encode the defects
+    themselves: they are what the flag-on parity tests overturn. The parity
+    default is ON since the task-03 comparison showed it not worse (inert on
+    the current artifact) — the legacy path survives for one release as the
+    rollback, and this test keeps it honest."""
     monkeypatch.delenv("STRIDE_SERVE_NAN_CONTRACT", raising=False)
-    monkeypatch.delenv("STRIDE_INTERACTION_PARITY", raising=False)
+    monkeypatch.setenv("STRIDE_INTERACTION_PARITY", "false")
     _, X = _serve_vector(_bare_runner(), 6.0, 1400, 10, None)
     # Defect 1: missing sectionals/trials destroyed into 0.
     assert X["z_200m"] == 0.0

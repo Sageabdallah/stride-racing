@@ -16,8 +16,10 @@ flags so flag-off reproduces the old served values exactly:
                               training formulas (feature_interactions.py)
                               instead of the legacy inline versions, whose
                               barrier_x_pace_inv is sign-flipped against
-                              training. Default OFF — flip only after the
-                              on/off backtest comparison (task 03 step 3).
+                              training. Default ON — flipped after the on/off
+                              comparison showed parity not worse (delta exactly
+                              0: the feature is inert in the current artifact).
+                              Set false to roll back (kept for one release).
   STRIDE_MOVEMENT_FEATURES_LIVE
                               populate MOVEMENT_FEATURES from real movement.
                               Default OFF — both paths serve 0, matching
@@ -62,7 +64,18 @@ def _stride_flag(name: str) -> bool:
 
 
 def interaction_parity_enabled() -> bool:
-    return _stride_flag("STRIDE_INTERACTION_PARITY")
+    """STRIDE_INTERACTION_PARITY — default ON since the task-03 comparison.
+
+    Evidence (examples/interaction_parity_comparison_2026-03-04_2026-04-18.json):
+    on the 21,108-runner metro window, parity vs legacy delta is exactly 0 on
+    Brier and log-loss — barrier_x_pace_inv is INERT in the current model
+    artifact (importance 0.0; training never populates barrier_advantage, so
+    the interaction is all-zero at fit time). The flip therefore changes no
+    live output today; it removes the sign-flipped formula before the task-12
+    retrain makes the feature real. Set STRIDE_INTERACTION_PARITY=false to
+    roll back to the legacy inline formulas (kept below for one release).
+    """
+    return os.environ.get("STRIDE_INTERACTION_PARITY", "true").strip().lower() in ("true", "1", "yes")
 
 
 def movement_features_live() -> bool:
