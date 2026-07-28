@@ -73,7 +73,11 @@ def _mask_declaration_blocks(src: str) -> str:
                     if depth == 0:
                         break
                 i += 1
-            out = out[:start] + " " * (i + 1 - start) + out[i + 1:]
+            # keep newlines so every evidence line number stays true — blanking
+            # them shifts every citation after a declaration block (~200 lines
+            # in retrain_v2.py) and silently corrupts the report
+            blanked = "".join(c if c == "\n" else " " for c in out[start:i + 1])
+            out = out[:start] + blanked + out[i + 1:]
     return out
 
 

@@ -21,7 +21,7 @@
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2580: \"distance_strike_rate\": round(h.get(\"distance_strike_rate\", 0), 3),",
-          "ml_model.py:617: 'distance_strike_rate': 25.0,",
+          "ml_model.py:741: 'distance_strike_rate': 25.0,",
           "form_feature_builder.py:57: features[\"distance_strike_rate\"] = 0",
           "form_feature_builder.py:137: features[\"distance_strike_rate\"] = round(sr * confidence, 4)"
         ]
@@ -38,7 +38,7 @@
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2581: \"course_strike_rate\": round(h.get(\"course_strike_rate\", 0), 3),",
-          "ml_model.py:618: 'course_strike_rate': 20.0,",
+          "ml_model.py:742: 'course_strike_rate': 20.0,",
           "form_feature_builder.py:56: features[\"course_strike_rate\"] = 0",
           "form_feature_builder.py:124: features[\"course_strike_rate\"] = round(sr * confidence, 4)"
         ]
@@ -55,7 +55,7 @@
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2576: \"weighted_form_score\": round(h.get(\"weighted_form_score\", 0), 1),",
-          "ml_model.py:619: 'weighted_form_score': 15.0,",
+          "ml_model.py:743: 'weighted_form_score': 15.0,",
           "form_feature_builder.py:58: features[\"weighted_form_score\"] = 0",
           "form_feature_builder.py:170: features[\"weighted_form_score\"] = round(float(np.average(scores, weights=weights)), 2)"
         ]
@@ -71,7 +71,7 @@
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2578: \"is_first_up\": bool(h.get(\"is_first_up\", 0)),",
-          "ml_model.py:620: 'is_first_up': 0,",
+          "ml_model.py:744: 'is_first_up': 0,",
           "form_feature_builder.py:54: features[\"is_first_up\"] = 1",
           "form_feature_builder.py:105: features[\"is_first_up\"] = 1 if features[\"days_since_run\"] > 60 or len(prior_runs) == 0 else 0"
         ]
@@ -88,7 +88,7 @@
           "form_feature_builder.py:116: features[\"is_second_up\"] = 0"
         ],
         "serve_evidence": [
-          "ml_model.py:621: 'is_second_up': 1,",
+          "ml_model.py:745: 'is_second_up': 1,",
           "form_feature_builder.py:55: features[\"is_second_up\"] = 0",
           "form_feature_builder.py:112: features[\"is_second_up\"] = 1 if gap_before > 60 else 0",
           "form_feature_builder.py:114: features[\"is_second_up\"] = 0"
@@ -123,7 +123,7 @@
           "form_feature_builder.py:221: features[\"jockey_trainer_strike_rate\"] = 0"
         ],
         "serve_evidence": [
-          "ml_model.py:623: 'jockey_trainer_strike_rate': 18.0,",
+          "ml_model.py:747: 'jockey_trainer_strike_rate': 18.0,",
           "form_feature_builder.py:67: features[\"jockey_trainer_strike_rate\"] = 0",
           "form_feature_builder.py:216: features[\"jockey_trainer_strike_rate\"] = round(jockey_wins / len(jockey_runs), 4)",
           "form_feature_builder.py:218: features[\"jockey_trainer_strike_rate\"] = 0"
@@ -141,7 +141,7 @@
           "form_feature_builder.py:223: features[\"is_winning_combo\"] = 0"
         ],
         "serve_evidence": [
-          "ml_model.py:624: 'is_winning_combo': 1,",
+          "ml_model.py:748: 'is_winning_combo': 1,",
           "form_feature_builder.py:66: features[\"is_winning_combo\"] = 0",
           "form_feature_builder.py:214: features[\"is_winning_combo\"] = 1 if jockey_wins > 0 else 0",
           "form_feature_builder.py:220: features[\"is_winning_combo\"] = 0"
@@ -157,7 +157,7 @@
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2261: feat[\"barrier_draw\"] = int(runner.get(\"draw\") or runner.get(\"barrier\") or 0)",
-          "ml_model.py:625: 'barrier_draw': 3,"
+          "ml_model.py:749: 'barrier_draw': 3,"
         ]
       },
       {
@@ -170,7 +170,7 @@
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2263: feat[\"weight_kg\"] = float(wt) if wt else 0",
-          "ml_model.py:627: 'weight_kg': 56,"
+          "ml_model.py:751: 'weight_kg': 56,"
         ]
       },
       {
@@ -189,7 +189,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:425: out[\"market_odds\"] = df[\"_effective_odds\"]",
+          "retrain_v2.py:574: out[\"market_odds\"] = df[\"_effective_odds\"]",
           "retrain_v2.py: via VIEW_TO_FEATURE_MAP sp_odds -> market_odds"
         ],
         "serve_evidence": [
@@ -987,7 +987,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:508: out[\"fitness_x_distance\"] = fitness_proxy * out[\"distance_strike_rate\"].fillna(0)"
+          "retrain_v2.py:657: out[\"fitness_x_distance\"] = fitness_proxy * out[\"distance_strike_rate\"].fillna(0)"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2326: feat[\"fitness_x_distance\"] = _fp * feat.get(\"distance_strike_rate\", 0)"
@@ -999,8 +999,8 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:513: out[\"barrier_x_pace_inv\"] = out[\"barrier_advantage\"].fillna(0) * _pps",
-          "retrain_v2.py:515: out[\"barrier_x_pace_inv\"] = out[\"barrier_advantage\"].fillna(0) * 0.5"
+          "retrain_v2.py:662: out[\"barrier_x_pace_inv\"] = out[\"barrier_advantage\"].fillna(0) * _pps",
+          "retrain_v2.py:664: out[\"barrier_x_pace_inv\"] = out[\"barrier_advantage\"].fillna(0) * 0.5"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2328: feat[\"barrier_x_pace_inv\"] = runner.get(\"barrier_advantage\", 0) * (1 - _pps)"
@@ -1012,7 +1012,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:518: out[\"sectional_x_going\"] = out[\"z_200m\"].fillna(0) * out[\"going_suitability\"].fillna(0.5)"
+          "retrain_v2.py:667: out[\"sectional_x_going\"] = out[\"z_200m\"].fillna(0) * out[\"going_suitability\"].fillna(0.5)"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2329: feat[\"sectional_x_going\"] = runner.get(\"z_200m\", 0) * feat.get(\"going_suitability\", 0.5)"
@@ -1024,7 +1024,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:521: out[\"class_drop_x_trajectory\"] = ("
+          "retrain_v2.py:670: out[\"class_drop_x_trajectory\"] = ("
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2330: feat[\"class_drop_x_trajectory\"] = feat.get(\"is_class_drop\", 0) * feat.get(\"form_direction_slope\", 0)"
@@ -1036,7 +1036,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:527: out[\"campaign_run_x_fitness\"] = crn * campaign_freshness"
+          "retrain_v2.py:676: out[\"campaign_run_x_fitness\"] = crn * campaign_freshness"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2332: feat[\"campaign_run_x_fitness\"] = _crn * _cf"
@@ -1048,9 +1048,9 @@
         "serve_status": "REFERENCED_ONLY",
         "verdict": "ZERO_AT_SERVE",
         "train_evidence": [
-          "retrain_v2.py:325: return {\"pace_pressure_score\": pd.Series(pace_pressure, index=df.index),",
-          "retrain_v2.py:394: return {\"pace_pressure_score\": pd.Series(pace_pressure, index=df.index),",
-          "retrain_v2.py:488: out[\"pace_pressure_score\"] = _pace[\"pace_pressure_score\"]"
+          "retrain_v2.py:474: return {\"pace_pressure_score\": pd.Series(pace_pressure, index=df.index),",
+          "retrain_v2.py:543: return {\"pace_pressure_score\": pd.Series(pace_pressure, index=df.index),",
+          "retrain_v2.py:637: out[\"pace_pressure_score\"] = _pace[\"pace_pressure_score\"]"
         ],
         "serve_evidence": []
       },
@@ -1060,9 +1060,9 @@
         "serve_status": "REFERENCED_ONLY",
         "verdict": "ZERO_AT_SERVE",
         "train_evidence": [
-          "retrain_v2.py:326: \"leader_advantage\": pd.Series(leader_adv, index=df.index),",
-          "retrain_v2.py:395: \"leader_advantage\": pd.Series(leader_adv, index=df.index),",
-          "retrain_v2.py:489: out[\"leader_advantage\"] = _pace[\"leader_advantage\"]"
+          "retrain_v2.py:475: \"leader_advantage\": pd.Series(leader_adv, index=df.index),",
+          "retrain_v2.py:544: \"leader_advantage\": pd.Series(leader_adv, index=df.index),",
+          "retrain_v2.py:638: out[\"leader_advantage\"] = _pace[\"leader_advantage\"]"
         ],
         "serve_evidence": []
       },
@@ -1072,9 +1072,9 @@
         "serve_status": "REFERENCED_ONLY",
         "verdict": "ZERO_AT_SERVE",
         "train_evidence": [
-          "retrain_v2.py:327: \"closer_advantage\": pd.Series(closer_adv, index=df.index)}",
-          "retrain_v2.py:396: \"closer_advantage\": pd.Series(closer_adv, index=df.index)}",
-          "retrain_v2.py:490: out[\"closer_advantage\"] = _pace[\"closer_advantage\"]"
+          "retrain_v2.py:476: \"closer_advantage\": pd.Series(closer_adv, index=df.index)}",
+          "retrain_v2.py:545: \"closer_advantage\": pd.Series(closer_adv, index=df.index)}",
+          "retrain_v2.py:639: out[\"closer_advantage\"] = _pace[\"closer_advantage\"]"
         ],
         "serve_evidence": []
       },
@@ -1084,7 +1084,7 @@
         "serve_status": "REFERENCED_ONLY",
         "verdict": "ZERO_AT_SERVE",
         "train_evidence": [
-          "retrain_v2.py:493: out[\"barrier_relevance_score\"] = dist_col.apply("
+          "retrain_v2.py:642: out[\"barrier_relevance_score\"] = dist_col.apply("
         ],
         "serve_evidence": []
       },
@@ -1094,7 +1094,7 @@
         "serve_status": "REFERENCED_ONLY",
         "verdict": "ZERO_AT_SERVE",
         "train_evidence": [
-          "retrain_v2.py:497: out[\"field_size_context\"] = (out[\"field_size\"].fillna(10) / 16.0).clip(upper=1.0)"
+          "retrain_v2.py:646: out[\"field_size_context\"] = (out[\"field_size\"].fillna(10) / 16.0).clip(upper=1.0)"
         ],
         "serve_evidence": []
       },
@@ -1104,7 +1104,7 @@
         "serve_status": "REFERENCED_ONLY",
         "verdict": "ZERO_AT_SERVE",
         "train_evidence": [
-          "retrain_v2.py:500: out[\"market_efficiency_flag\"] = cl.apply("
+          "retrain_v2.py:649: out[\"market_efficiency_flag\"] = cl.apply("
         ],
         "serve_evidence": []
       },
@@ -1114,7 +1114,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:482: out[\"td_pace_bias\"] = 0.5"
+          "retrain_v2.py:631: out[\"td_pace_bias\"] = 0.5"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2302: feat[\"td_pace_bias\"] = runner.get(\"td_pace_bias\", 0.5)"
@@ -1126,7 +1126,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:483: out[\"td_upset_rate\"] = 0.2"
+          "retrain_v2.py:632: out[\"td_upset_rate\"] = 0.2"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2303: feat[\"td_upset_rate\"] = runner.get(\"td_upset_rate\", 0.2)"
@@ -1138,7 +1138,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:484: out[\"td_barrier_style_edge\"] = 0"
+          "retrain_v2.py:633: out[\"td_barrier_style_edge\"] = 0"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2304: feat[\"td_barrier_style_edge\"] = runner.get(\"td_barrier_style_edge\", 0)"
@@ -1150,7 +1150,7 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:485: out[\"td_closing_speed_bias\"] = 0"
+          "retrain_v2.py:634: out[\"td_closing_speed_bias\"] = 0"
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2305: feat[\"td_closing_speed_bias\"] = runner.get(\"td_closing_speed_bias\", 0)"
@@ -1196,13 +1196,13 @@
         "serve_status": "ASSIGNED",
         "verdict": "LIVE_BOTH",
         "train_evidence": [
-          "retrain_v2.py:538: out[\"has_sectional_data\"] = out[\"has_sectional_data\"].clip(0, 1).round().astype(int)",
+          "retrain_v2.py:687: out[\"has_sectional_data\"] = out[\"has_sectional_data\"].clip(0, 1).round().astype(int)",
           "form_feature_builder.py:84: features[\"has_sectional_data\"] = 0",
           "form_feature_builder.py:522: features[\"has_sectional_data\"] = 1 if (prior_sectionals is not None and not prior_sectionals.empty) "
         ],
         "serve_evidence": [
           "run_tips_pipeline.py:2293: feat[\"has_sectional_data\"] = int(bool(runner.get(\"has_sectional_data\", 0)))",
-          "ml_model.py:98: features[\"has_sectional_data\"] = features[\"has_sectional_data\"].clip(0, 1).round().astype(int)",
+          "ml_model.py:222: features[\"has_sectional_data\"] = features[\"has_sectional_data\"].clip(0, 1).round().astype(int)",
           "form_feature_builder.py:84: features[\"has_sectional_data\"] = 0",
           "form_feature_builder.py:522: features[\"has_sectional_data\"] = 1 if (prior_sectionals is not None and not prior_sectionals.empty) "
         ]

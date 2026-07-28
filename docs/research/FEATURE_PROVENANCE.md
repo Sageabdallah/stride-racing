@@ -17,23 +17,32 @@ prepare_features` silently fills the missing columns with **constant 0**, so
 every split the model learned on them fires on a fabricated value, every race,
 every day.
 
-| feature | importance | train source (leak-safe) |
-|---|---|---|
-| closer_advantage | 0.0563 | train-side engineering |
-| pace_pressure_score | 0.0437 | train-side engineering |
-| field_size_context | 0.0396 | train-side engineering |
-| leader_advantage | 0.0302 | train-side engineering |
-| z_800m | 0.0240 | prior-start sectionals (view `prior_z_800m`, `st.race_date < r.race_date`) |
-| trip_cost_seconds | 0.0128 | prior-start sectionals |
-| z_600m | 0.0074 | prior-start sectionals |
-| barrier_relevance_score | 0.0063 | train-side engineering |
-| market_efficiency_flag | 0.0058 | train-side engineering |
-| rsi | 0.0058 | prior-start sectionals |
-| lambda_decay | 0.0058 | prior-start sectionals |
-| svi | 0.0058 | prior-start sectionals |
-| z_400m | 0.0057 | prior-start sectionals |
-| z_200m | 0.0054 | prior-start sectionals |
-| ground_suitability | 0.0000 | (also zero-importance — dead weight both ways) |
+Every train derivation below was traced to its inputs and is **leak-safe to
+plumb at serve** — all inputs are knowable pre-race:
+
+| feature | importance | train derivation (retrain_v2.py unless noted) | serve inputs needed |
+|---|---|---|---|
+| closer_advantage | 0.0563 | :639 via `_compute_pace_features` — field composition (each runner's pre-race form_string/barrier) | racecard field (already loaded) |
+| pace_pressure_score | 0.0437 | :637 same — share of on-pace styles in the field | racecard field |
+| field_size_context | 0.0396 | :646 `field_size/16` clipped — one line | field_size |
+| leader_advantage | 0.0302 | :638 same pace-map computation | racecard field |
+| z_800m | 0.0240 | view `prior_z_800m` — prior-start sectionals, `st.race_date < r.race_date` | prior z (enrich_with_db already queries it) |
+| trip_cost_seconds | 0.0128 | view `prior_trip_cost_seconds` | prior sectionals |
+| z_600m | 0.0074 | view `prior_z_600m` | prior sectionals |
+| barrier_relevance_score | 0.0063 | :642 distance bucketing — one line | distance |
+| market_efficiency_flag | 0.0058 | :649 **class_level bucketing** (misleading name — nothing market-derived) | class_level |
+| rsi | 0.0058 | view `prior_rsi` | prior sectionals |
+| lambda_decay | 0.0058 | view `prior_lambda_decay` | prior sectionals |
+| svi | 0.0058 | view `prior_svi` | prior sectionals |
+| z_400m | 0.0057 | view `prior_z_400m` | prior sectionals |
+| z_200m | 0.0054 | view `prior_z_200m` | prior sectionals |
+| ground_suitability | 0.0000 | view ← `selections.ground_suitability` (also zero-importance — dead weight both ways) | n/a |
+
+Five of the fifteen are one-line formulas already written in retrain_v2 —
+mirroring them in the serve builder is mechanical. The pace trio needs the
+field-composition classifier (`_classify_running_style_from_form`) exposed to
+serve, and the sectional set needs `enrich_with_db`'s existing prior-z query
+moved before scoring. Nothing requires information unavailable at tip time.
 
 Two aggravating details:
 
@@ -135,9 +144,16 @@ SP contamination above. Their task-12 treatment must also be snapshot-based.
   spot-check.
 - Semantic tip-time classification (SP_DERIVED vs PRIOR_STARTS_ONLY etc.) is
   agent-verified with file:line evidence for the sectional family and
-  hand-verified for the odds family (above). The remaining families have
-  mechanical verdicts only; their semantic pass is pending and matters mainly
-  at task-12 time.
+  hand-verified for the odds family and all fifteen ZERO_AT_SERVE features
+  (table above). The remaining families have mechanical verdicts only.
+- Fallback branches can masquerade as constants: `td_pace_bias`/`td_upset_rate`
+  are assigned 0.5/0.2 only in the no-data branch (retrain_v2.py:631-632); the
+  real computation feeds from track-distance aggregates (:626-629). One open
+  as-of question for task 12: confirm those track-distance aggregates exclude
+  the subject race's own result (aggregate leakage check — pending).
+- The masking step preserves newlines so every cited line number is real; an
+  earlier draft blanked whole declaration blocks and shifted every citation
+  after them by ~200 lines. Spot-check of regenerated citations: all true.
 
 ## Task-12 action list (machine-usable copy in the JSON report)
 
