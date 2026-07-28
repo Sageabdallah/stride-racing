@@ -353,7 +353,7 @@ only meaningful if something scores the result, and today nothing does.
 price-independent; a genuinely better ranking raises hit rate *and* ROI.
 *Anchoring and gating* (`mw` ladder, `evaluate_bet_candidate`, `crowd_bet_decision`, de-vig
 method) trade the two directly — toward the market means higher strike and worse ROI
-(33.7% / −4.2%), toward the model means lower strike and better ROI (9.9% / +12.3%).
+(33.7% / −4.2%), toward the model means lower strike and better ROI (9.9% / +12.3% gross — 95% CI [−45, +62]%, NOT_REPORTABLE).
 *Staking* (`compute_staking`, `portfolio_risk`) moves ROI **with zero effect on hit rate** —
 the only free lunch in the system, and it is entirely unexploited today.
 
