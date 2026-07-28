@@ -599,29 +599,32 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             out.update(form_df)
             print(f"  Form features applied: {sorted(form_cols_present)}")
 
-    _td_profiles = {}
-    _td_profile_path = os.path.join(SCRIPT_DIR, "intelligence", "track_distance_profiles.json")
-    if os.path.exists(_td_profile_path):
-        try:
-            import json as _json
-            with open(_td_profile_path) as _f:
-                _td_profiles = _json.load(_f)
-            print(f"  Track-distance profiles loaded: {len(_td_profiles)} entries")
-        except Exception as _e:
-            print(f"  WARNING: Track-distance profiles load failed: {_e}")
+    # As-of (monthly-bucketed) profiles kill the aggregate leak: each row is
+    # scored against races strictly before its own month. Legacy snapshot is a
+    # leaking fallback only (warned about inside the loader).
+    from track_profiler import (
+        lookup_profile as _td_lookup,
+        load_td_profiles_for_training as _td_load,
+        select_bucket as _td_select_bucket,
+    )
+    _td_profiles_asof, _td_profiles = _td_load(SCRIPT_DIR)
 
-    if _td_profiles:
-        from track_profiler import lookup_profile as _td_lookup
+    if _td_profiles_asof or _td_profiles:
         _tracks = df["track"].astype(str).str.strip().values
         _dists = pd.to_numeric(df.get("distance_m", pd.Series(dtype=float)), errors="coerce").fillna(0).astype(int).values
         _barriers_raw = df["barrier"].values if "barrier" in df.columns else [None] * len(df)
+        _race_dates = (pd.to_datetime(df["race_date"], errors="coerce")
+                       if "race_date" in df.columns
+                       else pd.Series(pd.NaT, index=df.index))
         td_features = []
         for i in range(len(df)):
             try:
                 b = int(_barriers_raw[i]) if pd.notna(_barriers_raw[i]) else None
             except (ValueError, TypeError):
                 b = None
-            td_features.append(_td_lookup(_td_profiles, _tracks[i], int(_dists[i]),
+            _profiles_i = (_td_select_bucket(_td_profiles_asof, _race_dates.iloc[i])
+                           if _td_profiles_asof else _td_profiles)
+            td_features.append(_td_lookup(_profiles_i, _tracks[i], int(_dists[i]),
                                           barrier=b, running_style=None))
         td_df = pd.DataFrame(td_features, index=df.index)
         for col in ["td_pace_bias", "td_upset_rate", "td_barrier_style_edge", "td_closing_speed_bias"]:
