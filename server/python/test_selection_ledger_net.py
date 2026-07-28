@@ -270,7 +270,7 @@ class _SettleCursor:
         self.conn = conn
         self.rowcount = 0
 
-    def execute(self, sql, params):
+    def execute(self, sql, params=None):
         pass
 
     @property
@@ -385,3 +385,28 @@ def test_settle_noop_when_flag_off():
     out = settle_pending_rows(conn, "2026-03-08", results_map={})
     assert out["reason"] and "STRIDE_LEDGER_WRITE" in out["reason"]
     assert conn.upserted == []
+
+
+class _MissingMigrationConn(_SettleConn):
+    """Simulates selection_ledger without the net-settlement columns."""
+
+    def cursor(self):
+        conn = self
+
+        class _BoomCursor(_SettleCursor):
+            def execute(self, sql, params=None):
+                if "settled_at_sp_fallback" in sql:
+                    raise Exception('column "settled_at_sp_fallback" does not exist')
+
+        return _BoomCursor(conn)
+
+
+def test_settle_fails_loud_when_net_migration_missing(capsys):
+    os.environ["STRIDE_LEDGER_WRITE"] = "true"
+    conn = _MissingMigrationConn([_pending_row()])
+    out = settle_pending_rows(conn, "2026-03-08", results_map={})
+    assert out["settled"] == 0 and "selection_ledger_net_settlement.sql" in out["reason"]
+    assert conn.upserted == [], "no writes against a schema that cannot hold them"
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "selection_ledger_net_settlement.sql" in err, \
+        "a missing migration must be loud, never a silent non-settlement"

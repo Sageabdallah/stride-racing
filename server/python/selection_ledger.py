@@ -442,6 +442,34 @@ def settle_pending_rows(conn, race_date, results_map: Optional[Dict] = None) -> 
     if not _stride_flag("STRIDE_LEDGER_WRITE"):
         return {"settled": 0, "unmatched": 0, "pending": 0,
                 "reason": "STRIDE_LEDGER_WRITE is off"}
+
+    # Fail LOUD, not silent, when the net-settlement migration is missing.
+    # Callers wrap this pass in non-fatal try/except so it can never break
+    # results collection — but without these columns every settle run would be
+    # a quiet no-op and tip-time rows would never get SP/CLV: the same
+    # silent-non-settlement class as the bug this pass exists to fix.
+    probe = conn.cursor()
+    try:
+        probe.execute(
+            "SELECT sp, settled_pnl, refused, settled_at_sp_fallback "
+            "FROM selection_ledger LIMIT 0")
+    except Exception as _schema_err:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        msg = ("selection_ledger is missing the net-settlement columns — "
+               "apply migrations/selection_ledger_net_settlement.sql")
+        print(f"  [LEDGER] *** WARNING: {msg} ({_schema_err}). Settlement "
+              "skipped; tip-time rows will NOT get SP/CLV until this is fixed.",
+              file=sys.stderr)
+        return {"settled": 0, "unmatched": 0, "pending": 0, "reason": msg}
+    finally:
+        try:
+            probe.close()
+        except Exception:
+            pass
+
     from shadow_pl_tracker import _normalize_name
     if results_map is None:
         from shadow_pl_tracker import fetch_results_map

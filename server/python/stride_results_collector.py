@@ -774,7 +774,12 @@ def collect_results(dates: List[str], parallel: bool = False,
         from selection_ledger import settle_pending_rows
         ledger_settled = 0
         for date in dates:
-            ledger_settled += (settle_pending_rows(conn, date).get("settled") or 0)
+            out = settle_pending_rows(conn, date) or {}
+            ledger_settled += out.get("settled") or 0
+            if out.get("reason") and "net_settlement" in str(out["reason"]):
+                # Missing migration: the loud warning is already emitted —
+                # once per run is enough, and every date would fail the same way.
+                break
         print(f"  Selection ledger: {ledger_settled} rows settled", file=sys.stderr)
     except Exception as e:
         print(f"  Ledger settlement failed (non-fatal): {e}", file=sys.stderr)
