@@ -15,6 +15,9 @@ from datetime import datetime
 from glob import glob
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(__file__))
+import roi_stats  # noqa: E402  (must follow the sys.path setup)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 RACECARDS_DIR = PROJECT_ROOT / "racecards"
@@ -320,7 +323,7 @@ def cmd_results(race_date):
 
 
 
-MIN_BETS_REPORTABLE = 200
+MIN_BETS_REPORTABLE = roi_stats.MIN_BETS_REPORTABLE  # single source (roi_stats, task 02)
 
 def cmd_report():
     conn = _get_connection()
