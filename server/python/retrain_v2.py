@@ -148,7 +148,10 @@ VIEW_TO_FEATURE_MAP = {
     "distance_strike_rate": "distance_strike_rate",
 }
 
-# Full FEATURE_COLUMNS list as defined in RacingMLModel (77 total)
+# FEATURE_COLUMNS — kept in lockstep with ml_model.RacingMLModel.FEATURE_COLUMNS
+# (enforced by test_feature_columns_lockstep.py). 68 columns after the task-12
+# pruning of 45 dead/constant features (docs/research/TASK12_FEATURE_DECISIONS.md);
+# takes effect at the next retrain — the live pkl carries its own trained columns.
 FEATURE_COLUMNS = [
     "distance_strike_rate",
     "course_strike_rate",
@@ -162,55 +165,13 @@ FEATURE_COLUMNS = [
     "weight_kg",
     "ground_suitability",
     "market_odds",
-    "running_style_score",
-    "pace_advantage",
-    "is_high_pace_expected",
-    "distance_style_match",
     "class_movement",
     "is_class_drop",
     "is_class_rise",
-    "is_first_time_stakes",
-    "is_blinkers_first_time",
-    "is_elite_jockey",
-    "is_elite_trainer",
-    "is_jockey_upgrade",
-    "barrier_advantage",
-    "track_bias_score",
     "is_improving",
     "improvement_score",
     "is_in_form_cycle",
     "has_dominant_win",
-    "is_steam_move",
-    "is_drift",
-    "odds_movement_pct",
-    "last_start_market_diff",
-    "avg_market_diff_3runs",
-    "market_trend_shortening",
-    "market_trend_drifting",
-    "empirical_barrier_advantage",
-    "predicted_settling_pos",
-    "settling_percentile",
-    "pace_pressure_index",
-    "settling_difficulty",
-    "settling_pace_interaction",
-    "is_congested_speed",
-    "speed_horse_ratio",
-    "days_since_last_normalized",
-    "prep_run_x_days_since",
-    "run_spacing_quality",
-    "empirical_freshness_score",
-    "is_quick_backup",
-    "is_long_absence",
-    "distance_change_staleness",
-    "class_x_spell",
-    "steam_velocity",
-    "drift_velocity",
-    "late_move_indicator",
-    "market_confidence",
-    "relative_move",
-    "smart_money_score",
-    "is_insider_signal",
-    "field_market_agreement",
     "z_200m",
     "z_400m",
     "z_600m",
@@ -232,10 +193,8 @@ FEATURE_COLUMNS = [
     "first_up_win_rate",
     "second_up_win_rate",
     "consistency_score",
-    "trainer_momentum_score",
     "going_suitability",
     "fitness_x_distance",
-    "barrier_x_pace_inv",
     "sectional_x_going",
     "class_drop_x_trajectory",
     "campaign_run_x_fitness",
@@ -247,7 +206,6 @@ FEATURE_COLUMNS = [
     "market_efficiency_flag",
     "td_pace_bias",
     "td_upset_rate",
-    "td_barrier_style_edge",
     "td_closing_speed_bias",
     # RED (<20% coverage) features excluded from this retrain:
     #   dist_sectional_slope (13.7%), dist_sectional_recency_weighted (13.4%),
@@ -656,12 +614,9 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     fitness_proxy = (1 - (crn - 3).abs() * 0.15).clip(lower=0)
     out["fitness_x_distance"] = fitness_proxy * out["distance_strike_rate"].fillna(0)
 
-    # barrier_x_pace_inv: use computed pace_pressure_score if it has meaningful variation
-    _pps = out["pace_pressure_score"]
-    if _pps.std() >= 0.05:
-        out["barrier_x_pace_inv"] = out["barrier_advantage"].fillna(0) * _pps
-    else:
-        out["barrier_x_pace_inv"] = out["barrier_advantage"].fillna(0) * 0.5
+    # barrier_x_pace_inv removed (task-12 pruning): its only input,
+    # barrier_advantage, was never assigned at train, so the product was
+    # identically 0 (finding 6c). Re-entry path: task-14 plumbing decision.
 
     # sectional_x_going: z_200m * going_suitability
     out["sectional_x_going"] = out["z_200m"].fillna(0) * out["going_suitability"].fillna(0.5)
