@@ -270,7 +270,7 @@ def gate_preregistration(prereg_path: Path = PREREG_DOC):
                      f"{prereg_path.name} not found — see the protocol pack; "
                      f"pre-registration sign-off required")]
     text = prereg_path.read_text(encoding="utf-8")
-    n = text.count("[SAGE-APPROVAL]")
+    n = text.count("[SAGE-APPROVAL")
     if n:
         return [_row("preregistration", AMBER,
                      f"{n} unresolved [SAGE-APPROVAL] marker(s) in {prereg_path.name}")]
