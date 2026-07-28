@@ -43,6 +43,18 @@ REQUIRED_COLUMNS = ("race_date", "track", "race_number", "snapshot_type", "back_
 RUNNER_COLUMN_CANDIDATES = ("horse_name_norm", "horse_name")
 TIME_COLUMN = "snapshot_time"
 
+# selections horse-name column candidates (schema-first: introspect, pick the
+# first that exists). The intersection join normalises it with the SAME rule
+# odds_movement.py's normalize_name applies to betfair_odds_snapshots
+# (lower, strip non-alphanumerics).
+SELECTIONS_NAME_CANDIDATES = ("horse_name_norm", "horse_name", "horse")
+
+
+def sql_norm_name(column: str) -> str:
+    """SQL equivalent of intelligence.common.normalize_name — must stay in
+    sync: lower(src) with all non-[a-z0-9] removed."""
+    return f"lower(regexp_replace(coalesce({column}::text, ''), '[^a-z0-9]+', '', 'g'))"
+
 MORNING_TYPE = "MORNING_CHECK"   # ~08:00 capture — the as-of pre-race price
 BACKTEST_WINDOW = ("2026-03-04", "2026-04-18")  # the 12P-4 ablation window
 
@@ -89,20 +101,33 @@ def race_is_usable(priced_runners: int, selection_runners: int,
 
 
 def compute_window_coverage(scheduled_races, priced_counts, selection_counts,
+                            matched_counts=None,
                             min_fraction: float = MIN_RUNNER_FRACTION) -> dict:
     """Windowed coverage math on plain fixture-shaped data.
 
     scheduled_races:  set of race keys (date, track, race_number)
     priced_counts:    {race_key: runners with a morning row AND back_price > 1.0}
+                      (ALL priced snapshot runners in the race)
     selection_counts: {race_key: selections runners for that race} (0/absent =
                       no denominator)
+    matched_counts:   {race_key: priced runners whose horse identity matches a
+                      selections row for the race}. When provided for a race
+                      WITH a selections denominator, it is the numerator —
+                      priced runners that aren't in selections don't count.
+                      Races without a denominator keep the >=1-priced-row
+                      fallback on priced_counts.
     Returns every count — nothing is truncated.
     """
     scheduled = set(scheduled_races)
-    usable = sorted(
-        r for r in scheduled
-        if race_is_usable(priced_counts.get(r, 0),
-                          selection_counts.get(r, 0), min_fraction))
+    usable = []
+    for r in sorted(scheduled):
+        sel_n = selection_counts.get(r, 0)
+        if matched_counts is not None and sel_n > 0:
+            numerator = matched_counts.get(r, 0)
+        else:
+            numerator = priced_counts.get(r, 0)
+        if race_is_usable(numerator, sel_n, min_fraction):
+            usable.append(r)
     total = len(scheduled)
     pct = (len(usable) / total * 100.0) if total else 0.0
     return {
@@ -115,10 +140,12 @@ def compute_window_coverage(scheduled_races, priced_counts, selection_counts,
 
 
 def runner_coverage_pct(snapshot_runners: int, selection_runners: int):
-    """Runner-level coverage % within a race/day; None when no denominator."""
+    """Runner-level coverage % within a race/day; None when no denominator.
+    When the numerator is intersected with selections it is structurally
+    <= the denominator; the clamp pins that contract for any caller."""
     if not selection_runners:
         return None
-    return round(snapshot_runners / selection_runners * 100.0, 1)
+    return min(100.0, round(snapshot_runners / selection_runners * 100.0, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +209,16 @@ def collect_report(conn) -> dict:
     has_schedule = {"race_date", "track", "race_number"} <= schedule_cols
     selections_cols = introspect_columns(conn, SELECTIONS_TABLE)
     has_selections = {"race_date", "track", "race_number"} <= selections_cols
+    sel_name_col = next((c for c in SELECTIONS_NAME_CANDIDATES
+                         if c in selections_cols), None)
     report["schedule_table_usable"] = has_schedule
     report["selections_table_usable"] = has_selections
+    report["selections_name_column"] = sel_name_col
+    if has_selections and not sel_name_col:
+        report["intersection_note"] = (
+            f"selections has no usable horse-name column "
+            f"{SELECTIONS_NAME_CANDIDATES} — numerator NOT intersected with "
+            f"selections; counting all priced snapshot runners")
 
     # 2a. Date range per snapshot_type.
     report["per_snapshot_type"] = _q(conn, f"""
@@ -243,14 +278,26 @@ def collect_report(conn) -> dict:
     report["per_day"] = days
 
     # 2c. Runner-level coverage % within covered races (needs runner identity
-    # + a selections denominator).
+    # + a selections denominator). When selections has a usable name column
+    # the numerator is INTERSECTED: only priced snapshot runners whose horse
+    # identity matches a selections row for that race count.
     if runner_col and has_selections:
+        join = ""
+        num_col = f"s.{runner_col}"
+        if sel_name_col:
+            join = (f"LEFT JOIN {SELECTIONS_TABLE} sel "
+                    f"ON sel.race_date = s.race_date AND sel.track = s.track "
+                    f"AND sel.race_number = s.race_number "
+                    f"AND {sql_norm_name('sel.' + sel_name_col)} = s.{runner_col}")
+            num_col = (f"CASE WHEN sel.{sel_name_col} IS NOT NULL "
+                       f"THEN s.{runner_col} END")
         rows = _q(conn, f"""
-            SELECT race_date, track, race_number,
-                   COUNT(DISTINCT {runner_col}) AS snap_runners
-            FROM {SNAPSHOT_TABLE}
-            WHERE snapshot_type = %s AND back_price > 1.0
-            GROUP BY race_date, track, race_number
+            SELECT s.race_date, s.track, s.race_number,
+                   COUNT(DISTINCT {num_col}) AS snap_runners
+            FROM {SNAPSHOT_TABLE} s
+            {join}
+            WHERE s.snapshot_type = %s AND s.back_price > 1.0
+            GROUP BY s.race_date, s.track, s.race_number
         """, (MORNING_TYPE,))
         pcts, per_day_runners = [], {}
         for r in rows:
@@ -303,16 +350,30 @@ def collect_report(conn) -> dict:
 
     # 3. Windowed summary for the backtest window.
     wf, wt = BACKTEST_WINDOW
-    priced = { (str(r["race_date"]), r["track"], int(r["race_number"])):
-               int(r["priced"])
-             for r in _q(conn, f"""
-        SELECT race_date, track, race_number,
-               COUNT(DISTINCT {runner_col or 'horse_name'}) AS priced
-        FROM {SNAPSHOT_TABLE}
-        WHERE snapshot_type = %s AND back_price > 1.0
-          AND race_date >= %s AND race_date <= %s
-        GROUP BY race_date, track, race_number
-    """, (MORNING_TYPE, wf, wt))} if runner_col else {}
+    join_w = ""
+    num_col_w = f"s.{runner_col or 'horse_name'}"
+    if sel_name_col and runner_col:
+        join_w = (f"LEFT JOIN {SELECTIONS_TABLE} sel "
+                  f"ON sel.race_date = s.race_date AND sel.track = s.track "
+                  f"AND sel.race_number = s.race_number "
+                  f"AND {sql_norm_name('sel.' + sel_name_col)} = s.{runner_col}")
+        num_col_w = (f"CASE WHEN sel.{sel_name_col} IS NOT NULL "
+                     f"THEN s.{runner_col} END")
+    priced_rows = _q(conn, f"""
+        SELECT s.race_date, s.track, s.race_number,
+               COUNT(DISTINCT s.{runner_col or 'horse_name'}) AS priced,
+               COUNT(DISTINCT {num_col_w}) AS priced_matched
+        FROM {SNAPSHOT_TABLE} s
+        {join_w}
+        WHERE s.snapshot_type = %s AND s.back_price > 1.0
+          AND s.race_date >= %s AND s.race_date <= %s
+        GROUP BY s.race_date, s.track, s.race_number
+    """, (MORNING_TYPE, wf, wt)) if runner_col else []
+    priced = {(str(r["race_date"]), r["track"], int(r["race_number"])):
+              int(r["priced"]) for r in priced_rows}
+    priced_matched = ({(str(r["race_date"]), r["track"], int(r["race_number"])):
+                       int(r["priced_matched"]) for r in priced_rows}
+                      if sel_name_col else None)
 
     scheduled = set()
     n_sched = n_sel = 0
@@ -338,7 +399,8 @@ def collect_report(conn) -> dict:
     report["window_denominator"] = denominator
     report["window_summary"] = compute_window_coverage(
         scheduled, priced,
-        {k: v for k, v in sel_per_race.items() if wf <= k[0] <= wt})
+        {k: v for k, v in sel_per_race.items() if wf <= k[0] <= wt},
+        matched_counts=priced_matched)
     return report
 
 
@@ -351,7 +413,10 @@ def print_report(rep: dict) -> None:
     print(f"table: {rep['table']}  columns: {len(rep['columns'])}  "
           f"runner_col: {rep['runner_column']}  snapshot_time: {rep['has_snapshot_time']}")
     print(f"denominators: race_schedule usable={rep['schedule_table_usable']}  "
-          f"selections usable={rep['selections_table_usable']}")
+          f"selections usable={rep['selections_table_usable']}  "
+          f"selections name col: {rep['selections_name_column']}")
+    if rep.get("intersection_note"):
+        print(f"  NOTE: {rep['intersection_note']}")
 
     print("\n=== Date range per snapshot_type ===")
     for r in rep["per_snapshot_type"]:
@@ -368,6 +433,9 @@ def print_report(rep: dict) -> None:
     print("\n=== Runner-level coverage within covered races (morning, priced) ===")
     rc = rep.get("runner_coverage_morning")
     if rc:
+        num_desc = ("intersected with selections"
+                    if rep.get("selections_name_column") else "ALL priced runners")
+        print(f"  numerator: {num_desc}")
         print(f"  races measured: {rc['races_measured']}  median: {rc['median_pct']}%")
         for d, pct in rc["per_day_median_pct"].items():
             print(f"  {d}: {pct}%")

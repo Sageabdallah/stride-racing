@@ -101,3 +101,48 @@ def test_window_coverage_empty_window_is_zero_not_error():
 def test_runner_coverage_pct_none_without_denominator():
     assert audit.runner_coverage_pct(7, 12) == 58.3
     assert audit.runner_coverage_pct(7, 0) is None
+
+
+# --- intersected numerator (12P-7b) -----------------------------------------
+
+def test_intersected_numerator_many_priced_few_matched_not_usable():
+    # Race has 10 priced snapshot runners but only 2 of them are selections
+    # horses; with an 8-runner selections denominator the 50% floor needs 4.
+    # Pre-fix this race counted as usable (10 >= 4) — the defect.
+    r1 = ("2026-04-10", "flemington", 3)
+    out = audit.compute_window_coverage(
+        {r1}, priced_counts={r1: 10}, selection_counts={r1: 8},
+        matched_counts={r1: 2})
+    assert out["usable_races"] == 0
+    assert out["verdict"].startswith("RETRO-ABLATION: NOT_FEASIBLE")
+
+
+def test_intersected_numerator_usable_when_enough_matched():
+    r1 = ("2026-04-10", "flemington", 3)
+    out = audit.compute_window_coverage(
+        {r1}, priced_counts={r1: 10}, selection_counts={r1: 8},
+        matched_counts={r1: 5})
+    assert out["usable_races"] == 1
+
+
+def test_no_denominator_fallback_unchanged_with_matched_counts():
+    # Race with no selections denominator keeps the >=1-priced-row rule on
+    # ALL priced runners (intersection is meaningless without selections).
+    r1 = ("2026-04-10", "flemington", 3)
+    out = audit.compute_window_coverage(
+        {r1}, priced_counts={r1: 3}, selection_counts={r1: 0},
+        matched_counts={r1: 0})
+    assert out["usable_races"] == 1
+
+
+def test_runner_coverage_pct_structurally_capped_at_100():
+    # Intersected numerators can never exceed the denominator; pin the
+    # contract even if a caller passes raw counts.
+    assert audit.runner_coverage_pct(15, 10) == 100.0
+    assert audit.runner_coverage_pct(10, 10) == 100.0
+
+
+def test_sql_norm_name_matches_python_normalize_name():
+    # The SQL expression must implement lower + strip non-[a-z0-9].
+    expr = audit.sql_norm_name("sel.horse_name")
+    assert "lower(" in expr and "[^a-z0-9]+" in expr and "sel.horse_name" in expr
