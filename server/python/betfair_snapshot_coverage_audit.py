@@ -52,8 +52,29 @@ SELECTIONS_NAME_CANDIDATES = ("horse_name_norm", "horse_name", "horse")
 
 def sql_norm_name(column: str) -> str:
     """SQL equivalent of intelligence.common.normalize_name — must stay in
-    sync: lower(src) with all non-[a-z0-9] removed."""
-    return f"lower(regexp_replace(coalesce({column}::text, ''), '[^a-z0-9]+', '', 'g'))"
+    sync: lower FIRST, then strip everything outside [a-z0-9]. Stripping
+    before lowering would delete every uppercase letter ('Winx' -> 'inx')
+    and the join would never match horse_name_norm."""
+    return (f"regexp_replace(lower(coalesce({column}::text, '')), "
+            f"'[^a-z0-9]+', '', 'g')")
+
+
+def selections_join_sql(runner_col: str, sel_name_col: str):
+    """LEFT JOIN clause + intersected-numerator column for counting priced
+    snapshot runners that are selections horses. Both name sides go through
+    sql_norm_name (idempotent on already-normalised *_norm columns; the
+    snapshot fallback column horse_name is raw mixed case).
+    betfair_odds_snapshots.race_date is DATE while selections.race_date is
+    TEXT — without the cast Postgres has no text = date operator and the
+    query errors."""
+    join = (f"LEFT JOIN {SELECTIONS_TABLE} sel "
+            f"ON sel.race_date = s.race_date::text AND sel.track = s.track "
+            f"AND sel.race_number = s.race_number "
+            f"AND {sql_norm_name('sel.' + sel_name_col)} = "
+            f"{sql_norm_name('s.' + runner_col)}")
+    num_col = (f"CASE WHEN sel.{sel_name_col} IS NOT NULL "
+               f"THEN s.{runner_col} END")
+    return join, num_col
 
 MORNING_TYPE = "MORNING_CHECK"   # ~08:00 capture — the as-of pre-race price
 BACKTEST_WINDOW = ("2026-03-04", "2026-04-18")  # the 12P-4 ablation window
@@ -285,12 +306,7 @@ def collect_report(conn) -> dict:
         join = ""
         num_col = f"s.{runner_col}"
         if sel_name_col:
-            join = (f"LEFT JOIN {SELECTIONS_TABLE} sel "
-                    f"ON sel.race_date = s.race_date AND sel.track = s.track "
-                    f"AND sel.race_number = s.race_number "
-                    f"AND {sql_norm_name('sel.' + sel_name_col)} = s.{runner_col}")
-            num_col = (f"CASE WHEN sel.{sel_name_col} IS NOT NULL "
-                       f"THEN s.{runner_col} END")
+            join, num_col = selections_join_sql(runner_col, sel_name_col)
         rows = _q(conn, f"""
             SELECT s.race_date, s.track, s.race_number,
                    COUNT(DISTINCT {num_col}) AS snap_runners
@@ -328,7 +344,7 @@ def collect_report(conn) -> dict:
                            (s.race_date + rs.off_time::time))) / 60.0 AS minutes_before_off
                 FROM {SNAPSHOT_TABLE} s
                 JOIN {SCHEDULE_TABLE} rs
-                  ON rs.race_date = s.race_date AND rs.track = s.track
+                  ON rs.race_date = s.race_date::text AND rs.track = s.track
                  AND rs.race_number = s.race_number
                 WHERE s.snapshot_time IS NOT NULL AND rs.off_time IS NOT NULL
             """)
@@ -353,12 +369,7 @@ def collect_report(conn) -> dict:
     join_w = ""
     num_col_w = f"s.{runner_col or 'horse_name'}"
     if sel_name_col and runner_col:
-        join_w = (f"LEFT JOIN {SELECTIONS_TABLE} sel "
-                  f"ON sel.race_date = s.race_date AND sel.track = s.track "
-                  f"AND sel.race_number = s.race_number "
-                  f"AND {sql_norm_name('sel.' + sel_name_col)} = s.{runner_col}")
-        num_col_w = (f"CASE WHEN sel.{sel_name_col} IS NOT NULL "
-                     f"THEN s.{runner_col} END")
+        join_w, num_col_w = selections_join_sql(runner_col, sel_name_col)
     priced_rows = _q(conn, f"""
         SELECT s.race_date, s.track, s.race_number,
                COUNT(DISTINCT s.{runner_col or 'horse_name'}) AS priced,

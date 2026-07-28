@@ -143,6 +143,24 @@ def test_runner_coverage_pct_structurally_capped_at_100():
 
 
 def test_sql_norm_name_matches_python_normalize_name():
-    # The SQL expression must implement lower + strip non-[a-z0-9].
+    # Exact SQL twin of intelligence.common.normalize_name:
+    # re.sub(r"[^a-z0-9]+", "", str(name).lower()) — lower must run FIRST.
+    # With the order reversed the strip deletes uppercase letters before
+    # lower() sees them ('Winx' -> 'inx') and the selections join never
+    # matches horse_name_norm. Pinned to the exact expression so a
+    # reordering fails here, not silently in prod.
     expr = audit.sql_norm_name("sel.horse_name")
-    assert "lower(" in expr and "[^a-z0-9]+" in expr and "sel.horse_name" in expr
+    assert expr == ("regexp_replace(lower(coalesce(sel.horse_name::text, '')), "
+                    "'[^a-z0-9]+', '', 'g')")
+
+
+def test_selections_join_casts_date_and_normalises_both_sides():
+    # selections.race_date is TEXT while betfair_odds_snapshots.race_date is
+    # DATE — without the ::text cast Postgres has no text = date operator and
+    # the audit crashes. Both name sides must be normalised: the snapshot
+    # fallback column horse_name is raw mixed case.
+    join, num_col = audit.selections_join_sql("horse_name", "horse_name")
+    assert "sel.race_date = s.race_date::text" in join
+    assert join.count("regexp_replace(lower(") == 2
+    assert num_col == ("CASE WHEN sel.horse_name IS NOT NULL "
+                       "THEN s.horse_name END")
