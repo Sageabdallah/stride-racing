@@ -331,6 +331,16 @@ def summarize_results(results, df):
         won = [1 if b["won"] else 0 for b in bets]
         odds = [b["sp"] for b in bets]
         stats = roi_stats.summarise_bets(won, odds, commission=COMMISSION)
+        # roi/02 + roi/01 acceptance #3: net ROI at BOTH MBR rates, so the
+        # 8% vs 10% comparison falls out of one summary. CI/reportability
+        # above are computed at COMMISSION (0.08) per the settlement contract.
+        if n_bets:
+            stats["roi_net_8pct"] = round(float(np.mean(
+                roi_stats.per_bet_returns(won, odds, commission=0.08))) * 100.0, 2)
+            stats["roi_net_10pct"] = round(float(np.mean(
+                roi_stats.per_bet_returns(won, odds, commission=0.10))) * 100.0, 2)
+        else:
+            stats["roi_net_8pct"] = stats["roi_net_10pct"] = None
         stat_blocks.append(stats)
 
         row = {
@@ -344,7 +354,8 @@ def summarize_results(results, df):
             "roi": roi,
         }
         row.update({k: stats[k] for k in (
-            "roi_gross", "roi_net", "se", "ci95", "ci95_normal", "z",
+            "roi_gross", "roi_net", "roi_net_8pct", "roi_net_10pct",
+            "se", "ci95", "ci95_normal", "z",
             "p_roi_le_zero", "max_drawdown", "max_losing_streak",
             "expected_max_losing_streak", "roi_minus_top1", "roi_minus_top2",
             "roi_minus_top3", "reportable", "reportable_status",

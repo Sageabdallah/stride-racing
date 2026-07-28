@@ -808,6 +808,18 @@ def merge_strategy_results(results_list):
         stats = roi_stats.summarise_bets(
             [w for w, _ in bet_results], [sp for _, sp in bet_results],
             commission=COMMISSION)
+        # roi/02 + roi/01 acceptance #3: net ROI at BOTH MBR rates (8%/10%),
+        # so the commission comparison falls out of one summary. CI and
+        # reportability above are computed at COMMISSION (0.08).
+        if m['total_bets']:
+            stats['roi_net_8pct'] = round(float(np.mean(roi_stats.per_bet_returns(
+                [w for w, _ in bet_results], [sp for _, sp in bet_results],
+                commission=0.08))) * 100.0, 2)
+            stats['roi_net_10pct'] = round(float(np.mean(roi_stats.per_bet_returns(
+                [w for w, _ in bet_results], [sp for _, sp in bet_results],
+                commission=0.10))) * 100.0, 2)
+        else:
+            stats['roi_net_8pct'] = stats['roi_net_10pct'] = None
 
         row = {
             'label': label,
@@ -827,7 +839,8 @@ def merge_strategy_results(results_list):
             'by_month': {k: dict(v) for k, v in m['by_month'].items()},
         }
         row.update({k: stats[k] for k in (
-            'roi_gross', 'roi_net', 'se', 'ci95', 'ci95_normal', 'z',
+            'roi_gross', 'roi_net', 'roi_net_8pct', 'roi_net_10pct',
+            'se', 'ci95', 'ci95_normal', 'z',
             'p_roi_le_zero', 'max_drawdown', 'max_losing_streak',
             'expected_max_losing_streak', 'roi_minus_top1', 'roi_minus_top2',
             'roi_minus_top3', 'reportable', 'reportable_status',
