@@ -425,3 +425,54 @@ class TestWiring:
         # per-race T-5 capture through the day.
         src = (SERVER_PYTHON / "capture_late_odds.py").read_text()
         assert "def watch(" in src and '"--watch"' in src
+
+    def test_tips_pipeline_launches_late_odds_watcher(self):
+        # G1 invocation-path regression guard: run_full_pipeline.py is an
+        # orchestrator no automated or documented manual path actually uses —
+        # the Node scheduler and /stride-full reach run_tips_pipeline directly.
+        # A watcher wired only into run_full_pipeline leaves the odds clock
+        # dead in production, silently. The launch must live in the tips
+        # pipeline itself: detached, flag-gated like the tip_time hook, and
+        # unable to fail tipping.
+        src = (SERVER_PYTHON / "run_tips_pipeline.py").read_text()
+        assert "capture_late_odds.py" in src and '"--watch"' in src
+        assert "STRIDE_SKIP_ODDS_WATCH" in src
+        idx = src.index("def launch_late_odds_watcher")
+        body = src[idx:idx + 2400]
+        assert "snapshot_write_enabled" in body
+        assert "start_new_session=True" in body, "watcher must be detached (fire-and-forget)"
+        assert "except Exception" in body, "a launch failure must never fail tipping"
+        # launched only on a stored run, after selections land
+        store_idx = src.index("store_final_probs_in_audit(all_race_tips, date_str)")
+        assert "launch_late_odds_watcher(date_str)" in src[store_idx:store_idx + 400]
+
+    def test_watch_lock_single_instance_per_date(self, tmp_path, monkeypatch):
+        # Two launch paths can both start a watcher (tips pipeline +
+        # run_full_pipeline); the second must no-op, and a stale pidfile from
+        # a crashed watcher must be reclaimed, or one crash kills every
+        # subsequent day's capture.
+        import subprocess as sp
+        monkeypatch.setattr(late, "_watch_pid_path", lambda d: tmp_path / f"{d}.pid")
+
+        assert late.acquire_watch_lock("2026-07-28") is True
+        assert (tmp_path / "2026-07-28.pid").read_text() == str(os.getpid())
+        # our own live pid holds the lock — a second acquire must refuse
+        assert late.acquire_watch_lock("2026-07-28") is False
+
+        # a dead pid is stale — reclaim
+        proc = sp.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        (tmp_path / "2026-07-28.pid").write_text(str(proc.pid))
+        assert late.acquire_watch_lock("2026-07-28") is True
+
+        # corrupt pidfile is stale — reclaim
+        (tmp_path / "2026-07-28.pid").write_text("not-a-pid")
+        assert late.acquire_watch_lock("2026-07-28") is True
+
+        # release removes only our own lock
+        late.release_watch_lock("2026-07-28")
+        assert not (tmp_path / "2026-07-28.pid").exists()
+        (tmp_path / "2026-07-28.pid").write_text("12345")
+        late.release_watch_lock("2026-07-28")
+        assert (tmp_path / "2026-07-28.pid").exists(), \
+            "must never remove another watcher's lock"

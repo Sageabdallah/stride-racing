@@ -1242,6 +1242,43 @@ def _safe_json(val):
         return None
 
 
+def launch_late_odds_watcher(date_str):
+    """ROI task 04 (G1): start the day's T-5min late-odds watcher, detached.
+
+    The tips run is the one step every real invocation path shares — the
+    /stride-full runbook and the Node scheduler both reach run_tips_pipeline
+    without ever running run_full_pipeline.py, so a watcher wired only into
+    that orchestrator leaves the odds clock dead under automation. Launching
+    here (fire-and-forget, start_new_session) covers every path;
+    capture_late_odds deduplicates via a per-date pidfile, so a second launch
+    from run_full_pipeline is a no-op. Gated by the same
+    STRIDE_ODDS_SNAPSHOT_WRITE switch as the tip_time hook
+    (STRIDE_SKIP_ODDS_WATCH=true also skips), and a launch failure must never
+    break tipping.
+    """
+    try:
+        if os.environ.get("STRIDE_SKIP_ODDS_WATCH", "false").strip().lower() in ("true", "1", "yes"):
+            print("  [LATE_ODDS] watcher skipped (STRIDE_SKIP_ODDS_WATCH)", file=sys.stderr)
+            return
+        from odds_snapshots import snapshot_write_enabled
+        if not snapshot_write_enabled():
+            print("  [LATE_ODDS] watcher skipped (STRIDE_ODDS_SNAPSHOT_WRITE off)", file=sys.stderr)
+            return
+        script_dir = Path(__file__).resolve().parent
+        log_path = script_dir / "logs" / f"late_odds_{date_str}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "ab") as logf:
+            proc = subprocess.Popen(
+                [sys.executable, str(script_dir / "capture_late_odds.py"),
+                 "--watch", "--date", date_str],
+                cwd=str(script_dir), stdout=logf, stderr=logf,
+                start_new_session=True)
+        print(f"  [LATE_ODDS] watcher launched (pid {proc.pid}) -> {log_path.name}",
+              file=sys.stderr)
+    except Exception as e:  # a monitoring miss must never fail tipping
+        print(f"  [LATE_ODDS] watcher launch failed (non-fatal): {e}", file=sys.stderr)
+
+
 def store_selections_in_db(race_tips, date_str):
     """Insert top picks into the selections table with full enrichment data."""
     try:
@@ -2904,6 +2941,9 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
     if store_in_db:
         store_selections_in_db(all_race_tips, date_str)
         store_final_probs_in_audit(all_race_tips, date_str)
+        # ROI task 04 (G1): tips is the invocation point every real path
+        # shares — the odds clock starts here, or it does not start at all.
+        launch_late_odds_watcher(date_str)
     else:
         print("  [DB] Skipping selection storage by request", file=sys.stderr)
 

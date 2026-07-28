@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -296,6 +297,57 @@ WATCH_INTERVAL_SECONDS = 120   # poll cadence in --watch mode (matches the 1-2 m
 WATCH_MAX_HOURS = 14.0         # safety cap so a stray watcher can never run forever
 
 
+def _watch_pid_path(date_str: str) -> Path:
+    return Path(__file__).resolve().parent / "logs" / f"late_odds_{date_str}.pid"
+
+
+def acquire_watch_lock(date_str: str) -> bool:
+    """One watcher per date, whichever path launched it.
+
+    The tips pipeline self-launches a watcher and run_full_pipeline launches
+    one too; whichever starts second must no-op rather than double-poll the
+    market API all day. A pidfile with a liveness probe is enough here — a
+    stale file from a crashed watcher is reclaimed, a live one wins.
+    """
+    pid_path = _watch_pid_path(date_str)
+    existing = None
+    try:
+        existing = int(pid_path.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        pass  # no lock, or corrupt — reclaim
+    if existing is not None:
+        try:
+            os.kill(existing, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:  # not ours, but definitely alive
+            alive = True
+        except OSError:
+            alive = False
+        if alive:
+            print(f"[LATE_ODDS][watch] another watcher (pid {existing}) already "
+                  f"covers {date_str} — exiting", file=sys.stderr)
+            return False
+    try:
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(os.getpid()))
+    except OSError as e:  # the lock is best-effort; capturing beats crashing
+        print(f"[LATE_ODDS][watch] could not write pidfile (continuing): {e}",
+              file=sys.stderr)
+    return True
+
+
+def release_watch_lock(date_str: str) -> None:
+    """Remove our pidfile; never remove another live watcher's lock."""
+    pid_path = _watch_pid_path(date_str)
+    try:
+        if int(pid_path.read_text().strip()) == os.getpid():
+            pid_path.unlink()
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+
 def watch(date_str: str, interval: int = WATCH_INTERVAL_SECONDS,
           max_hours: float = WATCH_MAX_HOURS,
           target_seconds: int = TARGET_SECONDS) -> int:
@@ -307,31 +359,36 @@ def watch(date_str: str, interval: int = WATCH_INTERVAL_SECONDS,
     the remaining races. Intended to be launched fire-and-forget by the daily
     pipeline; the existing one-shot mode still works for a cron-per-tick host.
     """
-    start = datetime.now(timezone.utc)
-    deadline = start + timedelta(hours=max_hours)
-    schedule = load_schedule(date_str)
-    if not schedule:
-        print(f"[LATE_ODDS][watch] no schedule for {date_str} — nothing to watch",
-              file=sys.stderr)
+    if not acquire_watch_lock(date_str):
         return 0
-    last_jump = max(r["jump_time"] for r in schedule)
-    print(f"[LATE_ODDS][watch] watching {len(schedule)} races for {date_str}; "
-          f"last jump {last_jump.isoformat()}, poll every {interval}s", file=sys.stderr)
-    while True:
-        now = datetime.now(timezone.utc)
-        try:
-            run(date_str, target_seconds=target_seconds, now=now)
-        except Exception as e:  # never let one bad pull kill the day's capture
-            print(f"[LATE_ODDS][watch] iteration failed (non-fatal): {e}", file=sys.stderr)
-        now = datetime.now(timezone.utc)
-        if now > last_jump + timedelta(seconds=POST_JUMP_GRACE_SECONDS):
-            print("[LATE_ODDS][watch] all races past post-jump grace — exiting",
+    try:
+        start = datetime.now(timezone.utc)
+        deadline = start + timedelta(hours=max_hours)
+        schedule = load_schedule(date_str)
+        if not schedule:
+            print(f"[LATE_ODDS][watch] no schedule for {date_str} — nothing to watch",
                   file=sys.stderr)
             return 0
-        if now >= deadline:
-            print(f"[LATE_ODDS][watch] {max_hours}h cap reached — exiting", file=sys.stderr)
-            return 0
-        time.sleep(interval)
+        last_jump = max(r["jump_time"] for r in schedule)
+        print(f"[LATE_ODDS][watch] watching {len(schedule)} races for {date_str}; "
+              f"last jump {last_jump.isoformat()}, poll every {interval}s", file=sys.stderr)
+        while True:
+            now = datetime.now(timezone.utc)
+            try:
+                run(date_str, target_seconds=target_seconds, now=now)
+            except Exception as e:  # never let one bad pull kill the day's capture
+                print(f"[LATE_ODDS][watch] iteration failed (non-fatal): {e}", file=sys.stderr)
+            now = datetime.now(timezone.utc)
+            if now > last_jump + timedelta(seconds=POST_JUMP_GRACE_SECONDS):
+                print("[LATE_ODDS][watch] all races past post-jump grace — exiting",
+                      file=sys.stderr)
+                return 0
+            if now >= deadline:
+                print(f"[LATE_ODDS][watch] {max_hours}h cap reached — exiting", file=sys.stderr)
+                return 0
+            time.sleep(interval)
+    finally:
+        release_watch_lock(date_str)
 
 
 def main() -> int:
