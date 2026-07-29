@@ -51,8 +51,18 @@ could never accrue and the gates could never clear. The correct sequence is:
 > ≥5 clean race days → review against the pre-registered flip criteria
 > (PR #18) → flip the live flag.
 
-So #3 and #11 are blocked on **audit/completion**, not the calendar; the
-calendar gates their **flag flips** (§4).
+So #3 and #11 are blocked on nothing at all; the calendar gates their
+**flag flips** (§4).
+
+**Second correction — stale PR descriptions.** The GitHub bodies of #3, #4,
+and #5 still carry recovery-era text ("WIP", "draft to prevent loss", "not
+yet independently verified"). That text predates the completion and
+verification work: the pushed branch tips (roi/02 `58057c6`, roi/03
+`a0cd755`, roi/05 `316ef1f` — confirmed against origin 2026-07-29) are
+exactly the commits the audit ledger records as fully verified on
+2026-07-28. All three are merge-ready; #5 additionally needs its draft flag
+flipped to "ready for review". Classify PRs by their audited bytes, never by
+their description text.
 
 ---
 
@@ -90,24 +100,30 @@ window with NO_BET junk days.
 | #17 | Retrain promotion preflight gate | Stacked on #10 (retargets when #10 merges). The gate that mechanically enforces "never promote directly." |
 | #13 | days_since_run wall-clock fix | **Leak fix** (§5) — must be in before any retrain. |
 | #14 | td_* as-of monthly profile buckets | **Leak fix** (§5) — must be in before any retrain. |
+| #4 | roi/02 backtest statistics | Verified 2026-07-28 at tip `58057c6` (all 4 acceptance criteria; commission cascade recomputed independently). Body text stale — the code is done. |
+| #7 | Ship gate: below-zero-CI → HOLD | Stacked on #4 (roi_stats.py lives there) — merge after it. Stricter-only, differentially proven. |
+| #8 | Reportability floor single-sourced | Stacked on #4 — merge after it. Zero behavioral change (200 unchanged). |
+| #3 | roi/05 calibrator + renormalisation | Verification FULLY green 2026-07-28 at tip `316ef1f`. Both behavior flags default OFF (byte-parity test-pinned); shadow comparison ships inside it. Body text stale. |
+| #5 | roi/03 serve-time probability fixes | Completed (`a0cd755`) + verified 2026-07-28: NaN contract, single builder, 10/10 parity tests; the default-ON parity flag is provably inert. **Flip draft → ready for review**, then merge. Body text stale. |
+| #11 | Serve the 15 dead features, flag-gated | Fully audited. Stacked on #5 — merge after it, `STRIDE_SERVE_LIVE_FEATURES` OFF, `_SHADOW` ON. Its shadow writer is the #18 flip evidence source. |
 | #19 | 12P-7 betfair coverage audit | Audited incl. the two SQL fixes; the prod **run** needs the standing read approval, the merge doesn't. |
 | #20 | PROGRAM_STATUS.md | Docs. |
+
+**Consequence worth stating loudly:** the moment #5 and #11 merge, the hard
+gate on **12P-8 (winner-pattern rescue)** clears — that Kimi dispatch
+becomes available at the merge session itself, with no calendar wait.
 
 ---
 
 ## 3. Bucket B — BLOCKED, but NOT by the calendar
 
 These must not merge yet, and waiting on the calendar would not help them.
-Each has a named unblock action and owner.
+Each has a named unblock action and owner. (After the stale-description
+correction in §1, only two PRs remain here — both waiting on operator
+decisions, neither on code or calendar.)
 
 | PR | Blocker | Unblock action | Owner |
 |---|---|---|---|
-| #3 (roi/05 calibrator + renormalisation) | Its own description: "not yet independently verified against the spec checklist." House rule: nothing merges unaudited. | Architect audit against `docs/roi-roadmap/05` — **can run today**; on PASS it merges with `STRIDE_RENORMALISE_FIELD` OFF, shadow comparison ON. | Architect |
-| #4 (roi/02 backtest statistics) | Self-described WIP, "NOT complete or reviewed" (recovered from an interrupted run). | Kimi completion dispatch against `docs/roi-roadmap/02`, then architect audit. | Kimi → Architect |
-| #7 (ship gate: reject below-zero-CI promotion) | Stacked on #4 ("merge after or with it"). The fix itself is audited and stricter-only. | Merges immediately after #4. | — |
-| #8 (reportability floor from roi_stats) | Depends on #4's `roi_stats.py`. | Merges after #4. | — |
-| #5 (roi/03 serve-time probability fixes) | Draft, self-described "NOT complete or reviewed." | Kimi completion dispatch against `docs/roi-roadmap/03`, then architect audit. This is the base 12P-8 rebases onto. | Kimi → Architect |
-| #11 (serve the 15 dead features, flag-gated) | Fully audited and complete, but stacked on #5. | Merges immediately after #5, `STRIDE_SERVE_LIVE_FEATURES` OFF, `_SHADOW` ON. | — |
 | #15 (prune 45 dead features) | Title's own rule: "approval = merge." | Operator reads the pruning list and approves. | Sage |
 | #18 (pre-registration + flip criteria) | 5 unresolved `[SAGE-APPROVAL:]` markers (min settled-bet count, canary N days, pause rule, transition-rate cap, top-3 flip cap). PR #17's `gate_preregistration` counts them mechanically. | Operator resolves each marker with a value. **Do this before the accrual window opens** — pre-registration only protects decisions made before outcomes are visible. | Sage |
 
@@ -125,7 +141,10 @@ exactly the kind of untrustworthy evidence this program exists to eliminate.
 | Flip `STRIDE_SERVE_LIVE_FEATURES` (from #11) | ≥5 days of `serve_liveness_shadow_*.json`; no day errored to legacy; delta distribution stable; top-3 flip rate within the #18-registered cap. | OP-4. |
 | Run `odds_ablation.py` (from #16) | The accrual window itself — its A/B/C arms need weeks of snapshot-sourced rows to say anything. B-vs-C is the honest SP-contamination estimate. | Registered window dates. |
 | task-12 retrain + promotion | 4–6 weeks of snapshot odds; `retrain_preflight.py` (from #17) all green — including ZERO_AT_SERVE = 0, FEATURE_COLUMNS lockstep, ship-gate SHIP verdict on the registered band, resolved pre-registration. | Preflight boards, exit code, no pipes. |
-| 12P-8 winner-pattern rescue (Kimi) | #5 + #11 merged to main (code gate downstream of Bucket B — listed here because it cannot be scheduled independently). | Merge state. |
+
+**Moved out of this bucket:** 12P-8 (winner-pattern rescue) is gated on
+#5 + #11 being merged — a merge-session gate, not a calendar one. It is
+dispatchable to Kimi the same day the merge session completes.
 
 **The single most important discipline:** nothing in this table is
 shortened, widened, or re-banded after data exists. That is what PR #18
@@ -177,25 +196,25 @@ leaked past tip time is enumerated here with its fix and merge vehicle.
 ## 6. Execution order (the whole plan on one page)
 
 1. **Sage:** resolve #18's five `[SAGE-APPROVAL:]` markers; approve #15's
-   pruning list.
-2. **Sage:** merge Bucket A — stride-app #1, #2, #3, #4 (in order);
-   stride-racing #1, #2 → #16, #6, #9, #10 → #12, #17, #13, #14, #19, #20;
-   then #15 and #18 once step 1 is done.
-3. **Architect:** audit #3 (roi/05) against the spec checklist → merge on
-   PASS, flags OFF / shadow ON.
-4. **Kimi:** complete #4 (roi/02) → architect audit → merge #4, #7, #8.
-   Then complete #5 (roi/03) → architect audit → merge #5, then #11
-   (flags OFF / shadow ON).
-5. **Sage: deploy session** per the OP-1 five-step restart checklist
+   pruning list; flip #5 from draft to ready for review.
+2. **Sage: one merge session** — stride-app #1, #2, #3, #4 (in order);
+   stride-racing #1, #2 → #16, #6, #9, #10 → #12, #17, #13, #14,
+   #4 → #7 / #8, #3, #5 → #11, #19, #20; then #15 and #18 once step 1 is
+   done. Every flag stays at its shipped default (live flags OFF, shadow
+   writers ON) — merging changes no runtime behavior.
+3. **Sage:** dispatch **12P-8** to Kimi (its #5+#11 gate cleared in step 2);
+   architect audits the handover as usual. In parallel, dispatch CB-1 and
+   continue the chat pack.
+4. **Sage: deploy session** per the OP-1 five-step restart checklist
    (python deps into `.venv`, launchd KeepAlive, prevent sleep, start app,
    confirm catch-up plan output). **This opens the accrual window — steps
-   1–4 should be complete first so the window starts with all evidence
+   1–2 must be complete first so the window starts with all evidence
    writers in place.**
-6. **Architect:** OP-3 verification battery same day; OP-4 check-ins each
+5. **Architect:** OP-3 verification battery same day; OP-4 check-ins each
    race day thereafter.
-7. **Calendar does its work.** Flag flips per §4 as gates clear; ablation
-   run and 12P-8 dispatch when their gates clear; task-12 retrain at 4–6
-   weeks behind a green preflight.
+6. **Calendar does its work.** Flag flips per §4 as gates clear; ablation
+   run when its window closes; task-12 retrain at 4–6 weeks behind a green
+   preflight.
 
 ### What makes this successful, concretely
 
