@@ -19,7 +19,12 @@
 
 name: betfair-keys-smoke-test
 
+# The push trigger is scoped to the smoke-test branch because GitHub won't
+# dispatch a workflow that only exists on a non-default branch — pushing to
+# the branch IS the run button. Drop the push trigger if this ever merges.
 on:
+  push:
+    branches: ["claude/betfair-keys-smoke-test-4yqny1"]
   workflow_dispatch:
     inputs:
       hosts:
@@ -162,7 +167,7 @@ jobs:
 
           banner("3. Interactive SSO login (single attempt — no credential-failure retries)")
           order = {"au-then-com": ["au", "com"], "com-then-au": ["com", "au"],
-                   "au-only": ["au"], "com-only": ["com"]}[os.environ.get("SMOKE_HOSTS", "au-then-com")]
+                   "au-only": ["au"], "com-only": ["com"]}[os.environ.get("SMOKE_HOSTS") or "au-then-com"]
           form = urllib.parse.urlencode({"username": username, "password": password}).encode()
           headers = {"X-Application": app_key, "Accept": "application/json",
                      "Content-Type": "application/x-www-form-urlencoded"}
