@@ -115,8 +115,23 @@ caret-delimited CSV service remains available as a fallback shape.
 - [ ] [C] `odds_movement.py` → Betfair prices (delayed key now; live key when
       activated). Note: Betfair calls cannot run on GitHub-hosted runners —
       Mac/self-hosted runner only
-- [ ] [C] Scheduled workflows: morning racecards pull, evening results pull,
-      raw archive push; failure = red run (no silent passes)
+- [x] [C] Scheduled workflows (2026-08-01, branch pf/scheduled-ingestion):
+      `pf-evening-results.yml` (10:30 UTC = 20:30 AEST intent; today AND
+      yesterday — late/abandoned meetings resolve next day) and
+      `pf-morning-racecards.yml` (19:30 UTC = 05:30 AEST intent). Both:
+      secrets from the repo, concurrency group, 30-min timeout, no
+      continue-on-error, per-meeting counts to the step summary. Proof runs:
+      evening push run **30647305549** green (2026-07-31 imported 48
+      races/495 runners — the DM-K1 flagged gap; 2026-08-01 cards fetched,
+      0 resulted yet), dispatch **30647658519** green (dedup held: 48/48
+      already existed, 0 inserted), sabotaged-input dispatch **30647949139**
+      red on exit 1 as required (input-only sabotage, nothing reverted).
+      The evening import also writes the raw archive (archive-first per
+      meeting). The morning workflow is **gated on DM-2** (pf/racecards
+      unmerged): its entrypoint there is stable (verified @ 0fdf879) and a
+      gate step fails loudly until it merges — push run 30647304536 shows
+      the gate red by design. **Operator:** the done-criterion below (two
+      consecutive green scheduled days) is yours to check after merge.
 - **Done when:** two consecutive days ingest hands-free with row counts
   matching the meeting calendar.
 
