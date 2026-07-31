@@ -1,21 +1,28 @@
 # Betfair credentials smoke test — proves the Betfair secrets stored in this
-# repo's Actions secrets actually work, end to end, without touching money:
+# repo's Actions secrets actually work, end to end, without touching money.
 #
-#   1. Reports which candidate BETFAIR_* secret names are set (never values —
-#      only set/unset, character length, and a leading/trailing-whitespace
-#      warning, since an invisible newline pasted into a secret is the classic
-#      cause of "I reset my password and it still fails").
-#   2. Makes ONE interactive login attempt against the Betfair identity SSO
-#      (AU host first by default). It deliberately does not retry a
-#      credential failure on the other host — repeated failures are what lock
-#      the account.
-#   3. On login success: read-only listEventTypes to prove the app key is
-#      accepted by the Exchange API, getDeveloperAppKeys to say whether the
-#      stored key is the live or delayed-data one, then logs out.
+# Endpoints follow the Betfair Exchange API docs (Interactive Login - API
+# Endpoint; Login & Session Management; Non-Interactive bot login):
+#   AU jurisdiction login:  https://identitysso.betfair.com.au/api/login
+#   International login:    https://identitysso.betfair.com/api/login
+#   Exchange API:           https://api.betfair.com/exchange/...
+#   Session use:            X-Application: <app key>, X-Authentication: <token>
 #
-# The job never checks out the repo and never prints a secret. Login statuses
-# are printed with a plain-language explanation and the job exits non-zero on
-# anything short of a working login + accepted app key.
+# What it does:
+#   1. Reports which candidate BETFAIR_* secret names are set (never values).
+#   2. Lists the repo's GitHub environments (a job only sees environment
+#      secrets if it declares that environment — this tells us whether the
+#      credentials might be stored there instead of repository secrets).
+#   3. If a stored session token (ssoid) exists, validates app key + token
+#      directly against the Exchange API — no password needed.
+#   4. Otherwise makes ONE interactive login attempt (AU host first) and
+#      deliberately does not retry a credential failure on the other host —
+#      repeated failures are what lock accounts.
+#   5. On a working session: read-only listEventTypes, getDeveloperAppKeys
+#      (live vs delayed key), then logs out — but only sessions this run
+#      created; a user-supplied session token is never logged out.
+#
+# The job never checks out the repo and never prints a secret.
 
 name: betfair-keys-smoke-test
 
@@ -35,6 +42,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: betfair-keys-smoke-test
@@ -79,15 +87,26 @@ jobs:
       BETFAIR_LOGIN_PASSWORD: ${{ secrets.BETFAIR_LOGIN_PASSWORD }}
       BETFAIR_SECRET: ${{ secrets.BETFAIR_SECRET }}
       PASSWORD: ${{ secrets.PASSWORD }}
+      BETFAIR_SESSION_TOKEN: ${{ secrets.BETFAIR_SESSION_TOKEN }}
+      BETFAIR_SSOID: ${{ secrets.BETFAIR_SSOID }}
+      BETFAIR_TOKEN: ${{ secrets.BETFAIR_TOKEN }}
+      BETFAIR_SESSION: ${{ secrets.BETFAIR_SESSION }}
+      SESSION_TOKEN: ${{ secrets.SESSION_TOKEN }}
+      SSOID: ${{ secrets.SSOID }}
       BETFAIR_CERT: ${{ secrets.BETFAIR_CERT }}
       BETFAIR_CERT_PEM: ${{ secrets.BETFAIR_CERT_PEM }}
       BETFAIR_CERT_KEY: ${{ secrets.BETFAIR_CERT_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SMOKE_HOSTS: ${{ inputs.hosts }}
     steps:
       - name: Betfair login + app key smoke test
         run: |
           python3 - <<'PYEOF'
           import json, os, sys, urllib.error, urllib.parse, urllib.request
+
+          AU_SSO  = "identitysso.betfair.com.au"   # per Betfair docs: AU jurisdiction
+          COM_SSO = "identitysso.betfair.com"      # international
+          EXCHANGE = "https://api.betfair.com/exchange"
 
           APP_KEY_NAMES  = ["BETFAIR_APP_KEY", "BETFAIR_APP_KEY_LIVE", "BETFAIR_LIVE_APP_KEY", "BETFAIR_APPKEY",
                             "BETFAIR_API_KEY", "BETFAIR_KEY", "BF_APP_KEY",
@@ -97,28 +116,32 @@ jobs:
                             "BETFAIR_ACCOUNT", "USERNAME", "EMAIL"]
           PASSWORD_NAMES = ["BETFAIR_PASSWORD", "BETFAIR_PASS", "BETFAIR_PW", "BF_PASSWORD", "BF_PASS",
                             "BETFAIR_PWD", "BETFAIR_PASSWD", "BETFAIR_LOGIN_PASSWORD", "BETFAIR_SECRET", "PASSWORD"]
+          TOKEN_NAMES    = ["BETFAIR_SESSION_TOKEN", "BETFAIR_SSOID", "BETFAIR_TOKEN", "BETFAIR_SESSION",
+                            "SESSION_TOKEN", "SSOID"]
           CERT_NAMES     = ["BETFAIR_CERT", "BETFAIR_CERT_PEM", "BETFAIR_CERT_KEY"]
 
           EXPLAIN = {
               "SUCCESS": "login accepted — credentials are good",
               "LIMITED_ACCESS": "login accepted but the account has limited access (site prompt outstanding)",
               "LOGIN_RESTRICTED": "login is restricted on this account — check the Betfair website",
-              "ACCOUNT_PENDING_PASSWORD_CHANGE": "Betfair still requires a password change: log in on the Betfair WEBSITE, complete the forced password change, then update the GitHub secret to the new password",
+              "ACCOUNT_PENDING_PASSWORD_CHANGE": "per Betfair docs the account is LOCKED until password recovery is completed at https://identitysso.betfair.com/view/recoverpassword (AU: via the betfair.com.au site) — reset there, then update the GitHub secret to the new password. If this keeps coming back, something is still retrying logins with the OLD password and re-locking the account (e.g. a script or bot left running)",
               "CHANGE_PASSWORD_REQUIRED": "Betfair requires the password to be changed on the website before the API will accept logins",
-              "INVALID_USERNAME_OR_PASSWORD": "the username/password in the GitHub secrets was rejected — if the password was reset on the website, the secret must be updated to the NEW password",
+              "INVALID_USERNAME_OR_PASSWORD": "the username/password the workflow used was rejected — if the password was reset on the website, the secret must be updated to the NEW password",
               "ACCOUNT_NOW_LOCKED": "this attempt tipped the account into locked state — unlock on the Betfair website before any retry",
               "ACCOUNT_ALREADY_LOCKED": "the account is locked (usually from repeated failed logins) — unlock via the Betfair website/support, then retry",
-              "TEMPORARY_BAN_TOO_MANY_REQUESTS": "too many recent login attempts — wait at least 20 minutes before retrying",
+              "TEMPORARY_BAN_TOO_MANY_REQUESTS": "too many login attempts — Betfair blocks new sessions for 20 minutes after a breach; wait, then retry",
               "PENDING_AUTH": "a verification step (2FA / identity check) is outstanding on the account — complete it on the website",
               "KYC_SUSPEND": "account suspended pending identity verification — resolve on the website",
               "SUSPENDED": "the account is suspended — contact Betfair",
               "CLOSED": "the account is closed",
               "SELF_EXCLUDED": "the account is self-excluded",
-              "BETTING_RESTRICTED_LOCATION": "the request came from a location Betfair blocks (GitHub runners sit in US data centres) — this does NOT disprove the credentials; the same test from an allowed country (e.g. the Mac in Australia) is the fallback",
+              "BETTING_RESTRICTED_LOCATION": "per Betfair docs: the request came from a location restricted for legal/regulatory reasons (GitHub runners sit in US data centres) — this does NOT disprove the credentials; run the same test from an allowed country (e.g. the Mac in Australia)",
+              "LOGIN_RESTRICTED_LOCATION": "login blocked because of the request's source location (GitHub runners sit in US data centres) — this does NOT disprove the credentials",
               "SECURITY_RESTRICTED_LOCATION": "blocked because of the request's source location (GitHub runners sit in US data centres) — this does NOT disprove the credentials",
               "DUPLICATE_CARDS": "duplicate card details on the account — resolve on the website",
               "SECURITY_QUESTION_WRONG_3X": "security question failed three times — account needs attention on the website",
               "INPUT_VALIDATION_ERROR": "the request fields were rejected — usually an empty/garbled username or password value in the secret",
+              "CERT_AUTH_REQUIRED": "this account requires certificate (non-interactive bot) login — an SSL client certificate must be registered and used",
           }
           # Statuses where attempting the other SSO host would just burn
           # another login attempt from the same IP for the same outcome.
@@ -144,9 +167,15 @@ jobs:
               except Exception as e:
                   return None, {"_transport": f"{type(e).__name__}: {e}"}
 
+          def aping_error(body):
+              if isinstance(body, dict):
+                  return ((body.get("detail", {}) or {}).get("APINGException", {}) or {}).get("errorCode", "") \
+                      or body.get("faultstring", "") or body.get("_raw", "")
+              return ""
+
           def report_and_pick(label, names, show_len=True):
-              # show_len=False for username/password: this is a public repo, so
-              # even a credential's length stays out of the log.
+              # show_len=False for credentials: this is a public repo, so even
+              # a credential's length stays out of the log.
               print(f"  {label}:")
               picked, picked_name = "", None
               for n in names:
@@ -164,41 +193,120 @@ jobs:
               print(f"    -> using: {picked_name or 'NONE FOUND'}")
               return picked, picked_name
 
+          def exchange_check(app_key, token, label):
+              """Read-only Exchange API probe. Returns (ok, error_code)."""
+              api_headers = {"X-Application": app_key, "X-Authentication": token,
+                             "Content-Type": "application/json", "Accept": "application/json"}
+              st, body = http_json(f"{EXCHANGE}/betting/rest/v1.0/listEventTypes/",
+                                   data=json.dumps({"filter": {}}).encode(), headers=api_headers)
+              if st == 200 and isinstance(body, list):
+                  names = {e.get("eventType", {}).get("id"): e.get("eventType", {}).get("name") for e in body}
+                  print(f"  listEventTypes ({label}): HTTP 200, {len(body)} event types returned")
+                  print(f"  horse racing available: {'YES' if '7' in names else 'no (!)'}")
+                  st2, keys = http_json(f"{EXCHANGE}/account/rest/v1.0/getDeveloperAppKeys/",
+                                        data=b"{}", headers=api_headers)
+                  if st2 == 200 and isinstance(keys, list):
+                      print("  app keys registered on this Betfair account:")
+                      for app in keys:
+                          for v in app.get("appVersions", []):
+                              match = "MATCHES the stored secret" if v.get("applicationKey") == app_key else "different key"
+                              print(f"    - app '{app.get('appName')}' v{v.get('version')}: delayed-data={v.get('delayData')} active={v.get('active')} -> {match}")
+                  else:
+                      print(f"  getDeveloperAppKeys: HTTP {st2} (informational only)")
+                  return True, ""
+              code = aping_error(body) or str(body)
+              print(f"  listEventTypes ({label}): HTTP {st} — {code}")
+              if "INVALID_SESSION_INFORMATION" in code:
+                  print("  meaning: the session token is expired or invalid (they lapse after ~8-24h idle)")
+              elif "INVALID_APP_KEY" in code:
+                  print("  meaning: the session is fine but the stored app key is not a valid application key")
+              elif "APP_KEY_NOT_ACTIVE" in code or "ACCESS_DENIED" in code:
+                  print("  meaning: the app key exists but is not activated for the Exchange API (delayed key not activated, or live key awaiting activation)")
+              return False, code
+
           banner("1. Which Betfair secrets exist in this repo (names only, never values)")
           app_key, app_key_name = report_and_pick("app key", APP_KEY_NAMES)
           username, username_name = report_and_pick("username", USERNAME_NAMES, show_len=False)
           password, password_name = report_and_pick("password", PASSWORD_NAMES, show_len=False)
+          sess_tok, sess_tok_name = report_and_pick("session token (ssoid)", TOKEN_NAMES, show_len=False)
           cert_present = [n for n in CERT_NAMES if os.environ.get(n)]
           print(f"  cert-login secrets present: {cert_present or 'none'} (cert login not attempted by this test)")
 
-          missing = [lbl for lbl, v in [("app key", app_key), ("username", username), ("password", password)] if not v]
-          if missing:
-              banner("VERDICT: CANNOT TEST — secrets missing")
-              print(f"  Missing: {', '.join(missing)}.")
-              print("  None of the candidate names above were set for these. Add repository")
-              print("  Actions secrets (repo Settings -> Secrets and variables -> Actions ->")
-              print("  'Repository secrets'): BETFAIR_APP_KEY, BETFAIR_USERNAME, BETFAIR_PASSWORD.")
-              print("  Note: 'Environment' secrets, Codespaces secrets and Dependabot secrets")
-              print("  are separate stores and would NOT be visible to this job.")
+          banner("2. Repo GitHub environments (environment secrets are a separate store)")
+          api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          st, body = http_json(f"{api}/repos/{repo}/environments",
+                               headers={"Authorization": f"Bearer {os.environ.get('GH_TOKEN','')}",
+                                        "Accept": "application/vnd.github+json",
+                                        "X-GitHub-Api-Version": "2022-11-28",
+                                        "User-Agent": "betfair-keys-smoke-test"})
+          if st == 200 and isinstance(body, dict):
+              env_names = [e.get("name") for e in body.get("environments", [])]
+              if env_names:
+                  print(f"  environments found: {env_names}")
+                  print("  NOTE: this job does not declare an environment, so secrets stored")
+                  print("  inside these environments are NOT visible to it. If the Betfair")
+                  print("  credentials live there, the job needs 'environment: <name>' added.")
+              else:
+                  print("  no environments exist in this repo — so the credentials are not hiding in environment secrets")
+          else:
+              print(f"  could not list environments (HTTP {st}) — continuing")
+
+          if not app_key:
+              banner("VERDICT: CANNOT TEST — no app key secret found")
+              print("  Add BETFAIR_APP_KEY as a repository Actions secret.")
+              sys.exit(2)
+          have_login_creds = bool(username and password)
+          if not have_login_creds and not sess_tok:
+              banner("VERDICT: CANNOT TEST — no way to open a Betfair session")
+              print(f"  App key present ({app_key_name}), but Betfair's API needs a session as well,")
+              print("  and none of the checked names held one. Per the Betfair docs, EITHER of")
+              print("  these unblocks the test — add as repository Actions secrets")
+              print("  (repo Settings -> Secrets and variables -> Actions -> Repository secrets):")
+              print("    a) BETFAIR_USERNAME + BETFAIR_PASSWORD  (the login used on betfair.com.au), or")
+              print("    b) BETFAIR_SESSION_TOKEN — log in at betfair.com.au in a browser and copy the")
+              print("       'ssoid' cookie value (Betfair's documented shortcut; no password stored).")
+              print("  If these were saved as 'Environment' secrets, say which environment (see")
+              print("  section 2) so the job can be pointed at it. Codespaces/Dependabot secrets")
+              print("  are separate stores this job cannot read.")
               sys.exit(2)
 
-          banner("2. Where is this runner (matters: Betfair geo-blocks some regions)")
+          banner("3. Where is this runner (matters: Betfair geo-blocks some regions)")
           st, geo = http_json("https://ipapi.co/json/", headers={"User-Agent": "curl/8"}, timeout=15)
           if isinstance(geo, dict) and geo.get("country"):
               print(f"  runner egress: {geo.get('ip')} — {geo.get('country_name', geo.get('country'))} ({geo.get('country')})")
           else:
               print(f"  could not determine runner location ({geo}) — continuing anyway")
 
-          banner("3. Interactive SSO login (single attempt — no credential-failure retries)")
-          order = {"au-then-com": ["au", "com"], "com-then-au": ["com", "au"],
-                   "au-only": ["au"], "com-only": ["com"]}[os.environ.get("SMOKE_HOSTS") or "au-then-com"]
+          # ── Path A: a stored session token proves app key + session with no login at all
+          if sess_tok:
+              banner(f"4. Validating stored session token {sess_tok_name} against the Exchange API")
+              ok, code = exchange_check(app_key, sess_tok, f"token from {sess_tok_name}")
+              if ok:
+                  banner("VERDICT")
+                  print(f"  KEYS OK — app key {app_key_name} + session token {sess_tok_name} were accepted")
+                  print("  by the Exchange API (read-only listEventTypes). No login attempt was needed;")
+                  print("  the stored token was left logged in.")
+                  sys.exit(0)
+              if not have_login_creds:
+                  banner("VERDICT: SESSION TOKEN REJECTED and no username/password to fall back on")
+                  print(f"  error: {code}")
+                  print("  Refresh the token (log in at betfair.com.au, copy the 'ssoid' cookie into the")
+                  print("  secret again) or add BETFAIR_USERNAME + BETFAIR_PASSWORD for automatic login.")
+                  sys.exit(1)
+              print("  falling back to username/password login...")
+
+          # ── Path B: one interactive login (Betfair-documented endpoints)
+          banner("5. Interactive SSO login (single attempt — no credential-failure retries)")
+          order = {"au-then-com": [AU_SSO, COM_SSO], "com-then-au": [COM_SSO, AU_SSO],
+                   "au-only": [AU_SSO], "com-only": [COM_SSO]}[os.environ.get("SMOKE_HOSTS") or "au-then-com"]
           form = urllib.parse.urlencode({"username": username, "password": password}).encode()
           headers = {"X-Application": app_key, "Accept": "application/json",
                      "Content-Type": "application/x-www-form-urlencoded"}
 
           token, login_host, final_status, final_error = "", None, None, None
           for host in order:
-              url = f"https://identitysso.betfair.{host}/api/login"
+              url = f"https://{host}/api/login"
               print(f"  POST {url}")
               st, body = http_json(url, data=form, headers=headers)
               if "_transport" in body:
@@ -220,54 +328,25 @@ jobs:
                   break
 
           if not token:
-              banner(f"VERDICT: LOGIN FAILED on identitysso.betfair.{login_host or order[-1]}")
+              banner(f"VERDICT: LOGIN FAILED on {login_host or order[-1]}")
               key = (final_error or final_status or "")
               print(f"  status={final_status} error={final_error or '(none)'}")
-              print(f"  {EXPLAIN.get(key, 'see the status/error above; full status list: Betfair Non-Interactive/Interactive Login docs')}")
+              print(f"  {EXPLAIN.get(key, 'see the status/error above; full status list: Betfair Interactive Login docs')}")
               sys.exit(1)
 
-          banner("4. Exchange API check with the stored app key (read-only)")
-          api_headers = {"X-Application": app_key, "X-Authentication": token,
-                         "Content-Type": "application/json", "Accept": "application/json"}
-          st, body = http_json("https://api.betfair.com/exchange/betting/rest/v1.0/listEventTypes/",
-                               data=json.dumps({"filter": {}}).encode(), headers=api_headers)
-          app_key_ok = False
-          if st == 200 and isinstance(body, list):
-              app_key_ok = True
-              names = {e.get("eventType", {}).get("id"): e.get("eventType", {}).get("name") for e in body}
-              print(f"  listEventTypes: HTTP 200, {len(body)} event types returned")
-              print(f"  horse racing available: {'YES' if '7' in names else 'no (!)'}")
-          else:
-              code = ""
-              if isinstance(body, dict):
-                  code = (body.get("detail", {}) or {}).get("APINGException", {}).get("errorCode", "") or body.get("_raw", "")
-              print(f"  listEventTypes: HTTP {st} — {code or body}")
-              if "INVALID_APP_KEY" in str(code):
-                  print("  meaning: the session/login is fine but the stored app key is not valid")
-              elif "APP_KEY_NOT_ACTIVE" in str(code) or "ACCESS_DENIED" in str(code):
-                  print("  meaning: the app key exists but is not activated for the Exchange API (delayed key not activated, or live key awaiting activation)")
+          banner("6. Exchange API check with the stored app key (read-only)")
+          ok, code = exchange_check(app_key, token, "session from login")
 
-          st, keys = http_json("https://api.betfair.com/exchange/account/rest/v1.0/getDeveloperAppKeys/",
-                               data=b"{}", headers=api_headers)
-          if st == 200 and isinstance(keys, list):
-              print("  app keys registered on this Betfair account:")
-              for app in keys:
-                  for v in app.get("appVersions", []):
-                      match = "MATCHES the stored secret" if v.get("applicationKey") == app_key else "different key"
-                      print(f"    - app '{app.get('appName')}' v{v.get('version')}: delayed-data={v.get('delayData')} active={v.get('active')} -> {match}")
-          else:
-              print(f"  getDeveloperAppKeys: HTTP {st} (informational only)")
-
-          http_json(f"https://identitysso.betfair.{login_host}/api/logout", data=b"",
+          http_json(f"https://{login_host}/api/logout", data=b"",
                     headers={"X-Application": app_key, "X-Authentication": token, "Accept": "application/json"})
           print("  session logged out")
 
           banner("VERDICT")
-          if app_key_ok:
-              print(f"  KEYS OK — login SUCCESS on identitysso.betfair.{login_host} using")
-              print(f"  {username_name}/{password_name}, and app key {app_key_name} was accepted by the Exchange API.")
+          if ok:
+              print(f"  KEYS OK — login SUCCESS on {login_host} using {username_name}/{password_name},")
+              print(f"  and app key {app_key_name} was accepted by the Exchange API.")
               sys.exit(0)
-          print(f"  PARTIAL — login on identitysso.betfair.{login_host} succeeded (username/password are good),")
-          print(f"  but the app key {app_key_name} was NOT accepted by the Exchange API — see section 4.")
+          print(f"  PARTIAL — login on {login_host} succeeded (username/password are good), but the")
+          print(f"  app key {app_key_name} was NOT accepted by the Exchange API — see section 6.")
           sys.exit(1)
           PYEOF
