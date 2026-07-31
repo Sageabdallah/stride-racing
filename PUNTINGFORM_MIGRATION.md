@@ -74,19 +74,28 @@ token-based auth (second auth mode to implement); JSON `payLoad` envelope
 carries `statusCode`/`error` fields to check on every call; the legacy
 caret-delimited CSV service remains available as a fallback shape.
 
-## Phase B — 60-day backfill  *(time-critical — first coding session after A)*
+## Phase B — 60-day backfill  *(in progress 2026-07-31)*
 
-- [ ] [C] `server/python/pf_client.py`: thin client (auth, retry, rate-limit
-      courtesy, raw-payload archiving hook)
-- [ ] [C] Backfill runner: walk back 60 days; import results into
-      `race_results_history` (same shape as the old importer, tagged
-      `source='puntingform'`); stage sectionals into `sectional_times`
-- [ ] [C] Raw archive: every response persisted (date-keyed) before parsing —
-      the start of the owned archive
-- [ ] [C] Gap report: which dates/meetings the old pipeline missed since the
-      Racing API died, and which of those PF filled
-- **Done when:** `race_results_history` has no missing metro race days in the
-  last 60 and the gap report is committed.
+- [x] [C] `server/python/pf_client.py`: thin client for the confirmed v2
+      endpoints (envelope error-checking, retries, 0.4s pacing)
+- [x] [C] `server/python/pf_backfill_results.py`: mirrors the retired
+      importer's exact contract (21 columns, append-only, date/track/race
+      dedup, trials + unplaced excluded) with the **horse-ID bridge**
+      (match by normalised name; only unknown horses get `pf<runnerId>` ids;
+      PF rows are identifiable by `race_id LIKE 'pf%'`)
+- [x] [C] Raw archive: results payloads persisted to `pf_raw_payloads`
+      (jsonb, created on first commit run) before parsing
+- [x] [C] 3-day dry run (pf-backfill run #1): 12 meetings → 943 rows, **87%
+      of runners bridged to existing horse_ids** (124 new), zero errors,
+      and 0 existing DB rows in the window — confirming the pipeline had
+      been dead since the Racing API cutoff
+- [ ] [C] Full 60-day `commit=true` run (dispatched 2026-07-31) — record
+      totals here when complete
+- [ ] [C] Verification pass: per-day row counts vs meeting calendar; NULL
+      rates on distance_m / race_class / race_name (dry run flagged no
+      unmapped keys, but confirm on data); then the gap report
+- **Done when:** `race_results_history` has no missing race days in the last
+  60 and the verification numbers are recorded here.
 
 ## Phase C — daily ingestion (replace the six dead modules)
 
