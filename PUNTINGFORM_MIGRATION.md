@@ -48,6 +48,32 @@ Owners: **[C]** = Claude (cloud sessions — no Mac needed), **[U]** = user.
   are Modeller/commercial tier; SouthCoast Export is Professional. See the
   plan adjustment in Phase E.
 
+### Full Starter inventory — every included endpoint and what it is worth here
+
+Source: Punting Form's own API reference as printed into probe run
+30632395111 (descriptions condensed from their wording). All rows below are
+**included in the $59 Starter tier**; JSON and CSV variants exist for most.
+
+| Endpoint | What it returns | Value to STRIDE |
+|---|---|---|
+| Meetings List | All meetings for a date (track, state, country, surface, rail position, barrier-trial flag, resulted flag) | **Pipeline core** — replaces the dead racecards discovery; verified live 2026-07-31 |
+| Form | Form for a race or whole meeting, up to the **last 10 runs per horse** | **Pipeline core** — the who/what/when/where + form-history replacement; feeds existing form features |
+| Results | Results for a race or meeting; recently extended with **distance and class fields** (their changelog) | **Pipeline core** — replaces the dead results importers; feeds `race_results_history` and settlement |
+| Scratchings | All upcoming scratchings **with timestamps and deductions** | **Serve-time correctness** — late scratchings currently reach the pipeline unreliably; deduction amounts also matter for price logic |
+| Conditions | Track grading + weather for all upcoming meetings | **New feature input** — going/weather at serve time without scraping; the race filters (`STRIDE_RACE_FILTER_HEAVY_GOING`) get a proper source |
+| Speedmaps | Punting Form's speed map data per race (default, or user-edited version) | **New feature input, ranked #1 of the new levers** — settling position / pace pressure for the barrier×pace interaction features |
+| Ratings | Punting Form's standard ratings (token-based auth) | **New feature input + consensus pillar** — independent rated assessment per runner; also a value screen vs Betfair prices |
+| Strike Rates | Trainer or jockey **career and last-100** performance incl. **actual-vs-expected** ratings | **New feature input** — upgrades the raw trainer/jockey win% the model uses today with an expectation-adjusted version |
+| Worksheets | Punting Form's worksheet data per race (default or user-edited) | Secondary — consolidated race view; useful for spot-checking, not modelling |
+| Notes | User-entered notes at form/horse/race level | Workspace feature — no model value unless notes are kept manually |
+| Blackbook | Upcoming runners that are in the user's blackbook | Workspace feature — could later mirror model watchlists into the PF UI |
+
+Practical notes for the client build (Phase B): the v2 JSON service takes
+ISO dates and the `apiKey` query parameter; Ratings is documented as
+token-based auth (second auth mode to implement); JSON `payLoad` envelope
+carries `statusCode`/`error` fields to check on every call; the legacy
+caret-delimited CSV service remains available as a fallback shape.
+
 ## Phase B — 60-day backfill  *(time-critical — first coding session after A)*
 
 - [ ] [C] `server/python/pf_client.py`: thin client (auth, retry, rate-limit
