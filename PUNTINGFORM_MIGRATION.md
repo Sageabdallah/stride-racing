@@ -19,16 +19,34 @@ Owners: **[C]** = Claude (cloud sessions — no Mac needed), **[U]** = user.
 
 ---
 
-## Phase A — connectivity & API mapping  *(in progress)*
+## Phase A — connectivity & API mapping  *(DONE 2026-07-31, probe run #1)*
 
 - [x] [U] Buy Starter; add `PUNTINGFORM_API_KEY` repository secret (2026-07-31)
 - [x] [C] Probe tooling: `scripts/puntingform_probe.py` + `puntingform-probe`
       workflow — fetches their API reference and exercises candidate endpoints
       with the real key from a GitHub runner
-- [ ] [C] Read probe output; record the confirmed base URL, auth style, and the
-      exact endpoints for meetings, fields/form, results, sectionals, ratings,
-      scratchings in this file
-- **Done when:** a meetings call for today's date returns real data in CI.
+- [x] [C] Probe read; findings recorded below. Meetings call for today
+      returned live JSON in CI — **done-criterion met.**
+
+### Confirmed API facts (probe run 30632395111)
+
+- **Primary (JSON):** `https://api.puntingform.com.au/v2/form/meetingslist?meetingDate=YYYY-MM-DD&apiKey=...`
+  → 200, `payLoad` array of meetings with track objects (name, trackId,
+  location, state, country, surface). ISO dates only (d-M-yyyy → 400).
+- **Legacy (caret-CSV):** `https://www.puntingform.com.au/api/formdataservice/ExportMeetings/{d-M-yyyy}?apiKey=...`
+  → 200; fields `meetingId^track^railPosition^TABMeeting^meetingDate^
+  isBarrierTrial^hasSectionals^trackAbbrev^resulted`; includes NZ + country
+  meetings. Same service on `old.puntingform.com.au`.
+- **Starter-tier endpoints** (from their published reference): Form (last 10
+  runs/horse), Results (+ new distance/class fields), Meetings List,
+  **Ratings**, **Speedmaps**, **Strike Rates** (trainer/jockey career +
+  last-100 with actual-vs-expected), **Scratchings** (timestamped, with
+  deductions), **Conditions** (track grading + weather), Worksheets, Notes,
+  Blackbook. Ratings require token-based auth (second auth mode for the
+  client); form/results/meetings work with the `apiKey` query param.
+- **NOT in Starter:** the bespoke **Sectionals** and **Benchmarks** endpoints
+  are Modeller/commercial tier; SouthCoast Export is Professional. See the
+  plan adjustment in Phase E.
 
 ## Phase B — 60-day backfill  *(time-critical — first coding session after A)*
 
@@ -75,11 +93,19 @@ Owners: **[C]** = Claude (cloud sessions — no Mac needed), **[U]** = user.
 Ranked by expected value; each behind its own flag, promoted only on
 walk-forward + promotion-gate evidence (`retrain_preflight.py`):
 
-- [ ] [C] National sectional coverage feeding the existing sectional features
-      (widens where current signals fire — biggest expected lift)
-- [ ] [C] Speed-map / settling-position features into the pace interactions
-- [ ] [C] PF ratings + rated prices as a consensus pillar input and a
-      value-screen vs Betfair prices
+- **Plan adjustment (Phase A finding):** PF sectionals need the Modeller
+  tier, not Starter — so the free racing.com/RQ sectional collectors STAY in
+  service, and the Starter-tier levers below move up the ranking. PF
+  sectionals become a paid upgrade decision only if the model's sectional
+  features prove valuable enough to fund Modeller.
+- [ ] [C] **Speedmaps** (Starter ✓) — settling-position/pace-pressure
+      features into the existing pace interactions
+- [ ] [C] **PF Ratings** (Starter ✓) — consensus-pillar input and value
+      screen vs Betfair prices
+- [ ] [C] **Strike Rates** (Starter ✓) — trainer/jockey actual-vs-expected as
+      features (upgrade on raw win% the model uses today)
+- [ ] [C] **Conditions** (Starter ✓) — track grading + weather as serve-time
+      features; **Scratchings** into the serve pipeline for late changes
 - [ ] [C] Retrain + walk-forward A/B: current features vs +PF features
 - **Done when:** the A/B shows the PF feature set wins (or the losers are
   documented and dropped).
