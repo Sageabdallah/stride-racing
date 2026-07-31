@@ -144,7 +144,9 @@ jobs:
               except Exception as e:
                   return None, {"_transport": f"{type(e).__name__}: {e}"}
 
-          def report_and_pick(label, names):
+          def report_and_pick(label, names, show_len=True):
+              # show_len=False for username/password: this is a public repo, so
+              # even a credential's length stays out of the log.
               print(f"  {label}:")
               picked, picked_name = "", None
               for n in names:
@@ -153,7 +155,8 @@ jobs:
                       note = ""
                       if raw != raw.strip():
                           note = "   <-- WARNING: leading/trailing whitespace (stripped for this attempt; re-save the secret without it)"
-                      print(f"    {n}: SET ({len(raw)} chars){note}")
+                      size = f" ({len(raw)} chars)" if show_len else ""
+                      print(f"    {n}: SET{size}{note}")
                       if picked_name is None and raw.strip():
                           picked, picked_name = raw.strip(), n
                   else:
@@ -163,8 +166,8 @@ jobs:
 
           banner("1. Which Betfair secrets exist in this repo (names only, never values)")
           app_key, app_key_name = report_and_pick("app key", APP_KEY_NAMES)
-          username, username_name = report_and_pick("username", USERNAME_NAMES)
-          password, password_name = report_and_pick("password", PASSWORD_NAMES)
+          username, username_name = report_and_pick("username", USERNAME_NAMES, show_len=False)
+          password, password_name = report_and_pick("password", PASSWORD_NAMES, show_len=False)
           cert_present = [n for n in CERT_NAMES if os.environ.get(n)]
           print(f"  cert-login secrets present: {cert_present or 'none'} (cert login not attempted by this test)")
 
