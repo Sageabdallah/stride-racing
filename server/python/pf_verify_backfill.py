@@ -279,10 +279,19 @@ def main():
     dates = [(start + datetime.timedelta(days=i)).isoformat()
              for i in range((end - start).days + 1)]
 
+    # All DB reads happen in one quick burst up front: the API-heavy per-day
+    # loop takes minutes at 0.4s pacing and serverless Postgres drops idle
+    # connections (learned the hard way — verify run 1 died mid-report).
     import psycopg2
     conn = psycopg2.connect(db_url)
     conn.set_session(readonly=True)  # belt and braces: this script never writes
     cur = conn.cursor()
+    db_days = db_day_counts(cur, dates[0], dates[-1])
+    arch_days = archive_day_counts(cur, dates[0], dates[-1])
+    pf_total, rates = null_rates(cur)
+    old_last, pf_first, pf_last = death_dates(cur)
+    audit = bridge_audit(cur)
+    conn.close()
 
     print(f"VERIFY {dates[0]} .. {dates[-1]} ({len(dates)} days) — read-only")
 
@@ -295,8 +304,6 @@ def main():
 
     # ---- check 1: per-day coverage
     print("\n== CHECK 1: per-day coverage (DB vs PF) ==")
-    db_days = db_day_counts(cur, dates[0], dates[-1])
-    arch_days = archive_day_counts(cur, dates[0], dates[-1])
     print("date        PF mtg(res/tot)  exp races/runners(src)   DB mtg/race/rows(pf)   flags")
     flagged, unreachable, zero_row, au_racing_dates = [], [], [], set()
     for iso in dates:
@@ -348,14 +355,12 @@ def main():
 
     # ---- check 2: NULL rates on pf% rows
     print("\n== CHECK 2: NULL rates on race_id LIKE 'pf%' rows ==")
-    total, rates = null_rates(cur)
-    print(f"pf% rows: {total}")
+    print(f"pf% rows: {pf_total}")
     for r in rates:
         print(f"  {r['column']:<16} {r['nulls']:>6} NULL  ({r['pct']:.1f}%)")
 
     # ---- check 3: pipeline death date
     print("\n== CHECK 3: pipeline death date ==")
-    old_last, pf_first, pf_last = death_dates(cur)
     print(f"old pipeline (race_id NOT LIKE 'pf%'): last row {old_last}")
     print(f"PF backfill (race_id LIKE 'pf%'):      rows {pf_first} .. {pf_last}")
     if old_last and pf_last:
@@ -383,7 +388,6 @@ def main():
 
     # ---- check 5: bridge audit
     print("\n== CHECK 5: horse-ID bridge audit ==")
-    audit = bridge_audit(cur)
     tot_rows = audit["bridged_rows"] + audit["new_rows"]
     pct = (100.0 * audit["bridged_rows"] / tot_rows) if tot_rows else 0.0
     print(f"bridged rows: {audit['bridged_rows']} ({pct:.1f}%)  "
@@ -393,7 +397,6 @@ def main():
     for horse_id, pf_name, prior_name in audit["samples"]:
         print(f"  {pf_name:<28} -> {horse_id:<10} | {prior_name}")
 
-    conn.close()
     print("\nVERIFY COMPLETE (read-only; nothing written)")
     return 0
 
