@@ -89,13 +89,20 @@ caret-delimited CSV service remains available as a fallback shape.
       of runners bridged to existing horse_ids** (124 new), zero errors,
       and 0 existing DB rows in the window — confirming the pipeline had
       been dead since the Racing API cutoff
-- [ ] [C] Full 60-day `commit=true` run (dispatched 2026-07-31) — record
-      totals here when complete
-- [ ] [C] Verification pass: per-day row counts vs meeting calendar; NULL
-      rates on distance_m / race_class / race_name (dry run flagged no
-      unmapped keys, but confirm on data); then the gap report
-- **Done when:** `race_results_history` has no missing race days in the last
-  60 and the verification numbers are recorded here.
+- [x] [C] Full `commit=true` run (pf-backfill run #2, 2026-07-31, 21 min):
+      **10,503 rows inserted, 4,400 already present (dedup held), 578 new
+      horse ids (~95% of inserted runners bridged to existing horses).**
+      Raw results payloads for every resulted meeting stored in
+      `pf_raw_payloads`.
+- **Measured API wall:** meetingslist returns HTTP 400 for dates before
+      **2026-06-08** — the "~60 days" window is ~53 days in practice, and it
+      slides daily. 2026-06-01..07 are beyond the subscription's reach
+      (recoverable only via the $1,100 archive, or already covered by the
+      old pipeline — the gap report will say).
+- [ ] [C] Verification pass (next session): per-day row counts vs meeting
+      calendar; NULL rates on distance_m / race_class / race_name; exact
+      old-pipeline death date and the definitive gap report
+- **Done when:** the verification numbers and gap report are recorded here.
 
 ## Phase C — daily ingestion (replace the six dead modules)
 
