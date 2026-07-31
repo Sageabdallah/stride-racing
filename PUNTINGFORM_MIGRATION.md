@@ -122,13 +122,69 @@ caret-delimited CSV service remains available as a fallback shape.
 
 ## Phase D — trust checks before the model touches anything
 
-- [ ] [C] Parity: PF results vs existing DB on overlapping days (winners,
-      margins, field sizes, track-name normalisation, horse-name matching)
-- [ ] [C] Sectionals sanity: PF vs racing.com/RQ values where both exist
-- [ ] [C] Coverage report: PF meeting coverage vs the meeting calendar by
-      state (the 92%-of-TAB claim, verified on our own data)
+Measured 2026-08-01 by `server/python/pf_trust_checks.py` (read-only;
+re-runnable; PF side read from the `pf_raw_payloads` archive, nothing
+refetched). Overlap window: **14 days, 2026-06-30..2026-07-13** (old
+pipeline's last day .. PF coverage start), 739 races compared across
+meetings matched by runner-name overlap (track-name strings differ — see
+alias finding below).
+
+- [x] [C] Parity: PF results vs existing DB on overlapping days:
+  - **Winner agreement 100%** (704/704 races with a position-1 on both
+    sides; 35 unknown = abandoned/void races with no placings either side).
+  - **Margins: 99.93% exact** (6,088/6,092 shared placed runners). The 4
+    non-exact are explained: 3 are non-finisher sentinels (PF stores 99.9
+    or 0.0 where the old pipeline stored the raw beaten distance, e.g.
+    112.57L/206.7L) and 1 is a 0.01L rounding difference. Negligible
+    (threshold: <0.5% non-exact).
+  - **Winner-margin semantic (705 races, 100%):** the old pipeline stored
+    NULL for the winner's margin; PF stores the winning margin. Not a
+    discrepancy — consumers must know the convention changed.
+  - Other null-vs-value margin pairings: 20/6,112 (0.3%) — scratching
+    timing differences. Negligible.
+  - **Field sizes:** 707/739 races exact. Of the 32 non-zero deltas, all
+    32 are abandoned/void race shells (PF has the race with zero placings;
+    the old pipeline kept NULL-position runner rows at the full field
+    size, e.g. Moe 2026-07-03 abandoned after R4). Explained.
+  - **Track-name normalisation collisions (literal `lower(track)`): 0.**
+  - **NON-NEGLIGIBLE — alias duplicates (22 pairs):** the same meeting is
+    stored twice under different track names (PF `Ballarat Synthetic` vs
+    old `Sportsbet-Ballarat Synthetic`, `Belmont Park` vs `Belmont`,
+    `Fannie Bay` vs `Darwin`, `Randwick` vs `Royal Randwick`, etc.) — the
+    `(race_date, lower(track), race_number)` dedup key is blind to sponsor
+    prefixes and aliases, so ~40 doubled race-days sit in
+    `race_results_history` with different race_ids. Follow-up:
+    **F-TRACK-ALIAS** — add a canonical track-name map to
+    `pf_results_mapper` (normalise old sponsor-prefixed names to PF names
+    before dedup) and one-time-delete the doubled `pf%` rows whose races
+    already exist under the old alias.
+  - **Horse-name bridge: 0 same-name misses** on duplicate-stored races
+    (the bridge resolved PF runners to the existing `hrs_aus_*` ids even
+    for doubled races); 2 position-level name disagreements out of 6,817
+    shared positions (late-scratching reshuffles). Negligible.
+- [x] [C] Sectionals sanity: 9 overlap days (2026-07-01..07-11,
+      `nsw_pidata` source), 80 sectional races. **61 fully aligned; 19
+      with runner-set differences; 0 sectional races missing from PF.**
+      Differences: 17 races where PF names starters the sectional feed
+      lacks (sectional data gap for those runners — an existing collector
+      condition, not PF-caused), 1 race with a real sectionals-only runner
+      (Muswellbrook 2026-07-07 R3 `russianwords` — PF has no record of the
+      runner), and 1 race (Gosford 2026-07-09 R4) where the collector
+      stored `Unknown <id>` placeholder names. Follow-up: **F-SEC-PLACEHOLDER** — fix `Unknown` placeholder
+      name resolution in the NSW sectional collector.
+- [x] [C] Coverage report: PF resulted meetings 2026-06-30..08-01 (260
+      meetings/33 days) vs old-pipeline historical average
+      meetings-per-state-per-weekday (786 meetings, 2026-04-01..07-13).
+      **Overall 103.9% — the 92%-of-TAB claim holds on our data** (PF
+      meets or exceeds what the old pipeline actually collected).
+      Per-state weekly ratios: NSW 95.4%, VIC 103.6%, QLD 102.4%,
+      SA 125.8%, WA 109.9%, TAS 93.8%, NT 146.9%, ACT 75.0%. Caveats: PF
+      window is only ~5 weeks (weekday cells average 4–5 samples), the
+      historical baseline is winter-only, and 8 country one-off tracks
+      rest on manual state assignment (noted in the script).
 - **Done when:** discrepancy rate is quantified and either negligible or
-  explained in this file.
+  explained in this file. — **Met 2026-08-01**, with two named follow-ups
+  (F-TRACK-ALIAS, F-SEC-PLACEHOLDER) above.
 
 ## Phase E — feature uplift (flags + walk-forward evidence only)
 
