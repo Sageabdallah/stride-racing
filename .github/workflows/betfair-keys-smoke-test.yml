@@ -52,17 +52,33 @@ jobs:
       BETFAIR_API_KEY: ${{ secrets.BETFAIR_API_KEY }}
       BETFAIR_KEY: ${{ secrets.BETFAIR_KEY }}
       BF_APP_KEY: ${{ secrets.BF_APP_KEY }}
+      BETFAIR_APP_KEY_LIVE: ${{ secrets.BETFAIR_APP_KEY_LIVE }}
+      BETFAIR_APP_KEY_DELAYED: ${{ secrets.BETFAIR_APP_KEY_DELAYED }}
+      BETFAIR_LIVE_APP_KEY: ${{ secrets.BETFAIR_LIVE_APP_KEY }}
+      BETFAIR_DELAYED_APP_KEY: ${{ secrets.BETFAIR_DELAYED_APP_KEY }}
       BETFAIR_USERNAME: ${{ secrets.BETFAIR_USERNAME }}
       BETFAIR_USER: ${{ secrets.BETFAIR_USER }}
       BETFAIR_EMAIL: ${{ secrets.BETFAIR_EMAIL }}
       BETFAIR_LOGIN: ${{ secrets.BETFAIR_LOGIN }}
       BF_USERNAME: ${{ secrets.BF_USERNAME }}
       BF_USER: ${{ secrets.BF_USER }}
+      BETFAIR_UN: ${{ secrets.BETFAIR_UN }}
+      BETFAIR_USR: ${{ secrets.BETFAIR_USR }}
+      BETFAIR_USER_NAME: ${{ secrets.BETFAIR_USER_NAME }}
+      BETFAIR_USERID: ${{ secrets.BETFAIR_USERID }}
+      BETFAIR_ACCOUNT: ${{ secrets.BETFAIR_ACCOUNT }}
+      USERNAME: ${{ secrets.USERNAME }}
+      EMAIL: ${{ secrets.EMAIL }}
       BETFAIR_PASSWORD: ${{ secrets.BETFAIR_PASSWORD }}
       BETFAIR_PASS: ${{ secrets.BETFAIR_PASS }}
       BETFAIR_PW: ${{ secrets.BETFAIR_PW }}
       BF_PASSWORD: ${{ secrets.BF_PASSWORD }}
       BF_PASS: ${{ secrets.BF_PASS }}
+      BETFAIR_PWD: ${{ secrets.BETFAIR_PWD }}
+      BETFAIR_PASSWD: ${{ secrets.BETFAIR_PASSWD }}
+      BETFAIR_LOGIN_PASSWORD: ${{ secrets.BETFAIR_LOGIN_PASSWORD }}
+      BETFAIR_SECRET: ${{ secrets.BETFAIR_SECRET }}
+      PASSWORD: ${{ secrets.PASSWORD }}
       BETFAIR_CERT: ${{ secrets.BETFAIR_CERT }}
       BETFAIR_CERT_PEM: ${{ secrets.BETFAIR_CERT_PEM }}
       BETFAIR_CERT_KEY: ${{ secrets.BETFAIR_CERT_KEY }}
@@ -73,9 +89,14 @@ jobs:
           python3 - <<'PYEOF'
           import json, os, sys, urllib.error, urllib.parse, urllib.request
 
-          APP_KEY_NAMES  = ["BETFAIR_APP_KEY", "BETFAIR_APPKEY", "BETFAIR_API_KEY", "BETFAIR_KEY", "BF_APP_KEY"]
-          USERNAME_NAMES = ["BETFAIR_USERNAME", "BETFAIR_USER", "BETFAIR_EMAIL", "BETFAIR_LOGIN", "BF_USERNAME", "BF_USER"]
-          PASSWORD_NAMES = ["BETFAIR_PASSWORD", "BETFAIR_PASS", "BETFAIR_PW", "BF_PASSWORD", "BF_PASS"]
+          APP_KEY_NAMES  = ["BETFAIR_APP_KEY", "BETFAIR_APP_KEY_LIVE", "BETFAIR_LIVE_APP_KEY", "BETFAIR_APPKEY",
+                            "BETFAIR_API_KEY", "BETFAIR_KEY", "BF_APP_KEY",
+                            "BETFAIR_APP_KEY_DELAYED", "BETFAIR_DELAYED_APP_KEY"]
+          USERNAME_NAMES = ["BETFAIR_USERNAME", "BETFAIR_USER", "BETFAIR_EMAIL", "BETFAIR_LOGIN", "BF_USERNAME",
+                            "BF_USER", "BETFAIR_UN", "BETFAIR_USR", "BETFAIR_USER_NAME", "BETFAIR_USERID",
+                            "BETFAIR_ACCOUNT", "USERNAME", "EMAIL"]
+          PASSWORD_NAMES = ["BETFAIR_PASSWORD", "BETFAIR_PASS", "BETFAIR_PW", "BF_PASSWORD", "BF_PASS",
+                            "BETFAIR_PWD", "BETFAIR_PASSWD", "BETFAIR_LOGIN_PASSWORD", "BETFAIR_SECRET", "PASSWORD"]
           CERT_NAMES     = ["BETFAIR_CERT", "BETFAIR_CERT_PEM", "BETFAIR_CERT_KEY"]
 
           EXPLAIN = {
