@@ -15,13 +15,12 @@
 
 name: betfair-keys-smoke-test
 
-# The push trigger is scoped to the smoke-test branch because GitHub won't
-# dispatch a workflow that only exists on a non-default branch — pushing to
-# the branch IS the run button. (Dispatch by numeric workflow ID works too
-# now that the workflow is registered: 324383984.)
+# Manual runs only (Actions tab -> betfair-keys-smoke-test -> Run workflow).
+# NOTE: from GitHub-hosted runners this always ends at "untestable" — Betfair's
+# edge blocks their US datacenter IPs (see scripts/BETFAIR_KEYS_STATUS.md).
+# It becomes genuinely useful on a self-hosted runner in an allowed country;
+# until then, run scripts/betfair_keys_smoke.py directly on such a machine.
 on:
-  push:
-    branches: ["claude/betfair-keys-smoke-test-4yqny1"]
   workflow_dispatch:
     inputs:
       hosts:
