@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Automated Race Results Collector — monitors race_schedule, fetches results from The Racing API, and updates prediction_audit. Derived analytics/training tables are projected from prediction_audit."""
+"""Automated Race Results Collector — monitors race_schedule, fetches results from Punting Form (The Racing API is dead), and updates prediction_audit. Derived analytics/training tables are projected from prediction_audit."""
 
 import os
 import re
 import sys
 import time
 import argparse
-import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from results_projection import project_resulted_prediction_audit
 
-RACING_API_BASE_URL = "https://api.theracingapi.com"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pf_client
+from pf_results_mapper import aus_race_meetings
 
 
 def normalize_name(value):
@@ -72,14 +73,6 @@ def normalize_finish_position(raw_position, field_size: Optional[int] = None) ->
     return position
 
 
-def get_api_credentials() -> Tuple[str, str]:
-    username = os.environ.get('RACING_API_USERNAME')
-    password = os.environ.get('RACING_API_PASSWORD')
-    if not username or not password:
-        raise ValueError("RACING_API_USERNAME and RACING_API_PASSWORD environment variables required")
-    return username, password
-
-
 def get_db_connection():
     database_url = os.environ.get('DATABASE_URL')
     if not database_url:
@@ -113,69 +106,59 @@ def get_pending_races(conn, target_date: Optional[str] = None) -> List[Dict]:
 
 
 def fetch_results_for_date(race_date: str) -> List[Dict]:
-    username, password = get_api_credentials()
-    all_results = []
-
+    """Fetch resulted races for a date from Punting Form (The Racing API
+    ceased AU coverage; its credentials return 401). Returns the same
+    internal shape as before: {course, track, race_number, race_name,
+    distance, runners:[{horse_name, horse, position, sp}]}. Error contract
+    unchanged: failures return [] so the caller increments retry_count and
+    comes back later instead of settling on partial data."""
     try:
-        meets_url = f"{RACING_API_BASE_URL}/v1/australia/meets"
-        params = {'date': race_date}
-        api_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        response = requests.get(meets_url, auth=(username, password), params=params, headers=api_headers, timeout=30)
-
-        if response.status_code != 200:
-            print(f"[AutoResults] Meets API returned {response.status_code}: {response.text[:200]}", file=sys.stderr)
-            return []
-
-        data = response.json()
-        meets = data.get('meets', data) if isinstance(data, dict) else data
-        if not isinstance(meets, list):
-            meets = []
-
-        print(f"[AutoResults] Found {len(meets)} meets for {race_date}", file=sys.stderr)
-
-        for meet in meets:
-            meet_id = meet.get('meet_id') or meet.get('id')
-            track_name = meet.get('track') or meet.get('course') or meet.get('name', 'Unknown')
-            if not meet_id:
-                continue
-
-            try:
-                races_url = f"{RACING_API_BASE_URL}/v1/australia/meets/{meet_id}/races"
-                races_response = requests.get(races_url, auth=(username, password), headers=api_headers, timeout=30)
-
-                if races_response.status_code != 200:
-                    continue
-
-                races_data = races_response.json()
-                races = races_data.get('races', races_data) if isinstance(races_data, dict) else races_data
-                if not isinstance(races, list):
-                    races = []
-
-                for race in races:
-                    status = race.get('race_status', '').lower()
-                    if status in ['results', 'completed', 'final', 'official']:
-                        runners = race.get('runners', [])
-                        has_results = any(r.get('position') or r.get('finishing_position') for r in runners)
-                        if has_results:
-                            all_results.append({
-                                'course': track_name,
-                                'track': track_name,
-                                'race_number': race.get('race_number') or race.get('number'),
-                                'race_name': race.get('race_name') or race.get('name', ''),
-                                'distance': race.get('distance', ''),
-                                'runners': runners
-                            })
-
-            except Exception as e:
-                print(f"[AutoResults] Error fetching races for {track_name}: {e}", file=sys.stderr)
-                continue
-
-        print(f"[AutoResults] Found {len(all_results)} completed races with results", file=sys.stderr)
-        return all_results
-
-    except Exception as e:
-        print(f"[AutoResults] Error fetching results: {e}", file=sys.stderr)
+        meetings = aus_race_meetings(pf_client.meetings_for_date(race_date))
+    except pf_client.PFError as e:
+        print(f"[AutoResults] PF meetings fetch failed for {race_date}: {e}", file=sys.stderr)
         return []
+
+    print(f"[AutoResults] Found {len(meetings)} meets for {race_date}", file=sys.stderr)
+
+    all_results = []
+    for meet in meetings:
+        meet_id = meet.get('meetingId')
+        track_name = (meet.get('track') or {}).get('name') or 'Unknown'
+        if not meet_id:
+            continue
+
+        try:
+            blocks = pf_client.results_for_meeting(meet_id)
+        except pf_client.PFError as e:
+            print(f"[AutoResults] Error fetching races for {track_name}: {e}", file=sys.stderr)
+            continue
+
+        for block in blocks or []:
+            block_track = block.get('track') or track_name
+            for rr in block.get('raceResults') or []:
+                runners = rr.get('runners') or []
+                has_results = any(
+                    normalize_finish_position(r.get('position')) is not None
+                    for r in runners)
+                if not has_results:
+                    continue
+                all_results.append({
+                    'course': block_track,
+                    'track': block_track,
+                    'race_number': rr.get('raceNumber'),
+                    'race_name': rr.get('raceName') or '',
+                    'distance': rr.get('distance') or '',
+                    'runners': [
+                        {'horse_name': r.get('runner'),
+                         'horse': r.get('runner'),
+                         'position': r.get('position'),
+                         'sp': r.get('price')}
+                        for r in runners
+                    ]
+                })
+
+    print(f"[AutoResults] Found {len(all_results)} completed races with results", file=sys.stderr)
+    return all_results
 
 
 def find_race_in_results(track: str, race_number: int, results: List[Dict]) -> Optional[Dict]:
