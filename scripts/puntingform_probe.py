@@ -29,6 +29,19 @@ DOCS_CANDIDATES = [
     "https://docs.puntingform.com.au/openapi.json",
 ]
 
+# Phase B recon: the per-endpoint reference pages (served as markdown) — these
+# carry the exact paths, parameters and response schemas the client needs.
+REFERENCE_PAGES = [
+    "https://docs.puntingform.com.au/reference/meetingslist.md",
+    "https://docs.puntingform.com.au/reference/form-1.md",
+    "https://docs.puntingform.com.au/reference/results-1.md",
+    "https://docs.puntingform.com.au/reference/scratchings.md",
+    "https://docs.puntingform.com.au/reference/conditions.md",
+    "https://docs.puntingform.com.au/reference/speedmaps.md",
+    "https://docs.puntingform.com.au/reference/meetingratings.md",
+    "https://docs.puntingform.com.au/reference/strikerate-1.md",
+]
+
 # Candidate API shapes seen across Punting Form's documented services; the
 # probe reports which respond. {d} = date d-M-yyyy, {iso} = yyyy-MM-dd.
 ENDPOINT_CANDIDATES = [
@@ -82,6 +95,23 @@ def main():
             print("-" * 72)
             break
 
+    banner("1b. Per-endpoint reference pages (paths, params, response schemas)")
+    import re
+    documented_urls = set()
+    for url in REFERENCE_PAGES:
+        st, ctype, body = fetch(url)
+        print(f"\n----- {url} -> {st} -----")
+        if st == 200:
+            text = body.decode("utf-8", "replace")
+            print(text[:2600])
+            if len(text) > 2600:
+                print(f"... [{len(text) - 2600} more chars truncated]")
+            documented_urls.update(re.findall(r"https?://[a-z0-9.]*puntingform\.com\.au[^\s)\"'`\\]+", text))
+    if documented_urls:
+        print("\n  documented API URLs found in the reference pages:")
+        for u in sorted(documented_urls):
+            print(f"    {redact(u)}")
+
     # AEST date (UTC+10) — race days roll over on Australian time.
     now_aest = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=10)
     d = f"{now_aest.day}-{now_aest.month}-{now_aest.year}"
@@ -100,8 +130,44 @@ def main():
             if st == 200:
                 break
 
+    banner("3. Sample payloads from a RESULTED meeting (yesterday AEST)")
+    y_aest = now_aest - datetime.timedelta(days=1)
+    y_iso = y_aest.strftime("%Y-%m-%d")
+    st, ctype, body = fetch(f"https://api.puntingform.com.au/v2/form/meetingslist?meetingDate={y_iso}&apiKey={API_KEY}")
+    meeting_id = None
+    if st == 200:
+        try:
+            payload = json.loads(body).get("payLoad") or []
+            aus = [m for m in payload if (m.get("track") or {}).get("country") == "AUS"]
+            pick = (aus or payload)[0] if (aus or payload) else None
+            if pick:
+                meeting_id = pick.get("meetingId")
+                print(f"  yesterday ({y_iso}): {len(payload)} meetings; sampling "
+                      f"{(pick.get('track') or {}).get('name')} meetingId={meeting_id}")
+                print(f"  meeting object keys: {sorted(pick.keys())}")
+        except Exception as e:
+            print(f"  could not parse meetingslist: {e}")
+    if meeting_id is not None:
+        samples = [
+            ("results", f"https://api.puntingform.com.au/v2/form/results?meetingId={meeting_id}&apiKey={API_KEY}"),
+            ("form", f"https://api.puntingform.com.au/v2/form/form?meetingId={meeting_id}&apiKey={API_KEY}"),
+            ("meeting+races", f"https://api.puntingform.com.au/v2/form/meeting?meetingId={meeting_id}&apiKey={API_KEY}"),
+            ("fields", f"https://api.puntingform.com.au/v2/form/fields?meetingId={meeting_id}&apiKey={API_KEY}"),
+            ("scratchings", f"https://api.puntingform.com.au/v2/form/scratchings?apiKey={API_KEY}"),
+            ("conditions", f"https://api.puntingform.com.au/v2/form/conditions?apiKey={API_KEY}"),
+            ("speedmaps", f"https://api.puntingform.com.au/v2/form/speedmaps?meetingId={meeting_id}&apiKey={API_KEY}"),
+        ]
+        for label, u in samples:
+            st, ctype, body = fetch(u)
+            text = redact(body.decode("utf-8", "replace"))
+            print(f"\n  [{label}] {redact(u)}")
+            print(f"      -> {st} {ctype[:40]}")
+            print("      " + text[:1500].replace("\n", " "))
+            if len(text) > 1500:
+                print(f"      ... [{len(text) - 1500} more chars truncated]")
+
     print()
-    print("PROBE COMPLETE — the working shape above feeds pf_client.py (Phase B).")
+    print("PROBE COMPLETE — the working shapes above feed pf_client.py (Phase B).")
     return 0
 
 
