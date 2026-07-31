@@ -56,6 +56,24 @@ Australian IP while secrets stay in GitHub:
       `runs-on: [self-hosted]` (one-line change) and dispatch a run to confirm
       the GitHub button works end to end
 
+## 5b. Unblock the racing.com data migration (The Racing API is dead)
+
+The Racing API has ceased AU coverage — racecards, results, historical and
+odds-movement inflows are down. racing.com GraphQL is the free replacement
+(already used for sectionals). A read-only probe (`scripts/racing_com_probe.py`,
+`racing-com-probe` workflow) is ready but blocked:
+
+- [ ] Add `RACING_COM_API_KEY` as a GitHub repository Actions secret (it is
+      currently only in the Mac's local `.env`, not in GitHub). Then re-run the
+      `racing-com-probe` workflow — it maps which states/racecards/results the
+      key can serve, which is the input for swapping the six dead Racing API
+      modules (`download_racecards.py`, `fetch_and_import_date.py`,
+      `auto_results_collector.py`, `download_historical.py`,
+      `backfill_barrier_trials.py`, `odds_movement.py`).
+- [ ] Alternatively run the probe locally on the Mac:
+      `RACING_COM_API_KEY=... python3 scripts/racing_com_probe.py`
+- [ ] Decide Punting Form Starter ($59/mo) only after the probe shows the gap.
+
 ## 6. Housekeeping (any device, if not already done)
 
 GitHub secrets verified present on 2026-07-31: `BETFAIR_APP_KEY`,
