@@ -39,8 +39,13 @@ from typing import Any, Dict, List, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# roi_stats is the single source of truth for reportability math (roi-roadmap
+# task 02, step 5): the CI-spans-zero test, the 200-bet floor, and the
+# reportability verdict must never be restated here.
+import roi_stats
+
 # Same floor shadow_pl_tracker uses for tier reporting.
-MIN_BETS_REPORTABLE = 200
+MIN_BETS_REPORTABLE = roi_stats.MIN_BETS_REPORTABLE
 
 # Strike rate is strictly positive, so a relative tolerance is meaningful.
 # ROI is not — it is already a percentage and can be negative or near zero, so
@@ -64,15 +69,8 @@ def _get(metrics: Dict[str, Any], key: str) -> Optional[float]:
 
 
 def _ci_spans_zero(metrics: Dict[str, Any]) -> Optional[bool]:
-    """Read the bootstrap CI, accepting either shape the harness emits."""
-    ci = metrics.get("roi_ci95_bootstrap")
-    if isinstance(ci, dict):
-        if ci.get("spans_zero") is not None:
-            return bool(ci["spans_zero"])
-        ci = ci.get("ci_95")
-    if isinstance(ci, (list, tuple)) and len(ci) == 2 and None not in ci:
-        return bool(float(ci[0]) <= 0.0 <= float(ci[1]))
-    return None
+    """Delegate to roi_stats.ci_spans_zero (single source of truth)."""
+    return roi_stats.ci_spans_zero(metrics.get("roi_ci95_bootstrap"))
 
 
 def evaluate_ship_criteria(
@@ -179,6 +177,11 @@ def evaluate_ship_criteria(
     significance_failed = any(
         c["criterion"] == "roi_significance" and c["passed"] is False for c in checks)
 
+    # Deliberately NOT roi_stats.is_reportable here: that helper requires the
+    # CI lower bound > 0, but for a promotion gate a CI entirely BELOW zero
+    # is a significant LOSS (verdict HOLD), not an unmeasurable result. The
+    # floor and the spans-zero test stay separate criteria; all math is
+    # delegated to roi_stats primitives (single source of truth).
     if reportability_failed or significance_failed:
         verdict = NOT_REPORTABLE
     elif unknown:
@@ -270,6 +273,19 @@ def _self_test():
     r3 = evaluate_ship_criteria(base, thin, "ROI")
     assert r3["verdict"] == NOT_REPORTABLE and "reportability" in r3["failed"]
     print(f"  60 bets at +40% ROI -> {r3['verdict']} (floor is {MIN_BETS_REPORTABLE})")
+
+    # Consistency with roi_stats (single source of truth): the gate's
+    # NOT_REPORTABLE outcomes agree with is_reportable — EXCEPT a significant
+    # loss (CI entirely below zero), which is HOLD (an answer), never
+    # NOT_REPORTABLE. This pins the deliberate semantic difference.
+    assert roi_stats.is_reportable(good["roi_ci95_bootstrap"], good["n_bets"]) is True
+    assert roi_stats.is_reportable(noisy["roi_ci95_bootstrap"], noisy["n_bets"]) is False
+    assert roi_stats.is_reportable(good["roi_ci95_bootstrap"], 60) is False
+    loser = {**good, "roi_pct": -8.0,
+             "roi_ci95_bootstrap": {"ci_95": [-12.0, -4.0], "spans_zero": False}}
+    r_loss = evaluate_ship_criteria(base, loser, "ROI")
+    assert r_loss["verdict"] == HOLD and "lever_direction_roi" in r_loss["failed"], r_loss
+    print("  roi_stats consistency: is_reportable agrees; significant loss -> HOLD")
 
     # Right direction on the lever, but the other lever collapses.
     tradeoff = {**good, "strike_rate": 0.240}
