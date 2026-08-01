@@ -37,10 +37,7 @@ old tier → new tier).
    — the anchor leaves fields off-unity, so correcting the sums moves borderline
    runners. The review is for pathology: mass demotions out of a tier, one
    direction dominating, or transitions clustering in one track/class. The
-   quantitative bound: [SAGE-APPROVAL: maximum acceptable confidence-tier
-   transition rate over the shadow window; recommended ≤ 5% of shadow runners
-   transitioning in aggregate, with any single race above 25% requiring explicit
-   sign-off].
+   quantitative bound: **<= 5% of shadow runners transitioning in aggregate, with any single race above 25% requiring explicit sign-off** (resolved by Sage 2026-08-01).
 
 **Who flips:** Sage. **Where:** `STRIDE_RENORMALISE_FIELD=true` in the deployment
 env (`.env`). **Rollback:** flag off — the legacy path is byte-identical when the
@@ -105,8 +102,7 @@ probabilities, and appends per-runner deltas to
 3. **The delta distribution is stable day-over-day** — per-day summary of
    `delta_pp` (mean, spread, max |delta|) shows no trend, no regime shift, and
    no single race whose deltas are an order of magnitude off the window's.
-4. **Top-3 flip rate ≤ [SAGE-APPROVAL: maximum acceptable share of shadow races
-   whose would-be top-3 differs from the legacy top-3; recommended 15%].**
+4. **Top-3 flip rate ≤ **15%** (resolved by Sage 2026-08-01).**
 
 **Deltas are EXPECTED to be large.** This flag wakes up 25.45% of the model's
 importance mass; small deltas would mean the plumbing is inert and the shadow is

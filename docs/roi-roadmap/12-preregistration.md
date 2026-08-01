@@ -90,10 +90,7 @@ artifact may replace the production artifact only if **all** of:
   `roi_positive` check): a CI entirely below zero is a measured, significant
   loss — `HOLD`, never a promotion, even when the candidate improves on a worse
   baseline.
-- **(c) Minimum sample:** [SAGE-APPROVAL: minimum settled-bet count on the
-  LIVE-GATE band before the new-beats-old comparison is even attempted;
-  recommended 200 = `MIN_BETS_REPORTABLE` (`server/python/roi_stats.py:33`,
-  `server/python/ship_criteria.py:43`)]. Below the floor the comparison is not
+- **(c) Minimum sample:** **200** (= `MIN_BETS_REPORTABLE`, `server/python/roi_stats.py:33` — resolved by Sage 2026-08-01). Below the floor the comparison is not
   run and the verdict is `INSUFFICIENT_SAMPLE` — not a pass, not a fail.
 
 ## EARLY CANARY (leading indicator)
@@ -102,14 +99,9 @@ CLV reaches significance in ~400 bets vs ~3,000–5,000 for ROI
 ([01](01-ledger-clv-net-settlement.md)) — it is the window's early-warning gauge,
 not a promotion criterion.
 
-- **Confirmation:** mean CLV > 0 sustained over [SAGE-APPROVAL: N consecutive
-  race days with settled ledger rows; recommended 10] is the leading indicator
+- **Confirmation:** mean CLV > 0 sustained over **10 consecutive race days with settled ledger rows** (resolved by Sage 2026-08-01) is the leading indicator
   that the shipped stack prices ahead of the market.
-- **Pause:** CLV persistently < 0 pauses staking. [SAGE-APPROVAL: the pause rule
-  — how many consecutive CLV-negative race days (and at what minimum settled-bet
-  count) pause real staking on the LIVE-GATE band, and what restarts it;
-  recommended: pause after 5 consecutive race days with mean CLV < 0 and ≥ 20
-  settled bets across them; resume after 2 consecutive CLV-positive days]. The
+- **Pause:** CLV persistently < 0 pauses staking. **pause after 5 consecutive race days with mean CLV < 0 and >= 20 settled bets across them; resume after 2 consecutive CLV-positive days** (resolved by Sage 2026-08-01). The
   pause stops stakes only — tips, ledger rows, and snapshots keep accruing, or
   the window is destroyed.
 
