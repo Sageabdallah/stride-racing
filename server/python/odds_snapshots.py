@@ -165,6 +165,11 @@ def parse_timestamp(value: Any) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _utcnow() -> datetime:
+    # Module-level so tests can pin the clock without patching datetime.
+    return datetime.now(timezone.utc)
+
+
 def compute_seconds_to_jump(jump_time: Any, captured_at: Any) -> Optional[int]:
     """Actual seconds between capture and scheduled jump. Negative = pre-jump
     (a T-5 capture records ~-300; a T-15 fallback honestly records ~-900)."""
@@ -356,10 +361,22 @@ def capture_tip_time_snapshots(*, track: Any, race_number: Any, date_str: Any,
     """Tip-time capture hook for run_tips_pipeline: one tip_time row per
     runner per bookmaker at the moment the pipeline prices the field."""
     race = race or {}
+    jump_time = race.get("off_time") or race.get("offTime")
+    jump = parse_timestamp(jump_time)
+    now = _utcnow()
+    if jump is not None and now > jump:
+        # The snapshot table is append-only and this hook fires on every
+        # run_tips invocation — a rerun of a past date would record post-jump
+        # prices as "tip_time" and the training view would median them in.
+        # Refusing here is the only place that poison can be stopped.
+        print(f"  [ODDS_SNAP] SKIP tip_time {track} R{race_number}: "
+              f"capture {now.isoformat()} is after advertised jump "
+              f"{jump.isoformat()} — post-jump reruns never write tip_time")
+        return {"written": 0, "skipped": len(runners), "reason": "post_jump"}
     return capture_snapshots(
         snapshot_kind="tip_time",
         race_date=date_str, track=track, race_number=race_number,
         runners=runners,
         meet_id=race.get("meet_id"),
-        jump_time=race.get("off_time") or race.get("offTime"),
+        jump_time=jump_time,
     )

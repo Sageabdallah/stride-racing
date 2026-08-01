@@ -24,6 +24,8 @@ import capture_late_odds as late
 
 UTC = timezone.utc
 JUMP = "2026-03-28T04:15:00.000Z"
+BEFORE_JUMP = datetime(2026, 3, 28, 4, 0, tzinfo=UTC)
+AFTER_JUMP = datetime(2026, 3, 28, 5, 0, tzinfo=UTC)
 
 RUNNERS = [
     {"horse": "Pop Award", "horse_id": "hrs_aus_1", "scratched": False,
@@ -291,6 +293,7 @@ class TestPersistRows:
         monkeypatch.setenv("STRIDE_ODDS_SNAPSHOT_WRITE", "true")
         monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.setattr(osn, "_database_url", lambda: "")
+        monkeypatch.setattr(osn, "_utcnow", lambda: BEFORE_JUMP)
         result = osn.capture_tip_time_snapshots(
             track="Flemington", race_number=5, date_str="2026-03-28",
             runners=RUNNERS, race={"off_time": JUMP})
@@ -303,6 +306,50 @@ class TestPersistRows:
             track="Flemington", race_number=5, date_str="not-a-date",
             runners=[{"broken": object()}], race=None)
         assert result["written"] == 0  # graceful, not an exception
+
+
+# ---------------------------------------------------------------------------
+# Pre-jump guard: reruns of a past date must never write tip_time rows
+# ---------------------------------------------------------------------------
+
+class TestPreJumpGuard:
+    def test_post_jump_rerun_refused_without_touching_capture(self, monkeypatch):
+        monkeypatch.setattr(osn, "_utcnow", lambda: AFTER_JUMP)
+
+        def _boom(**_kwargs):
+            raise AssertionError("capture_snapshots must not run post-jump")
+        monkeypatch.setattr(osn, "capture_snapshots", _boom)
+        result = osn.capture_tip_time_snapshots(
+            track="Flemington", race_number=5, date_str="2026-03-28",
+            runners=RUNNERS, race={"off_time": JUMP})
+        assert result == {"written": 0, "skipped": len(RUNNERS),
+                          "reason": "post_jump"}
+
+    def test_pre_jump_capture_delegates(self, monkeypatch):
+        monkeypatch.setattr(osn, "_utcnow", lambda: BEFORE_JUMP)
+        seen = {}
+
+        def _record(**kwargs):
+            seen.update(kwargs)
+            return {"written": 3, "skipped": 0}
+        monkeypatch.setattr(osn, "capture_snapshots", _record)
+        result = osn.capture_tip_time_snapshots(
+            track="Flemington", race_number=5, date_str="2026-03-28",
+            runners=RUNNERS, race={"off_time": JUMP, "meet_id": "m1"})
+        assert result["written"] == 3
+        assert seen["snapshot_kind"] == "tip_time"
+        assert seen["jump_time"] == JUMP
+
+    def test_missing_jump_time_still_captures(self, monkeypatch):
+        # No advertised jump → capture proceeds; the training view closes
+        # this hole by excluding NULL seconds_to_jump rows.
+        monkeypatch.setattr(osn, "_utcnow", lambda: AFTER_JUMP)
+        monkeypatch.setattr(
+            osn, "capture_snapshots", lambda **kw: {"written": 1, "skipped": 0})
+        result = osn.capture_tip_time_snapshots(
+            track="Flemington", race_number=5, date_str="2026-03-28",
+            runners=RUNNERS, race={})
+        assert result["written"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +429,14 @@ class TestWiring:
         idx = src.index("capture_tip_time_snapshots")
         assert "try:" in src[:idx][-500:]
         assert "except Exception" in src[idx:idx + 400]
+
+    def test_training_view_medians_only_prejump_rows(self):
+        src = (SERVER_PYTHON / "refresh_training_view_v2.py").read_text()
+        cte = src[src.index("odds_snap AS ("):]
+        cte = cte[:cte.index("GROUP BY")]
+        assert "s.snapshot_kind = 'tip_time'" in cte
+        assert "s.seconds_to_jump IS NOT NULL" in cte
+        assert "s.seconds_to_jump <= 0" in cte
 
     def test_training_view_columns_additive(self):
         src = (SERVER_PYTHON / "refresh_training_view_v2.py").read_text()
