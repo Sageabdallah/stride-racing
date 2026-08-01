@@ -1070,6 +1070,80 @@ def compute_staking(h):
     return "0u"
 
 
+def fetch_prior_sectionals(horse_names, race_date):
+    """Batch-fetch the latest PRIOR-start sectional features for a field
+    (serve-time liveness plumbing, STRIDE_SERVE_LIVE_FEATURES).
+
+    One query per race. Pre-race only: st.race_date < race_date (the same
+    as-of rule as the training view's LATERAL in refresh_training_view_v2).
+    Returns {lower(horse_name): {z_200m: ..., z_400m: ..., z_600m: ...,
+    z_800m: ..., lambda_decay: ..., svi: ..., rsi: ...,
+    trip_cost_seconds: ...}} with FEATURE_COLUMNS names (the view's prior_*
+    prefix maps away per retrain_v2.VIEW_TO_FEATURE_MAP). Horses with no
+    prior sectional row are simply absent — the builder serves NaN (never 0)
+    for them.
+    """
+    from serve_features import SECTIONAL_LIVE_FEATURES
+    out = {}
+    names = sorted({(n or "").strip().lower() for n in horse_names if (n or "").strip()})
+    if not names:
+        return out
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (LOWER(horse_name))
+                LOWER(horse_name), z_200m, z_400m, z_600m, z_800m,
+                lambda_decay, svi, rsi, trip_cost_seconds
+            FROM sectional_times
+            WHERE LOWER(horse_name) = ANY(%s)
+              AND race_date < %s
+              AND (lambda_decay IS NOT NULL OR z_200m IS NOT NULL)
+            ORDER BY LOWER(horse_name), race_date DESC
+        """, (names, race_date))
+        for row in cur.fetchall():
+            out[row[0]] = {k: v for k, v in zip(SECTIONAL_LIVE_FEATURES, row[1:])}
+    finally:
+        conn.close()
+    return out
+
+
+def _write_serve_liveness_shadow(race_date, track, race_num, entries):
+    """Append one race's shadow-liveness comparison to
+    logs/serve_liveness_shadow_<date>.json (STRIDE_SERVE_LIVE_FEATURES_SHADOW).
+
+    Each entry: horse, legacy_prob_pct (published), live_prob_pct (would-be),
+    delta_pp, plus field ranks under each variant. tier_change = the would-be
+    top-3 in/out flip (the tiers the ML prob feeds). Never raises.
+    """
+    try:
+        legacy_rank = {e["horse"]: i + 1 for i, e in enumerate(
+            sorted(entries, key=lambda x: -x["legacy_prob_pct"]))}
+        live_rank = {e["horse"]: i + 1 for i, e in enumerate(
+            sorted(entries, key=lambda x: -x["live_prob_pct"]))}
+        for e in entries:
+            e["delta_pp"] = round(e["live_prob_pct"] - e["legacy_prob_pct"], 2)
+            e["legacy_rank"] = legacy_rank[e["horse"]]
+            e["live_rank"] = live_rank[e["horse"]]
+            e["tier_change"] = (legacy_rank[e["horse"]] <= 3) != (live_rank[e["horse"]] <= 3)
+        log_dir = PROJECT_ROOT / "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        path = log_dir / f"serve_liveness_shadow_{race_date}.json"
+        blocks = []
+        if path.exists():
+            try:
+                with open(path) as f:
+                    blocks = json.load(f)
+            except Exception:
+                blocks = []
+        blocks.append({"track": track, "race_number": race_num,
+                       "runners": entries})
+        with open(path, "w") as f:
+            json.dump(blocks, f, indent=2, default=str)
+    except Exception as e:
+        print(f"    [FEATURES] shadow log write failed (non-fatal): {e}", file=sys.stderr)
+
+
 def enrich_with_db(horses, track, race_date, all_field_names=None):
     """Look up franking, prior sectionals, strike rates, and H2H for top horses."""
     try:
@@ -2414,7 +2488,32 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     # contract (nan_contract.py) and interaction parity
                     # (STRIDE_INTERACTION_PARITY, default off) are applied there.
                     from serve_features import build_feature_row, log_movement_inert_once
+                    from serve_features import (compute_race_pace,
+                                                serve_live_features_enabled,
+                                                serve_live_features_shadow_enabled)
                     log_movement_inert_once(date_str)
+                    # Serve-feature liveness (FEATURE_PROVENANCE.md finding 1):
+                    # 15 trained features carrying 25.45% of importance mass
+                    # are plumbed only under STRIDE_SERVE_LIVE_FEATURES
+                    # (default OFF). Shadow mode scores both ways, publishes
+                    # LEGACY, logs deltas. Any error degrades to legacy.
+                    _live_on = serve_live_features_enabled()
+                    _shadow_on = serve_live_features_shadow_enabled() and not _live_on
+                    _live_pace = None
+                    _live_sect = {}
+                    if _live_on or _shadow_on:
+                        try:
+                            _live_pace = compute_race_pace(runners)
+                        except Exception as _pace_err:
+                            print(f"    [FEATURES] pace liveness failed (legacy kept): {_pace_err}", file=sys.stderr)
+                            _live_pace = None
+                        try:
+                            _live_sect = fetch_prior_sectionals(
+                                [r.get("horse", "") for r in runners], date_str)
+                        except Exception as _sect_err:
+                            print(f"    [FEATURES] sectional liveness fetch failed (legacy kept): {_sect_err}", file=sys.stderr)
+                            _live_sect = {}
+                    _shadow_entries = []
                     # Phase 5: within-race relative market position (favourite ladder)
                     try:
                         from relative_market import compute_field_relative_market
@@ -2422,17 +2521,46 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     except Exception:
                         _rel_mkt = [{"fair_implied_prob": 0.0, "odds_rank": 0.0, "odds_rank_pct": 0.0}] * len(runners)
                     for _ri, runner in enumerate(runners):
+                        _sect_row = _live_sect.get((runner.get("horse") or "").strip().lower())
                         feat = build_feature_row(
                             runner,
                             market_odds=extract_odds(runner),
                             distance_m=distance_m,
                             field_size=field_size,
                             rel_market=_rel_mkt[_ri],
+                            pace=(_live_pace[_ri] if _live_pace else None),
+                            sectionals=_sect_row,
                         )
                         df = _pd.DataFrame([feat])
                         X = _ml.prepare_features(df)
                         ml_prob = float(_ml.predict_proba(X, distance_m=distance_m)[0])
                         runner["mlPredictedProb"] = round(ml_prob * 100, 2)
+                        if _shadow_on:
+                            # Shadow: score the PLUMBED dict too, publish the
+                            # legacy one above, log the delta.
+                            try:
+                                feat_live = build_feature_row(
+                                    runner,
+                                    market_odds=extract_odds(runner),
+                                    distance_m=distance_m,
+                                    field_size=field_size,
+                                    rel_market=_rel_mkt[_ri],
+                                    pace=(_live_pace[_ri] if _live_pace else None),
+                                    sectionals=_sect_row,
+                                    force_live=True,
+                                )
+                                X_live = _ml.prepare_features(_pd.DataFrame([feat_live]))
+                                ml_prob_live = float(_ml.predict_proba(X_live, distance_m=distance_m)[0])
+                                _shadow_entries.append({
+                                    "horse": runner.get("horse", ""),
+                                    "legacy_prob_pct": round(ml_prob * 100, 2),
+                                    "live_prob_pct": round(ml_prob_live * 100, 2),
+                                })
+                            except Exception as _sh_err:
+                                print(f"    [FEATURES] shadow score failed for {runner.get('horse','?')} (non-fatal): {_sh_err}", file=sys.stderr)
+                    if _shadow_on and _shadow_entries:
+                        _write_serve_liveness_shadow(date_str, track, race_num, _shadow_entries)
+                        print(f"    [FEATURES] shadow liveness logged {len(_shadow_entries)} runners (legacy published)", file=sys.stderr)
                     n_ml = sum(1 for r in runners if r.get("mlPredictedProb", 0) > 0)
                     avg_ml = sum(r.get("mlPredictedProb", 0) for r in runners) / max(len(runners), 1)
                     print(f"    [ML] {n_ml}/{len(runners)} runners scored (avg {avg_ml:.1f}%)", file=sys.stderr)

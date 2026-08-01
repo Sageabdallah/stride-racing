@@ -26,12 +26,32 @@ flags so flag-off reproduces the old served values exactly:
                               training (retrain_v2 zero-fills them and never
                               computes them). Real values are sourced
                               post-tip-time — see task 14.
+  STRIDE_SERVE_LIVE_FEATURES  plumb the 15 trained-but-never-served features
+                              (docs/research/FEATURE_PROVENANCE.md — 25.45% of
+                              the artifact's importance mass) into the feat
+                              dict: the group-A one-liners (field_size_context,
+                              barrier_relevance_score, market_efficiency_flag),
+                              the pace trio (pace_pressure_score,
+                              leader_advantage, closer_advantage) computed from
+                              the racecard field, and the sectional set
+                              (z_200m/400m/600m/800m, lambda_decay, svi, rsi,
+                              trip_cost_seconds) from prior starts. Default
+                              OFF — flag off = byte-identical feat dict.
+                              Deploy together with STRIDE_SERVE_NAN_CONTRACT=1
+                              so unknown sectionals reach the trees as NaN
+                              (the trained missingness signal), not 0.
+  STRIDE_SERVE_LIVE_FEATURES_SHADOW
+                              default OFF. When on (and the main flag off),
+                              run_tips_pipeline scores each race BOTH ways,
+                              publishes the LEGACY probabilities, and appends
+                              per-runner deltas to
+                              logs/serve_liveness_shadow_<date>.json.
 """
 
 import math
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from nan_contract import NAN_PRESERVE_SET
 
@@ -82,6 +102,200 @@ def movement_features_live() -> bool:
     return _stride_flag("STRIDE_MOVEMENT_FEATURES_LIVE")
 
 
+def serve_live_features_enabled() -> bool:
+    return _stride_flag("STRIDE_SERVE_LIVE_FEATURES")
+
+
+def serve_live_features_shadow_enabled() -> bool:
+    return _stride_flag("STRIDE_SERVE_LIVE_FEATURES_SHADOW")
+
+
+# --- Trained-but-never-served features (FEATURE_PROVENANCE.md finding 1) -----
+#
+# The 15 ZERO_AT_SERVE features and their train derivations. Group A/B
+# formulas below are EXACT mirrors of retrain_v2.py (line refs on main);
+# retrain_v2 is never imported here (it needs psycopg2 + a DB) — equality is
+# pinned by tests in test_serve_feature_liveness.py.
+
+# Group C: prior-start sectional set. NAN_PRESERVE features — NaN means "no
+# sectional history" and must never become 0 (0 is a real, exactly-average
+# z-score). Names as in FEATURE_COLUMNS (the view's prior_* prefix is mapped
+# away by retrain_v2.VIEW_TO_FEATURE_MAP).
+SECTIONAL_LIVE_FEATURES = (
+    "z_200m",
+    "z_400m",
+    "z_600m",
+    "z_800m",
+    "lambda_decay",
+    "svi",
+    "rsi",
+    "trip_cost_seconds",
+)
+
+LIVE_FEATURES = SECTIONAL_LIVE_FEATURES + (
+    "pace_pressure_score",
+    "leader_advantage",
+    "closer_advantage",
+    "field_size_context",
+    "barrier_relevance_score",
+    "market_efficiency_flag",
+)
+
+
+def field_size_context_value(field_size: Any) -> float:
+    """Mirror retrain_v2.py:646 — (field_size or 10)/16, clipped at 1.0."""
+    try:
+        fs = float(field_size) if field_size else 10.0
+    except (TypeError, ValueError):
+        fs = 10.0
+    if fs != fs:  # NaN
+        fs = 10.0
+    return min(fs / 16.0, 1.0)
+
+
+def barrier_relevance_value(distance_m: Any) -> float:
+    """Mirror retrain_v2.py:641-643 — distance bucketing (NaN/None -> 1400)."""
+    try:
+        d = float(distance_m)
+    except (TypeError, ValueError):
+        d = 1400.0
+    if d != d:  # NaN
+        d = 1400.0
+    return 1.0 if d <= 1200 else 0.7 if d <= 1600 else 0.4 if d <= 2000 else 0.2
+
+
+def market_efficiency_value(class_level: Any) -> float:
+    """Mirror retrain_v2.py:648-652 — class_level bucketing. Misleading name:
+    nothing market-derived. Missing class_level -> 50 (at serve 0 is the
+    missing sentinel — the legacy assembly uses `or 0`)."""
+    try:
+        c = float(class_level) if class_level else 50.0
+    except (TypeError, ValueError):
+        c = 50.0
+    if c != c:  # NaN
+        c = 50.0
+    return (1.0 if c >= 80 else 0.7 if c >= 60 else 0.5 if c >= 50
+            else 0.2 if c <= 30 else 0.4)
+
+
+# Running-style scale, mirrored from retrain_v2.py:379-384 (do NOT import
+# retrain_v2 — parity is pinned by test).
+_STYLE_LEADER = 4
+_STYLE_ON_PACE = 3
+_STYLE_MIDFIELD = 2
+_STYLE_OFF_PACE = 1
+_STYLE_BACKMARKER = 0
+_EXCLUDED_CHARS = set("xfdwXFDW")
+
+
+def _classify_running_style_from_form(form_string, barrier=None, field_size=None):
+    """Verbatim mirror of retrain_v2.py:387-441 — classify a runner's running
+    style from its pre-race form string (last ~5 starts), with a barrier-based
+    fallback when no form exists."""
+    if not form_string or not isinstance(form_string, str):
+        if barrier is not None and field_size and field_size > 0:
+            try:
+                b = int(barrier)
+            except (ValueError, TypeError):
+                return _STYLE_MIDFIELD
+            if b <= field_size * 0.25:
+                return _STYLE_MIDFIELD
+            return _STYLE_OFF_PACE
+        return _STYLE_MIDFIELD
+
+    cleaned = form_string.replace("-", "").replace(" ", "")
+    positions = []
+    for ch in cleaned[-6:]:
+        if ch in _EXCLUDED_CHARS:
+            continue
+        if ch.isdigit():
+            pos = int(ch)
+            if pos == 0:
+                pos = 10
+            positions.append(pos)
+        if len(positions) >= 5:
+            break
+
+    if not positions:
+        if barrier is not None and field_size and field_size > 0:
+            try:
+                b = int(barrier)
+            except (ValueError, TypeError):
+                return _STYLE_MIDFIELD
+            if b <= field_size * 0.25:
+                return _STYLE_MIDFIELD
+            return _STYLE_OFF_PACE
+        return _STYLE_MIDFIELD
+
+    avg_pos = sum(positions) / len(positions)
+    wins_from_front = sum(1 for p in positions if p == 1)
+
+    if wins_from_front >= 2 or (len(positions) >= 3 and avg_pos <= 1.5):
+        return _STYLE_LEADER
+    elif avg_pos <= 2.5:
+        return _STYLE_ON_PACE
+    elif avg_pos <= 4.5:
+        return _STYLE_MIDFIELD
+    elif avg_pos <= 6:
+        return _STYLE_OFF_PACE
+    else:
+        return _STYLE_BACKMARKER
+
+
+def compute_race_pace(runners: Sequence[Dict[str, Any]]) -> List[Dict[str, float]]:
+    """Per-race pace trio for a serve-time field — the per-race half of
+    retrain_v2._compute_pace_features (:443-525), duplicated not imported.
+
+    `runners` is the racecard field; each entry needs only pre-race keys:
+    form_string (or form), barrier (or draw), field_size (defaults to the
+    field size). Returns one {pace_pressure_score, leader_advantage,
+    closer_advantage} dict per runner, aligned with the input order. Any
+    failure degrades to the training no-field default (0.5 / 0.0 / 0.0).
+    """
+    default = {"pace_pressure_score": 0.5,
+               "leader_advantage": 0.0, "closer_advantage": 0.0}
+    runners = list(runners or [])
+    if not runners:
+        return []
+    fs = len(runners) or 1
+    try:
+        styles = [
+            _classify_running_style_from_form(
+                r.get("form_string") or r.get("form"),
+                barrier=(r.get("barrier") if r.get("barrier") is not None
+                         else r.get("draw")),
+                field_size=r.get("field_size") or fs,
+            )
+            for r in runners
+        ]
+        speed_count = sum(1 for s in styles if s >= _STYLE_ON_PACE)
+        pps = speed_count / fs
+        if pps >= 0.4:
+            l_adv, c_adv = -0.10, 0.12
+        elif pps <= 0.15:
+            l_adv, c_adv = 0.15, -0.05
+        else:
+            l_adv, c_adv = 0.0, 0.0
+    except Exception:
+        return [dict(default) for _ in runners]
+
+    out = []
+    for style in styles:
+        d = {"pace_pressure_score": pps,
+             "leader_advantage": 0.0, "closer_advantage": 0.0}
+        if style >= _STYLE_ON_PACE:
+            d["leader_advantage"] = l_adv
+        elif style <= _STYLE_OFF_PACE:
+            d["closer_advantage"] = c_adv
+        else:
+            if pps >= 0.4:
+                d["closer_advantage"] = c_adv * 0.6
+            elif pps <= 0.15:
+                d["leader_advantage"] = l_adv * 0.4
+        out.append(d)
+    return out
+
+
 _movement_log_dates = set()
 
 
@@ -109,6 +323,9 @@ def build_feature_row(
     field_size: Any,
     rel_market: Optional[Dict[str, Any]] = None,
     movement: Optional[Dict[str, Any]] = None,
+    pace: Optional[Dict[str, Any]] = None,
+    sectionals: Optional[Dict[str, Any]] = None,
+    force_live: bool = False,
 ) -> Dict[str, Any]:
     """Assemble one serve-time feature row for the ML ensemble.
 
@@ -117,7 +334,12 @@ def build_feature_row(
     used). `rel_market` is the Phase-5 within-race dict from
     relative_market.compute_field_relative_market. `movement` optionally
     carries real movement values and is only honoured when
-    STRIDE_MOVEMENT_FEATURES_LIVE is on.
+    STRIDE_MOVEMENT_FEATURES_LIVE is on. `pace` (one compute_race_pace entry)
+    and `sectionals` (prior-start sectional dict) feed the 15 liveness
+    features and are honoured only when STRIDE_SERVE_LIVE_FEATURES is on —
+    or when `force_live` is set (the shadow path, which must build the
+    plumbed dict while the main flag stays off). Flag off = byte-identical
+    legacy dict; the extra kwargs are ignored.
     """
     feat: Dict[str, Any] = {}
     feat["market_odds"] = market_odds or 0
@@ -167,6 +389,35 @@ def build_feature_row(
               "field_size_context", "market_efficiency_flag",
               "pace_clarity_score"]:
         feat[k] = runner.get(k, 0.5)
+    # STRIDE_SERVE_LIVE_FEATURES (default OFF): plumb the 15 trained-but-
+    # never-served features (FEATURE_PROVENANCE.md — 25.45% of importance
+    # mass). Group A one-liners and the group-B pace trio mirror retrain_v2
+    # exactly; the group-C sectional set honours the NaN contract (unknown
+    # -> NaN, NEVER 0 — 0 is a real exactly-average z-score, NaN is the
+    # "no history" signal the trees learned). Flag off: feat dict is
+    # byte-identical to legacy.
+    if serve_live_features_enabled() or force_live:
+        feat["field_size_context"] = field_size_context_value(field_size)
+        feat["barrier_relevance_score"] = barrier_relevance_value(distance_m)
+        feat["market_efficiency_flag"] = market_efficiency_value(
+            runner.get("class_level"))
+        if pace:
+            feat["pace_pressure_score"] = pace.get("pace_pressure_score", 0.5)
+            feat["leader_advantage"] = pace.get("leader_advantage", 0.0)
+            feat["closer_advantage"] = pace.get("closer_advantage", 0.0)
+        else:
+            # Training's no-field-composition default (retrain_v2:454-462).
+            feat["pace_pressure_score"] = 0.5
+            feat["leader_advantage"] = 0.0
+            feat["closer_advantage"] = 0.0
+        # Only an explicitly-fetched sectional row overrides the runner-
+        # sourced NAN_PRESERVE values above (mc_api's extracted features pass
+        # through untouched when no fetch ran). A fetched row's NULLs are the
+        # truth: unknown -> NaN, never 0.
+        if sectionals is not None:
+            for k in SECTIONAL_LIVE_FEATURES:
+                v = sectionals.get(k)
+                feat[k] = v if v is not None else float("nan")
     feat["td_pace_bias"] = runner.get("td_pace_bias", 0.5)
     feat["td_upset_rate"] = runner.get("td_upset_rate", 0.2)
     feat["td_barrier_style_edge"] = runner.get("td_barrier_style_edge", 0)
