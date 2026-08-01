@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Shared Punting Form results mapper — the single implementation of the
+race_results_history contract for every PF-sourced writer.
+
+Extracted from pf_backfill_results.py (the audited Phase B reference) so the
+backfill, the daily importer (fetch_and_import_date.py) and the racecard
+serve path all share ONE mapping rather than drifting copies. What lives
+here:
+
+  * norm_name — the horse-name normaliser behind the ID bridge (lowercase,
+    country suffix like '(NZ)' stripped, letters+digits only). One name rule
+    across PF, the DB, and any other source: three systems, one normaliser.
+  * the horse-ID bridge — load_bridge (normalised name -> existing horse_id,
+    most recent prior row wins) and resolve_horse_id (only a genuinely
+    unknown horse gets a 'pf<runnerId>' id; 442 SQL sites join on horse_id,
+    so forking an identity silently corrupts every feature built on it).
+  * the payload -> 21-column row mapping (build_rows) with the
+    trials/unplaced exclusion (barrier-trial meetings filtered at the
+    meeting level; scratched/no-position runners dropped at the runner
+    level).
+  * the (race_date, lower(track), race_number) skip-if-existing dedup
+    predicate (load_existing_keys + row_race_key).
+  * the pf_raw_payloads archival insert (archive_payloads) — every fetched
+    payload lands in the archive before the row insert, in the same
+    transaction; the Starter subscription only serves ~31 days back, so this
+    archive is the permanent history being accrued. Never skip it on a
+    committing run.
+
+Importing this module never requires psycopg2 (lazy imports inside the DB
+helpers) and never touches the network.
+"""
+import json
+import re
+
+METRO_TRACKS = [
+    "flemington", "caulfield", "moonee valley", "sandown",
+    "randwick", "royal randwick", "rosehill", "warwick farm", "canterbury",
+    "eagle farm", "doomben", "gold coast", "morphettville",
+    "newcastle", "kembla grange", "ascot", "belmont",
+]
+
+RRH_COLUMNS = (
+    "horse_id", "horse_name", "race_id", "track", "race_date",
+    "distance_m", "race_class", "class_level", "going", "position",
+    "margin_lengths", "weight_kg", "jockey", "jockey_id", "barrier",
+    "sp_odds", "field_size", "race_name", "race_number", "form_string",
+    "opponents_json"
+)
+
+RAW_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS pf_raw_payloads (
+    id BIGSERIAL PRIMARY KEY,
+    kind TEXT NOT NULL,
+    ref_date DATE,
+    meeting_id BIGINT,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    payload JSONB NOT NULL
+)
+"""
+
+
+def norm_name(name):
+    """Horse-name key for the ID bridge: lowercase, no country suffix like
+    '(NZ)', letters+digits only."""
+    s = re.sub(r"\([A-Z]{2,3}\)\s*$", "", str(name or "").strip())
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def parse_class_level(rc):
+    if not rc:
+        return 1
+    rc = str(rc).upper()
+    if any(x in rc for x in ("GROUP 1", "GROUP1", " G1")):
+        return 10
+    if any(x in rc for x in ("GROUP 2", "GROUP2", " G2")):
+        return 9
+    if any(x in rc for x in ("GROUP 3", "GROUP3", " G3")):
+        return 8
+    if "LISTED" in rc:
+        return 7
+    bm = re.search(r"BM\s*(\d+)", rc)
+    if bm:
+        n = int(bm.group(1))
+        if n >= 88:
+            return 6
+        if n >= 70:
+            return 5
+        if n >= 58:
+            return 4
+        if n >= 50:
+            return 3
+        return 2
+    if "MAIDEN" in rc:
+        return 2
+    return 1
+
+
+def safe_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_distance(race_obj):
+    for k in ("distance", "raceDistance", "distanceM", "length"):
+        v = race_obj.get(k)
+        if v:
+            m = re.search(r"(\d+)", str(v))
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def race_meta(race_obj):
+    """(race_name, race_class) from a meeting-detail race object, tolerant of
+    naming differences; unknown keys are reported once in dry-run output."""
+    name = race_obj.get("name") or race_obj.get("raceName")
+    rclass = (race_obj.get("raceClass") or race_obj.get("class")
+              or race_obj.get("restrictions") or "")
+    return name, str(rclass or "")
+
+
+def normalize_finish_position(v, field_size=None):
+    pos = safe_int(v)
+    if pos is None or pos <= 0 or pos >= 100:
+        return None
+    if field_size and pos > field_size:
+        return None
+    return pos
+
+
+# ------------------------------------------------------- meeting filtering
+
+def aus_race_meetings(meetings):
+    """AUS non-barrier-trial meetings from a meetingslist payload — the
+    trials exclusion at the meeting level (results importers exclude trials;
+    the trials importer includes ONLY trials, so the partition is total)."""
+    return [m for m in meetings or []
+            if (m.get("track") or {}).get("country") == "AUS"
+            and not m.get("isBarrierTrial")]
+
+
+def is_metro_track(name):
+    n = str(name or "").lower()
+    return any(t in n or n in t for t in METRO_TRACKS)
+
+
+# ------------------------------------------------------------- DB helpers
+
+def load_existing_keys(cur, dates):
+    """The dedup set: (race_date::text, lower(track), race_number) for every
+    row already in race_results_history on the given ISO dates."""
+    cur.execute("""
+        SELECT race_date::text, LOWER(track), race_number
+        FROM race_results_history WHERE race_date = ANY(%s)
+    """, (list(dates),))
+    return {(r[0], r[1], r[2]) for r in cur.fetchall()}
+
+
+def row_race_key(row):
+    """The dedup key of one mapped 21-column row."""
+    return (row[4], str(row[3]).lower(), row[18])
+
+
+# The SELECT projects the ORIGINAL-case horse_name so norm_name can strip an
+# uppercase country suffix like "(NZ)"; projecting LOWER(horse_name) here
+# hands norm_name a lowercase "(nz)" it cannot strip, corrupting the key
+# ("oceandeepnz" vs the card-side "oceandeep") so every country-suffixed
+# horse forks a fresh id instead of bridging. DISTINCT ON/ORDER BY still
+# lower for grouping; only the projection keeps case.
+BRIDGE_SQL = """
+    SELECT DISTINCT ON (LOWER(horse_name)) horse_name, horse_id
+    FROM race_results_history ORDER BY LOWER(horse_name), race_date DESC
+"""
+
+
+def load_bridge(cur):
+    """normalised name -> existing horse_id; most recent prior row wins."""
+    cur.execute(BRIDGE_SQL)
+    return {norm_name(name): hid for name, hid in cur.fetchall()}
+
+
+def resolve_horse_id(bridge, runner_name, runner_id):
+    """The bridge rule: match an existing horse by normalised name; only a
+    genuinely unknown horse gets a 'pf<runnerId>' id."""
+    return bridge.get(norm_name(runner_name)) or f"pf{runner_id}"
+
+
+def archive_payloads(cur, raw_payloads):
+    """Archive raw payloads into pf_raw_payloads. Call this BEFORE the row
+    insert, in the same transaction — never skip it on a committing run."""
+    from psycopg2.extras import Json
+    for raw in raw_payloads:
+        cur.execute(
+            "INSERT INTO pf_raw_payloads (kind, ref_date, meeting_id, payload) VALUES (%s,%s,%s,%s)",
+            (raw["kind"], raw["ref_date"], raw["meeting_id"], Json(raw["payload"])))
+
+
+# ------------------------------------------------------------- row mapping
+
+def build_rows(day, bridge, unknown_keys):
+    """Map one collected day to RRH rows. bridge: norm_name -> horse_id."""
+    rows, races_seen = [], []
+    for m in day["meetings"]:
+        for block in m["results"]:
+            race_date = str(block.get("meetingDate") or day["date"])[:10]
+            track = block.get("track") or m["track"]
+            for rr in block.get("raceResults") or []:
+                rnum = safe_int(rr.get("raceNumber"))
+                if not rnum:
+                    continue
+                detail = m["detail_races"].get(rnum, {})
+                race_name, race_class = race_meta(detail)
+                if not race_name and detail:
+                    unknown_keys.update(k for k in detail.keys() if k != "runners")
+                distance_m = parse_distance(detail) or parse_distance(rr)
+                going = rr.get("trackConditionLabel")
+                runners = [r for r in (rr.get("runners") or [])
+                           if normalize_finish_position(r.get("position")) is not None]
+                field_size = len(runners)
+                opponents = [{"horse_id": None, "horse_name": r.get("runner"),
+                              "position": normalize_finish_position(r.get("position"), field_size),
+                              "margin": safe_float(r.get("margin"))} for r in runners]
+                races_seen.append((race_date, str(track).lower(), rnum))
+                for r in runners:
+                    nk = norm_name(r.get("runner"))
+                    horse_id = bridge.get(nk) or f"pf{r.get('runnerId')}"
+                    my_opponents = [o for o in opponents if norm_name(o["horse_name"]) != nk]
+                    rows.append((
+                        horse_id,
+                        r.get("runner", ""),
+                        f"pf{m['meeting_id']}_{rnum}",
+                        track,
+                        race_date,
+                        distance_m,
+                        race_class,
+                        parse_class_level(race_class),
+                        going,
+                        normalize_finish_position(r.get("position"), field_size),
+                        safe_float(r.get("margin")),
+                        safe_float(r.get("weight")),
+                        r.get("jockey"),
+                        f"pf{r.get('jockeyId')}" if r.get("jockeyId") else None,
+                        safe_int(r.get("barrier")),
+                        safe_float(r.get("price")),
+                        field_size,
+                        race_name,
+                        rnum,
+                        m["last10"].get(str(r.get("runnerId") or "")),
+                        json.dumps(my_opponents),
+                    ))
+    return rows, races_seen
+
+
+def count_excluded_runners(results_payload):
+    """Scratched/no-position runners in one results payload (reporting twin
+    of the build_rows exclusion filter)."""
+    excluded = 0
+    for block in results_payload or []:
+        for rr in block.get("raceResults") or []:
+            if not safe_int(rr.get("raceNumber")):
+                continue
+            for r in rr.get("runners") or []:
+                if normalize_finish_position(r.get("position")) is None:
+                    excluded += 1
+    return excluded

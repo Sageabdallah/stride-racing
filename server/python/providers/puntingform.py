@@ -32,8 +32,10 @@ if _parent not in sys.path:
 
 import pf_client
 from pf_backfill_results import (
+    aus_race_meetings,
     load_horse_id_bridge,
     norm_name,
+    normalize_finish_position,
     parse_distance,
     race_meta,
     safe_int,
@@ -195,12 +197,50 @@ class PuntingFormProvider(RacingDataProvider):
         return races
 
     def fetch_results(self, date_str: str) -> List[Dict]:
-        # Results serve path is the results-collector migration
-        # (PUNTINGFORM_MIGRATION.md Phase C, fetch_and_import_date /
-        # auto_results_collector); pf_backfill_results covers it meanwhile.
-        raise NotImplementedError(
-            "puntingform results serve path not built yet — use pf_backfill_results"
-        )
+        """Resulted races for a date, in the internal results shape the
+        collector's matcher consumes: {course, track, race_number, race_name,
+        distance, runners:[{horse_name, horse, position, sp}]}.
+
+        A meetings-list failure raises (the caller's error contract turns
+        that into an empty retry-later day); a single meeting failing is
+        reported and skipped so one broken track cannot sink the rest of the
+        day's settlement. Races where no runner has a finishing position are
+        not resulted yet and are omitted."""
+        meetings = aus_race_meetings(pf_client.meetings_for_date(date_str))
+        results: List[Dict] = []
+        for meet in meetings:
+            meet_id = meet.get("meetingId")
+            track_name = (meet.get("track") or {}).get("name") or "Unknown"
+            if not meet_id:
+                continue
+            try:
+                blocks = pf_client.results_for_meeting(meet_id)
+            except pf_client.PFError as e:
+                print(f"  [puntingform] results unavailable for {track_name}: {e}",
+                      file=sys.stderr)
+                continue
+            for block in blocks or []:
+                block_track = block.get("track") or track_name
+                for rr in block.get("raceResults") or []:
+                    runners = rr.get("runners") or []
+                    if not any(normalize_finish_position(r.get("position")) is not None
+                               for r in runners):
+                        continue
+                    results.append({
+                        "course": block_track,
+                        "track": block_track,
+                        "race_number": rr.get("raceNumber"),
+                        "race_name": rr.get("raceName") or "",
+                        "distance": rr.get("distance") or "",
+                        "runners": [
+                            {"horse_name": r.get("runner"),
+                             "horse": r.get("runner"),
+                             "position": r.get("position"),
+                             "sp": r.get("price")}
+                            for r in runners
+                        ],
+                    })
+        return results
 
     # ------------------------------------------------------------------
 
