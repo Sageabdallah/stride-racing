@@ -6,7 +6,9 @@
 # week; this tool tells apart bot-blocked vs gone vs relocated).
 #
 # No secrets, no database. URLs are passed as a dispatch input (public in
-# run metadata — fine, they are public racing pages).
+# run metadata — fine, they are public racing pages). The `runner` input
+# selects GitHub-hosted (US IP), the self-hosted AU runner, or both — used
+# to decide which sources geo/bot-block US datacenter IPs (DM-H5).
 
 name: net-probe
 
@@ -22,13 +24,79 @@ on:
         default: "urllib"
         type: choice
         options: ["urllib", "curl_cffi"]
+      runner:
+        description: "Where to probe from: GitHub-hosted (US IP), the self-hosted AU runner, or both"
+        required: false
+        default: "both"
+        type: choice
+        options: ["both", "github", "selfhosted"]
 
 permissions:
   contents: read
 
 jobs:
-  probe:
+  probe-github:
+    if: ${{ inputs.runner == 'both' || inputs.runner == 'github' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install curl_cffi
+        if: ${{ inputs.engine == 'curl_cffi' }}
+        run: pip install --quiet curl_cffi
+
+      - name: Probe URLs
+        env:
+          PROBE_URLS: ${{ inputs.urls }}
+          PROBE_ENGINE: ${{ inputs.engine }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, urllib.request, urllib.error
+
+          UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+          engine = os.environ.get("PROBE_ENGINE", "urllib")
+
+          def fetch(url):
+              """Return (status, content_type, body_bytes)."""
+              if engine == "curl_cffi":
+                  from curl_cffi import requests as cf
+                  r = cf.get(url, impersonate="chrome", timeout=30)
+                  return r.status_code, r.headers.get("Content-Type"), r.content[:400_000]
+              req = urllib.request.Request(url, headers={
+                  "User-Agent": UA,
+                  "Accept": "text/html,application/xhtml+xml,text/csv,*/*;q=0.8",
+                  "Accept-Language": "en-AU,en;q=0.9",
+              })
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return resp.status, resp.headers.get("Content-Type"), resp.read(400_000)
+
+          print(f"engine: {engine}")
+          for url in os.environ["PROBE_URLS"].split():
+              print("=" * 78)
+              print(url)
+              print("=" * 78)
+              try:
+                  status, ctype, body = fetch(url)
+                  text = body.decode("utf-8", errors="replace")
+                  print(f"  status       : {status}")
+                  print(f"  content-type : {ctype}")
+                  print(f"  bytes        : {len(body)}")
+                  print(f"  head         : {text[:200]!r}")
+                  hrefs = re.findall(r'href="([^"]*(?:[Ss]ectional|\.csv|\.zip)[^"]*)"', text)
+                  if hrefs:
+                      print(f"  matching hrefs ({min(len(hrefs), 40)} of {len(hrefs)}):")
+                      for h in hrefs[:40]:
+                          print(f"    {h}")
+              except urllib.error.HTTPError as e:
+                  print(f"  HTTP ERROR   : {e.code} {e.reason}")
+                  print(f"  head         : {e.read(300)!r}")
+              except Exception as e:
+                  print(f"  ERROR        : {type(e).__name__}: {e}")
+          EOF
+
+  probe-selfhosted:
+    if: ${{ inputs.runner == 'both' || inputs.runner == 'selfhosted' }}
+    runs-on: [self-hosted, syd]
     timeout-minutes: 10
     steps:
       - name: Install curl_cffi
