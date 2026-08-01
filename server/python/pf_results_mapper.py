@@ -148,6 +148,32 @@ def aus_race_meetings(meetings):
             and not m.get("isBarrierTrial")]
 
 
+def aus_trial_meetings(meetings):
+    """AUS barrier-trial meetings from a meetingslist payload — the ONLY
+    meetings the trials importer handles (PF marks them isBarrierTrial)."""
+    return [m for m in meetings or []
+            if (m.get("track") or {}).get("country") == "AUS"
+            and m.get("isBarrierTrial")]
+
+
+def assert_trial_partition(meetings):
+    """The results/trials partition over AUS meetings: each AUS meeting is
+    handled by EXACTLY ONE importer (results excludes trials; the trials
+    script includes only trials). A meeting in both — or an AUS meeting in
+    neither — is a bug; fail loudly rather than double- or never-import."""
+    aus = [m for m in meetings or []
+           if (m.get("track") or {}).get("country") == "AUS"]
+    results_ids = {id(m) for m in aus_race_meetings(aus)}
+    trial_ids = {id(m) for m in aus_trial_meetings(aus)}
+    both = results_ids & trial_ids
+    neither = {id(m) for m in aus} - results_ids - trial_ids
+    if both or neither:
+        raise AssertionError(
+            f"results/trials partition broken: {len(both)} meeting(s) in both, "
+            f"{len(neither)} AUS meeting(s) in neither")
+    return aus
+
+
 def is_metro_track(name):
     n = str(name or "").lower()
     return any(t in n or n in t for t in METRO_TRACKS)
@@ -170,12 +196,21 @@ def row_race_key(row):
     return (row[4], str(row[3]).lower(), row[18])
 
 
+# The SELECT projects the ORIGINAL-case horse_name so norm_name can strip an
+# uppercase country suffix like "(NZ)"; projecting LOWER(horse_name) here
+# hands norm_name a lowercase "(nz)" it cannot strip, corrupting the key
+# ("oceandeepnz" vs the card-side "oceandeep") so every country-suffixed
+# horse forks a fresh id instead of bridging. DISTINCT ON/ORDER BY still
+# lower for grouping; only the projection keeps case.
+BRIDGE_SQL = """
+    SELECT DISTINCT ON (LOWER(horse_name)) horse_name, horse_id
+    FROM race_results_history ORDER BY LOWER(horse_name), race_date DESC
+"""
+
+
 def load_bridge(cur):
     """normalised name -> existing horse_id; most recent prior row wins."""
-    cur.execute("""
-        SELECT DISTINCT ON (LOWER(horse_name)) LOWER(horse_name), horse_id
-        FROM race_results_history ORDER BY LOWER(horse_name), race_date DESC
-    """)
+    cur.execute(BRIDGE_SQL)
     return {norm_name(name): hid for name, hid in cur.fetchall()}
 
 

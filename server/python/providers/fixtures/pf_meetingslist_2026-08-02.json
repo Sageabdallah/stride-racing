@@ -1,0 +1,20 @@
+[
+  {
+    "meetingId": 195502,
+    "meetingDate": "2026-08-02T00:00:00",
+    "track": {
+      "name": "Caulfield",
+      "trackId": 21,
+      "location": "Melbourne",
+      "state": "VIC",
+      "country": "AUS",
+      "surface": "Turf"
+    },
+    "isBarrierTrial": false,
+    "isJumps": false,
+    "tabMeeting": true,
+    "resultsUpdated": null,
+    "railPosition": "+3m Entire",
+    "expectedCondition": "Soft 5"
+  }
+]

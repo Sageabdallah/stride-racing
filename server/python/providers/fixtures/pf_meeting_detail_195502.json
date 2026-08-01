@@ -1,0 +1,69 @@
+{
+  "meetingId": 195502,
+  "meetingDate": "2026-08-02T00:00:00",
+  "track": {
+    "name": "Caulfield",
+    "trackId": 21,
+    "location": "Melbourne",
+    "state": "VIC",
+    "country": "AUS",
+    "surface": "Turf"
+  },
+  "races": [
+    {
+      "raceNumber": 1,
+      "name": "Debutant Stakes",
+      "raceClass": "2YO MDN",
+      "distance": 1000,
+      "startTime": "2026-08-02T12:30:00",
+      "prizeMoney": 80000,
+      "restrictions": "2YO",
+      "runners": [
+        {
+          "runnerId": 620101,
+          "name": "Fast Horse",
+          "tabNo": 1,
+          "barrier": 1,
+          "weight": 57.0,
+          "last10": "1x213",
+          "age": 5,
+          "sex": "Gelding",
+          "jockey": {
+            "id": 9101,
+            "fullName": "J Smith"
+          },
+          "trainer": {
+            "id": 8101,
+            "fullName": "T Jones"
+          },
+          "careerStarts": 14,
+          "careerWins": 5,
+          "winPct": 35.7,
+          "placePct": 64.3
+        },
+        {
+          "runnerId": 777001,
+          "name": "Total Stranger",
+          "tabNo": 2,
+          "barrier": 6,
+          "weight": 57.0,
+          "last10": "",
+          "age": 2,
+          "sex": "Colt",
+          "jockey": {
+            "id": 9105,
+            "fullName": "D Lane"
+          },
+          "trainer": {
+            "id": 8105,
+            "fullName": "M Price"
+          },
+          "careerStarts": 0,
+          "careerWins": 0,
+          "winPct": 0.0,
+          "placePct": 0.0
+        }
+      ]
+    }
+  ]
+}
