@@ -12,10 +12,13 @@ default-off flags so an unflagged run reproduces the historical numbers:
                               closing line and not obtainable at bet time
 
 Always-on additions are read-only metrics that change no decision: per-bet P&L
-net of an optional commission, max drawdown, profit factor, average odds over
-all bets, and a seeded percentile bootstrap CI for ROI resampled over BETS. The
-pre-existing `ci_95` in `aggregate_metrics` is a t-interval across FOLDS and
-answers a different question; both are reported.
+net of an optional commission, max drawdown, losing streaks (observed and
+expected under the measured strike), winner concentration, profit factor,
+average odds over all bets, and a seeded percentile bootstrap CI for ROI
+resampled over BETS. The CI machinery is shared via `roi_stats` (single source
+of truth, roi-roadmap task 02). The pre-existing `ci_95` in `aggregate_metrics`
+is a t-interval across FOLDS and answers a different question; both are
+reported.
 
 Purge-gap inconsistency, unreconciled on purpose: this harness defaults to
 `gap_days=7` while `retrain_v2.DateWindowSplitter` defaults to
@@ -48,6 +51,8 @@ from typing import List, Dict, Any, Tuple, Generator, Optional
 sys.path.insert(0, os.path.dirname(__file__))
 
 from ml_model import RacingMLModel
+
+import roi_stats
 
 try:
     from sklearn.metrics import roc_auc_score, brier_score_loss, log_loss as sklearn_log_loss
@@ -461,21 +466,22 @@ def bootstrap_roi_ci(pnl: np.ndarray, stake: float = 100.0, n_boot: int = 2000,
     which answers "how much does fold-mean ROI vary" — not "could this ROI have
     arisen from no edge". This resamples the bet population directly, which is
     the quantity the ship criteria need. Seeded so a rerun reproduces.
+
+    The computation itself lives in roi_stats (single source of truth,
+    roi-roadmap task 02); this keeps the harness's historical output shape.
     """
     pnl = np.asarray(pnl, dtype=float)
     n = pnl.size
     if n == 0 or n_boot <= 0:
         return {'n_boot': 0, 'ci_95': [None, None], 'spans_zero': None, 'seed': seed}
 
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, n, size=(n_boot, n))
-    roi_samples = pnl[idx].sum(axis=1) / (n * stake) * 100.0
-    lo = float(np.percentile(roi_samples, 100 * alpha / 2))
-    hi = float(np.percentile(roi_samples, 100 * (1 - alpha / 2)))
+    ci = roi_stats.roi_ci(pnl / stake, confidence=1.0 - alpha,
+                          n_boot=n_boot, seed=seed)
     return {
         'n_boot': int(n_boot),
-        'ci_95': [round(lo, 2), round(hi, 2)],
-        'spans_zero': bool(lo <= 0.0 <= hi),
+        'ci_95': ci['ci95'],
+        'spans_zero': ci['spans_zero'],
+        'p_roi_le_zero': ci['p_roi_le_zero'],
         'seed': seed,
     }
 
@@ -557,6 +563,10 @@ def compute_fold_metrics(y_true: np.ndarray, y_pred_proba: np.ndarray,
                 'avg_odds_all': 0.0,
                 'max_drawdown': 0.0,
                 'max_drawdown_pct': 0.0,
+                'max_losing_streak': 0,
+                'expected_max_losing_streak': None,
+                'roi_minus_top1': None,
+                'roi_minus_top2': None,
                 'profit_factor': None,
                 'roi_ci95_bootstrap': {'n_boot': 0, 'ci_95': [None, None],
                                        'spans_zero': None, 'seed': bootstrap_seed},
@@ -581,6 +591,14 @@ def compute_fold_metrics(y_true: np.ndarray, y_pred_proba: np.ndarray,
 
         dd, dd_pct = compute_max_drawdown(pnl)
 
+        # Risk path + concentration in flat-stake units (roi_stats is the
+        # single source of truth for these, roi-roadmap task 02). Bets are in
+        # chronological order within the fold, so the streaks are the run an
+        # operator would actually have lived through.
+        units = pnl / stake
+        risk = roi_stats.max_drawdown_and_streaks(units)
+        conc = roi_stats.winner_concentration(units)
+
         roi_at_thresholds[key] = {
             'threshold': thresh,
             'n_bets': n_bets,
@@ -591,6 +609,10 @@ def compute_fold_metrics(y_true: np.ndarray, y_pred_proba: np.ndarray,
             'avg_odds_all': round(avg_odds_all, 2),
             'max_drawdown': round(dd, 2),
             'max_drawdown_pct': round(dd_pct, 2),
+            'max_losing_streak': risk['max_losing_streak'],
+            'expected_max_losing_streak': risk['expected_max_losing_streak'],
+            'roi_minus_top1': conc['roi_minus_top1'],
+            'roi_minus_top2': conc['roi_minus_top2'],
             'profit_factor': (round(compute_profit_factor(pnl), 4)
                               if compute_profit_factor(pnl) is not None else None),
             'roi_ci95_bootstrap': bootstrap_roi_ci(
@@ -1099,6 +1121,8 @@ def _self_test():
     t = m['roi_at_thresholds']['0.10']
     for k in ('threshold', 'n_bets', 'hit_rate', 'avg_odds_winners', 'roi_pct', 'profit',
               'avg_odds_all', 'max_drawdown', 'max_drawdown_pct', 'profit_factor',
+              'max_losing_streak', 'expected_max_losing_streak',
+              'roi_minus_top1', 'roi_minus_top2',
               'roi_ci95_bootstrap', 'commission_rate'):
         assert k in t, k
     empty = compute_fold_metrics(y_true, np.zeros(800), odds_arr, thresholds=[0.9])
