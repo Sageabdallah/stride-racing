@@ -219,8 +219,11 @@ def test_asof_td_invalid_json_and_empty_buckets_red(tmp_path):
 
 # ------------------------------------------------------- gate 5: parity suites
 
-def test_parity_absent_amber():
-    rows = rp.gate_parity_suites({})  # nothing on this branch
+def test_parity_absent_amber(tmp_path):
+    # Point every suite at a path that does not exist — the repo copies now
+    # land with roi/03, so "absent" must be simulated, not assumed.
+    missing = {name: str(tmp_path / name) for name in rp.PARITY_TESTS}
+    rows = rp.gate_parity_suites(missing)
     assert all(r["status"] == rp.AMBER for r in rows)
     assert all("not present" in r["detail"] for r in rows)
 
@@ -228,8 +231,21 @@ def test_parity_absent_amber():
 def test_parity_runs_passing_file(tmp_path):
     suite = tmp_path / "test_feature_parity.py"
     suite.write_text("def test_ok():\n    assert True\n")
-    rows = rp.gate_parity_suites(
-        {"test_feature_parity.py": str(suite)})
+    # Subprocess: the gate runs pytest in-process, and a nested pytest session
+    # inherits this suite's conftest/plugins — production usage is the CLI
+    # script, so test it the same way. Absent paths are simulated (the repo
+    # suites exist since roi/03 landed).
+    import subprocess
+    code = (
+        "import json, sys; sys.path.insert(0, %r); import retrain_preflight as rp; "
+        "rows = rp.gate_parity_suites({'test_feature_parity.py': %r, "
+        "'test_serve_feature_liveness.py': %r}); print(json.dumps(rows))"
+        % (str(Path(rp.__file__).parent), str(suite), str(tmp_path / 'absent.py'))
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    rows = json.loads(out.stdout.strip().splitlines()[-1])
     row = next(r for r in rows if r["name"] == "parity:test_feature_parity.py")
     assert row["status"] == rp.GREEN
     other = next(r for r in rows if r["name"] == "parity:test_serve_feature_liveness.py")
@@ -274,7 +290,10 @@ def test_shadow_metrics_ship_and_hold(tmp_path):
         "baseline": {"roi_pct": 5.0, "strike_rate": 0.20, "brier": 0.20},
         "candidate": {"n_bets": 500, "roi_pct": 8.0, "strike_rate": 0.21,
                       "brier": 0.19, "mean_clv_pct": 0.5,
-                      "roi_ci95_bootstrap": {"spans_zero": False}},
+                      # the stricter roi_positive gate (ship gate PR) reads the
+                      # bounds, not the flag — a SHIP fixture needs a CI above 0
+                      "roi_ci95_bootstrap": {"spans_zero": False,
+                                             "ci95": [2.1, 13.9]}},
     }))
     assert gate_shadow_metrics_status(str(good)) == rp.GREEN
 
@@ -315,7 +334,11 @@ def test_full_run_blocked_and_exit_code(layout, monkeypatch, tmp_path):
                               live_pkl=layout["live"],
                               backups_dir=layout["backups"],
                               prereg_path=layout["models"] / "nope.md",
-                              parity_test_paths={},
+                              # absent parity must be simulated — repo copies
+                              # exist since roi/03 landed
+                              parity_test_paths={
+                                  "test_feature_parity.py": str(tmp_path / "np1.py"),
+                                  "test_serve_feature_liveness.py": str(tmp_path / "np2.py")},
                               retrain_path=retrain_f, ml_model_path=model_f)
     out = rp.render(boards)
     # No RED (parity absent = PEND, prereg missing = PEND, metrics absent = PEND)

@@ -119,6 +119,100 @@ the next liveness bug hides.
 retrain — and since all three derive from `_effective_odds`, they inherit the
 SP contamination above. Their task-12 treatment must also be snapshot-based.
 
+### 5. The td_* aggregates leak at train — the open as-of question, RESOLVED
+
+`docs/research/FEATURE_PROVENANCE.md` (finding notes) left one open question:
+whether the track-distance aggregates behind `td_pace_bias`, `td_upset_rate`
+and `td_closing_speed_bias` exclude the subject race's own result. **They do
+not — this is a train-side RESULT_DERIVED_LEAK, diluted but systematic.**
+
+The chain:
+
+1. `track_profiler.build_profiles` aggregates **all** `race_results_history`
+   rows in the trailing two years up to BUILD date — `WHERE race_date::date
+   >= CURRENT_DATE - INTERVAL '2 years'` with **no upper bound**
+   (track_profiler.py:69-77) — and writes a static snapshot
+   (`intelligence/track_distance_profiles.json`, track_profiler.py:21,
+   252-257). The same window feeds the winners' sectional profile
+   (track_profiler.py:82-92) and the SP-ranked upset rate
+   (track_profiler.py:174-204).
+2. At train, `retrain_v2.build_feature_matrix` loads that snapshot and looks
+   up each row's track/distance (retrain_v2.py:602-634,
+   `lookup_profile(..., running_style=None)` — so `td_barrier_style_edge` is
+   constant 0 at train; the three populated features are the aggregates).
+3. The local snapshot was built **2026-04-13**; the artifact was trained
+   **2026-04-15**. Therefore for every training row raced on or before
+   2026-04-13 the aggregate contains (a) **the subject race's own result** —
+   the row's winner feeds `pace_bias` (track_profiler.py:121-132), the row's
+   race feeds `upset_rate` race groups (:174-204), and the winner's own
+   last-200m feeds `closing_speed_bias` (:82-99, :164-172) — and (b) **every
+   race run after the subject race up to the build date**, i.e. future
+   information relative to that row.
+
+Magnitude: diluted — 165 of 1,348 keys clear `MIN_RUNNERS = 100`
+(track_profiler.py:22), median 152 runners per profile — so the own-race
+contribution is ~1/n_races and the future window is shared across the whole
+track-distance cell. But it is systematic, it touches every training row,
+and `td_pace_bias`/`td_upset_rate` are served at 0.5/0.2 only in the
+no-profile fallback (retrain_v2.py:630-634): the model trained on the
+*leaked* aggregate distribution.
+
+Serve side is safe by construction: the race being predicted has not run,
+so a snapshot built from past results is legitimately pre-race (the staleness
+between rebuilds is a freshness issue, not a leak).
+
+**Fix path (task 12, pre-retrain — change no code now):** rebuild the
+profiles with as-of discipline — either per training row (aggregate only
+`race_date < row.race_date`, matching the form-feature builder's strict-`<`
+rule, form_feature_builder.py:1085-1087) or, cheaper, freeze one snapshot
+per retrain and exclude all races after the earliest training-row date in
+each cell. Re-run the walk-forward after the rebuild: any td_* importance
+drop is the leak's signature.
+
+### 6. LIVE_BOTH semantic sweep — the remaining 53, classified
+
+The remaining LIVE_BOTH features (everything except `market_odds`, already
+SP_DERIVED in finding 2) trace clean: **41 PRIOR_STARTS_ONLY**, all computed
+over the form-feature builder's strict prior-runs filter
+(`prior = horse_hist[horse_hist["race_date"] < race_date]`,
+form_feature_builder.py:1085-1087; identical rule at serve, :1276-1290),
+the trials filter (`trial_date < race_date`, :639-641), the view's LATERAL
+prior-sectional join (`st.race_date < r.race_date`,
+refresh_training_view_v2.py:264-269), or monthly-bucket lookups with
+`race_date::date < month-start` cutoffs (form_feature_builder.py:724, 821,
+867 — "zero leakage from the row's own month forward", :970-973). **5
+PRE_RACE_SAFE** card facts come straight off the subject race's own
+results-history row (barrier_draw/weight_kg/distance/field_size/class_level
+— view SQL refresh_training_view_v2.py:207-217). Full per-feature table with
+file:line evidence lives in `feature_liveness_report.json` under
+`semantic`. Three defects surfaced in the sweep (documented, no code
+changed):
+
+- **6a. `days_since_run` uses the wall clock, not the race date**
+  (form_feature_builder.py:98: `days = max(0, (pd.Timestamp.now() -
+  last_run_date).days)` — `race_date_str` is in scope at :40 and used for
+  trials at :525 but not here). Every historical training row gets "days
+  from last prior run to RETRAIN day", forcing `is_first_up=1`,
+  `is_second_up=0`, `campaign_run_number=1`, `fresh_x_trajectory=0` (and
+  skewing `fitness_x_distance`/`campaign_run_x_fitness`) on nearly all old
+  rows, while serve (race ≈ today) computes correct values. Not future-data
+  leakage, but it encodes row age and corrupts 7 features' train
+distributions — `days_since_run` carries 2.6% importance on values that
+  mean something different at train than at serve.
+- **6b. `trainer_momentum_score` is a constant 50 at train**
+  (form_feature_builder.py:496-497, "placeholder — populated by caller";
+  no train-path caller populates it; run_tips_pipeline.py serves the same
+  placeholder). Only mc_api computes it live (mc_api.py:5852-5853 →
+  jockey_momentum.py:211-220, as-of safe SQL). Zero-variance at train,
+  real signal on one serve path — skew in the opposite direction.
+- **6c. Two more constants at train:** `is_first_time_stakes` is hardcoded
+  0 (form_feature_builder.py:226, no other assignment), and
+  `barrier_x_pace_inv` is identically 0 because `barrier_advantage` is
+  never assigned at train (retrain_v2.py:659-664 consumes
+  `barrier_advantage.fillna(0)`). Both are LIVE_BOTH by assignment
+  evidence and dead by value — the artifact's importance table agrees
+  (both ~0).
+
 ## Verdict summary (all 113 features)
 
 | verdict | n | meaning | pkl cross-check |
@@ -127,6 +221,22 @@ SP contamination above. Their task-12 treatment must also be snapshot-based.
 | ZERO_AT_SERVE | 15 | trained signal, constant at serve | 14/15 carry importance (Σ 0.2545) |
 | DEAD_BOTH_SIDES | 41 | never assigned anywhere | all 41 at 0.000000 importance |
 | DEAD_AT_TRAIN | 3 | serve computes, model never learned | all 3 in-code-not-in-pkl |
+
+Semantic summary (54 LIVE_BOTH, after the sweep in finding 6):
+
+| semantic class | n | features |
+|---|---|---|
+| PRIOR_STARTS_ONLY | 41 | form-fitness, connections, class-distance, trial, bounce, sectional-derived families + 4 interactions |
+| PRE_RACE_SAFE | 5 | barrier_draw, weight_kg, distance, field_size, class_level |
+| SP_DERIVED | 1 | market_odds (finding 2) |
+| RESULT_DERIVED_LEAK (train-side aggregate; serve-safe) | 3 | td_pace_bias, td_upset_rate, td_closing_speed_bias (finding 5) |
+| CONSTANT_AT_TRAIN (assigned, zero-variance) | 4 | trainer_momentum_score, is_first_time_stakes, barrier_x_pace_inv, td_barrier_style_edge |
+
+(5 of the 41 PRIOR_STARTS_ONLY features and 2 of the interactions
+additionally inherit the finding-6a wall-clock defect: days_since_run,
+is_first_up, is_second_up, campaign_run_number, fresh_x_trajectory,
+fitness_x_distance, campaign_run_x_fitness. See the JSON for per-feature
+records.)
 
 ## Method & honesty notes
 
@@ -147,10 +257,14 @@ SP contamination above. Their task-12 treatment must also be snapshot-based.
   hand-verified for the odds family and all fifteen ZERO_AT_SERVE features
   (table above). The remaining families have mechanical verdicts only.
 - Fallback branches can masquerade as constants: `td_pace_bias`/`td_upset_rate`
-  are assigned 0.5/0.2 only in the no-data branch (retrain_v2.py:631-632); the
-  real computation feeds from track-distance aggregates (:626-629). One open
-  as-of question for task 12: confirm those track-distance aggregates exclude
-  the subject race's own result (aggregate leakage check — pending).
+  are assigned 0.5/0.2 only in the no-data branch (retrain_v2.py:630-634); the
+  real computation feeds from track-distance aggregates (:602-629). The open
+  as-of question on those aggregates is RESOLVED in finding 5: they include
+  the subject race's own result — a train-side leak.
+- The finding-6 sweep was agent-traced with file:line evidence and the two
+  load-bearing claims (wall-clock `days_since_run`, constant
+  `trainer_momentum_score`) were independently re-verified by direct reads
+  (form_feature_builder.py:98, :497).
 - The masking step preserves newlines so every cited line number is real; an
   earlier draft blanked whole declaration blocks and shifted every citation
   after them by ~200 lines. Spot-check of regenerated citations: all true.
@@ -160,6 +274,10 @@ SP contamination above. Their task-12 treatment must also be snapshot-based.
 1. **Before any retrain:** land the ZERO_AT_SERVE plumbing (roi/03
    serve_features builder, NaN contract) — otherwise the retrain inherits the
    same 25% dead mass and every offline metric overstates live performance.
+1b. **Before any retrain:** rebuild the td_* profiles with as-of discipline
+   (finding 5 — currently a train-side aggregate leak) and fix the
+   wall-clock `days_since_run` (finding 6a — use `race_date_str`, the
+   one-line fix); both corrupt the training matrix the retrain would fit.
 2. **Odds features** (`market_odds` + 3 derivatives): retrain on
    `odds_source='snapshot'` rows once roi/04 coverage accrues; ablate
    SP-vs-snapshot to quantify the historical contamination.

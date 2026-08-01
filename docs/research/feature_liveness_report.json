@@ -1606,5 +1606,342 @@
         0.018019448907880795
       ]
     ]
+  },
+  "semantic": {
+    "sweep_date": "2026-07-28",
+    "scope": "all 54 LIVE_BOTH features (ZERO_AT_SERVE 15 classified in FEATURE_PROVENANCE.md finding 1; odds family in finding 2)",
+    "classes": {
+      "PRE_RACE_SAFE": "race-card facts knowable before the race",
+      "PRIOR_STARTS_ONLY": "prior starts/trials strictly before race date (as-of safe)",
+      "SP_DERIVED": "derived from the starting price of the race being predicted",
+      "RESULT_DERIVED_LEAK": "train-side: derivation includes the subject race's own result or later races (serve may still be safe)",
+      "CONSTANT_AT_TRAIN": "assigned but zero-variance at train (placeholder/dead parent)"
+    },
+    "summary": {
+      "PRIOR_STARTS_ONLY": 41,
+      "PRE_RACE_SAFE": 5,
+      "SP_DERIVED": 1,
+      "CONSTANT_AT_TRAIN": 4,
+      "RESULT_DERIVED_LEAK": 3
+    },
+    "features": {
+      "barrier_draw": {
+        "class": "PRE_RACE_SAFE",
+        "train_evidence": "retrain_v2.py:137 + refresh_training_view_v2.py:215",
+        "note": "card fact of subject race"
+      },
+      "barrier_x_pace_inv": {
+        "class": "CONSTANT_AT_TRAIN",
+        "train_evidence": "retrain_v2.py:659-664",
+        "note": "FINDING 6c: barrier_advantage never assigned at train -> product identically 0"
+      },
+      "bounce_severity": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:590-591",
+        "note": "recent peak vs career median"
+      },
+      "campaign_run_number": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:403-417",
+        "note": "prior-run gaps <=60d \u2014 inherits finding 6a via is_first_up reset"
+      },
+      "campaign_run_x_fitness": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "retrain_v2.py:674-676",
+        "note": "campaign_run_number only \u2014 inherits finding 6a"
+      },
+      "class_drop_x_trajectory": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "retrain_v2.py:669-672",
+        "note": "is_class_drop x form_direction_slope"
+      },
+      "class_level": {
+        "class": "PRE_RACE_SAFE",
+        "train_evidence": "retrain_v2.py:141 + refresh_training_view_v2.py:209",
+        "note": "card fact of subject race"
+      },
+      "class_movement": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:174-178",
+        "note": "current class (card fact) - mean(last-3 prior class)"
+      },
+      "consistency_score": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:485-494",
+        "note": "last-5 prior pos/field_size std"
+      },
+      "course_strike_rate": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:118-126",
+        "note": "prior runs at same track, >=5 runs"
+      },
+      "days_since_run": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:94-103",
+        "note": "FINDING 6a: uses pd.Timestamp.now() not race_date (:98) \u2014 train values corrupted for historical rows"
+      },
+      "distance": {
+        "class": "PRE_RACE_SAFE",
+        "train_evidence": "retrain_v2.py:138 + refresh_training_view_v2.py:207",
+        "note": "card fact of subject race"
+      },
+      "distance_direction_flag": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:288-301",
+        "note": "card distance - last prior distance"
+      },
+      "distance_strike_rate": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:128-141",
+        "note": "prior runs within \u00b1100m; strict < race_date (ffb:1085-1087)"
+      },
+      "field_size": {
+        "class": "PRE_RACE_SAFE",
+        "train_evidence": "retrain_v2.py:140 + refresh_training_view_v2.py:217",
+        "note": "card fact of subject race"
+      },
+      "first_up_win_rate": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:448-464",
+        "note": "prior runs with >60d gap before"
+      },
+      "fitness_x_distance": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "retrain_v2.py:654-657",
+        "note": "campaign proxy x distance_strike_rate \u2014 inherits finding 6a via campaign_run_number"
+      },
+      "form_direction_slope": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:229-239",
+        "note": "last-3 prior pos/field_size polyfit"
+      },
+      "fresh_x_trajectory": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:443-446",
+        "note": "inherits finding 6a via days_since_run"
+      },
+      "going_suitability": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:499-516",
+        "note": "prior runs on same going bucket; current going is a card fact"
+      },
+      "has_dominant_win": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:198-206",
+        "note": "last-5 prior wins by >=2L"
+      },
+      "has_sectional_data": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:522",
+        "note": "presence of any prior sectional"
+      },
+      "improvement_score": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:186-193",
+        "note": "last-3 prior positions"
+      },
+      "is_bounce_candidate": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:518-520,587",
+        "note": "prior-run perf vs career best, >=5 priors"
+      },
+      "is_class_drop": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:179",
+        "note": "class_movement < -0.5"
+      },
+      "is_class_rise": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:180",
+        "note": "class_movement > +0.5"
+      },
+      "is_first_time_stakes": {
+        "class": "CONSTANT_AT_TRAIN",
+        "train_evidence": "form_feature_builder.py:226",
+        "note": "FINDING 6c: hardcoded 0, no other train assignment"
+      },
+      "is_first_up": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:105",
+        "note": "days_since_run>60 \u2014 inherits finding 6a wall-clock defect"
+      },
+      "is_improving": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:186-193",
+        "note": "last-3 prior positions"
+      },
+      "is_in_form_cycle": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:195-196",
+        "note": "last-5 prior positions"
+      },
+      "is_second_up": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:108-116",
+        "note": "prior-run gaps \u2014 inherits finding 6a wall-clock defect"
+      },
+      "is_winning_combo": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:214",
+        "note": "any prior win with current jockey on this horse"
+      },
+      "jockey_booking_change": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:431-441",
+        "note": "current booking vs last-start jockey; win rates < month-start (:867)"
+      },
+      "jockey_trainer_strike_rate": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:216",
+        "note": "prior rides of THIS horse by current jockey (name misleading; no trainer)"
+      },
+      "market_odds": {
+        "class": "SP_DERIVED",
+        "train_evidence": "retrain_v2.py:144, 557-565, 574",
+        "note": "filled from sp_odds of the race being predicted (finding 2)"
+      },
+      "runs_since_peak": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:593-599",
+        "note": "index of career-best prior run; NaN-preserved"
+      },
+      "second_up_win_rate": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:466-483",
+        "note": "prior second-up runs"
+      },
+      "sectional_rank_at_distance": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:342-353",
+        "note": "PERCENT_RANK within prior races; ranks < race_date (ffb:1097-1099)"
+      },
+      "sectional_trajectory": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:260-268",
+        "note": "last-3 prior last_200m; sectionals < race_date (ffb:1094)"
+      },
+      "sectional_x_going": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "retrain_v2.py:666-667",
+        "note": "z_200m (prior sectional, view:264-269) x going_suitability"
+      },
+      "speed_rating_trajectory": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:241-258",
+        "note": "last-3 prior positions"
+      },
+      "td_barrier_style_edge": {
+        "class": "CONSTANT_AT_TRAIN",
+        "train_evidence": "retrain_v2.py:624 (running_style=None) + track_profiler.py:294",
+        "note": "constant 0 at train; parent aggregate carries finding-5 leak when populated at serve"
+      },
+      "td_closing_speed_bias": {
+        "class": "RESULT_DERIVED_LEAK",
+        "train_evidence": "track_profiler.py:82-99,164-172,225-238 via retrain_v2.py:602-634",
+        "note": "FINDING 5: winners' last-200m aggregate includes subject race's winner"
+      },
+      "td_pace_bias": {
+        "class": "RESULT_DERIVED_LEAK",
+        "train_evidence": "track_profiler.py:69-77,121-132 via retrain_v2.py:602-634",
+        "note": "FINDING 5: train-side aggregate leak \u2014 window has no upper bound, includes subject race + post-race results to build date; serve-safe"
+      },
+      "td_upset_rate": {
+        "class": "RESULT_DERIVED_LEAK",
+        "train_evidence": "track_profiler.py:69-77,174-204 via retrain_v2.py:602-634",
+        "note": "FINDING 5: same aggregate leak (SP-ranked upset groups include subject race)"
+      },
+      "trainer_momentum_score": {
+        "class": "CONSTANT_AT_TRAIN",
+        "train_evidence": "form_feature_builder.py:496-497",
+        "note": "FINDING 6b: constant 50 at train; only mc_api computes it live (mc_api.py:5852-5853, as-of safe)"
+      },
+      "trainer_trial_pattern": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:1120-1122,695-793",
+        "note": "post-trial win rate; monthly cutoff < month-start"
+      },
+      "trial_count_60d": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:649-651",
+        "note": "trials in [race-60d, race)"
+      },
+      "trial_quality_score": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:672-687,796-848",
+        "note": "co-trialist career win rate < cutoff (:821)"
+      },
+      "trial_recency": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:646-647",
+        "note": "trials strictly < race date (:639-641); 999=none; NaN-preserved"
+      },
+      "trial_x_experience": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:653-670",
+        "note": "best trial pos pct / career starts"
+      },
+      "weight_change": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:419-426",
+        "note": "card weight (pre-race) - last prior weight"
+      },
+      "weight_kg": {
+        "class": "PRE_RACE_SAFE",
+        "train_evidence": "retrain_v2.py:139 + refresh_training_view_v2.py:213",
+        "note": "card fact of subject race"
+      },
+      "weighted_form_score": {
+        "class": "PRIOR_STARTS_ONLY",
+        "train_evidence": "form_feature_builder.py:143-172",
+        "note": "last-5 prior positions+margins"
+      }
+    },
+    "findings": [
+      {
+        "id": "5-td-aggregate-leak",
+        "severity": "leak (train-side, diluted)",
+        "features": [
+          "td_pace_bias",
+          "td_upset_rate",
+          "td_closing_speed_bias"
+        ],
+        "evidence": "track_profiler.py:69-77 window 'race_date >= CURRENT_DATE - 2 years' has no upper bound; snapshot built 2026-04-13, artifact trained 2026-04-15; retrain_v2.py:602-634 looks the static snapshot up per training row",
+        "note": "aggregates include the subject race's own result and all races up to build date; serve is pre-race safe"
+      },
+      {
+        "id": "6a-days-since-run-wall-clock",
+        "severity": "train/serve semantic defect (not future-data leak)",
+        "features": [
+          "days_since_run",
+          "is_first_up",
+          "is_second_up",
+          "campaign_run_number",
+          "fresh_x_trajectory",
+          "fitness_x_distance",
+          "campaign_run_x_fitness"
+        ],
+        "evidence": "form_feature_builder.py:98 uses pd.Timestamp.now() instead of race_date_str (in scope at :40)",
+        "note": "historical training rows read as days-to-retrain-day; encodes row age"
+      },
+      {
+        "id": "6b-trainer-momentum-constant",
+        "severity": "zero-variance at train",
+        "features": [
+          "trainer_momentum_score"
+        ],
+        "evidence": "form_feature_builder.py:496-497 constant 50; only mc_api.py:5852-5853 computes it live",
+        "note": "one serve path feeds a real signal the model never saw in training"
+      },
+      {
+        "id": "6c-train-constants",
+        "severity": "zero-variance at train",
+        "features": [
+          "is_first_time_stakes",
+          "barrier_x_pace_inv"
+        ],
+        "evidence": "form_feature_builder.py:226 hardcoded 0; retrain_v2.py:659-664 barrier_advantage.fillna(0) (never assigned)",
+        "note": "LIVE_BOTH by assignment, dead by value; artifact importance ~0 agrees"
+      }
+    ]
   }
 }

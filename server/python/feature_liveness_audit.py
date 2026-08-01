@@ -45,7 +45,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # which is how a first draft of this audit wrongly declared 69 features dead.
 TRAIN_FILES = ("retrain_v2.py", "refresh_training_view_v2.py",
                "form_feature_builder.py")
-SERVE_FILES = ("run_tips_pipeline.py", "ml_model.py", "form_feature_builder.py")
+SERVE_FILES = ("run_tips_pipeline.py", "ml_model.py", "form_feature_builder.py",
+               # the shared serve builder lands via roi/03 / PR #11; absent on
+               # this branch _read() yields "", so this entry is inert until
+               # convergence and correct automatically afterwards
+               "serve_features.py")
 
 
 def _read(name: str) -> str:
@@ -311,18 +315,29 @@ def _self_test() -> None:
     assert _find_evidence("dict_key_feat", src, "f.py"), "dict-key assignment detected"
     assert not _find_evidence("ghost_feat", src, "f.py"), "a comment mention is not an assignment"
 
-    # the audit must reproduce the two proven findings on the real tree
+    # the audit must reproduce the two proven findings on the real tree.
+    # barrier_advantage stays unconditional: nothing plumbs it in any PR.
+    # The z_* tripwire is state-conditional so it guards BOTH worlds: before
+    # roi/03 / PR #11 lands they are the proven zero-at-serve features; once
+    # serve_features.py exists they must be ASSIGNED there — a regression in
+    # either direction fires.
     real = audit_static()
     by_name = {r["feature"]: r for r in real["features"]}
     if "barrier_advantage" in by_name:
         assert by_name["barrier_advantage"]["train_status"] != "ASSIGNED", \
             "barrier_advantage is the proven dead feature — if this fires, it got plumbed (update the audit docs)"
+    plumbed = (SCRIPT_DIR / "serve_features.py").exists()
     for z in ("z_200m", "z_400m", "z_600m", "z_800m"):
         if z in by_name:
-            assert by_name[z]["serve_status"] != "ASSIGNED", \
-                f"{z} is the proven zero-at-serve feature — if this fires, it got plumbed"
+            if plumbed:
+                assert by_name[z]["serve_status"] == "ASSIGNED", \
+                    f"{z} should be served via serve_features.py — if this fires, the shared builder regressed"
+            else:
+                assert by_name[z]["serve_status"] != "ASSIGNED", \
+                    f"{z} is the proven zero-at-serve feature — if this fires, it got plumbed"
     print(f"  masking, detection, and both proven findings hold "
-          f"({real['n_features']} features scanned)")
+          f"({real['n_features']} features scanned, "
+          f"{'plumbed' if plumbed else 'unplumbed'} world)")
     print("All tests completed successfully.")
 
 

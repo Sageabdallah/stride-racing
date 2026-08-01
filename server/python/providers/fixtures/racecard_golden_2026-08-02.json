@@ -1,0 +1,103 @@
+[
+  {
+    "date": "2026-08-02",
+    "meet_id": "195502",
+    "course": "Caulfield",
+    "races": [
+      {
+        "course": "Caulfield",
+        "course_id": "pf21",
+        "date": "2026-08-02",
+        "distance": "1000m",
+        "going": "Soft 5",
+        "is_jump_out": null,
+        "is_trial": false,
+        "meet_id": "195502",
+        "off_time": "2026-08-02T12:30:00",
+        "prizes": null,
+        "prize_total": 80000,
+        "class": "2YO MDN",
+        "race_conditions": "2YO",
+        "race_group": null,
+        "race_name": "Debutant Stakes",
+        "race_number": 1,
+        "race_status": null,
+        "state": "VIC",
+        "runners": [
+          {
+            "horse_id": "hrs_aus_105246150001",
+            "horse": "Fast Horse",
+            "age": 5,
+            "comment": null,
+            "colour": null,
+            "dam": null,
+            "dam_id": null,
+            "draw": 1,
+            "form": "1x213",
+            "jockey": "J Smith",
+            "jockey_id": "pf9101",
+            "jockey_claim": null,
+            "margin": null,
+            "number": 1,
+            "odds": [],
+            "owner": null,
+            "position": null,
+            "prize": null,
+            "rating": null,
+            "scratched": false,
+            "scratch_deduction": null,
+            "sex": "Gelding",
+            "silk_url": null,
+            "sire": null,
+            "sire_id": null,
+            "sp": null,
+            "stats": {
+              "career_win_percent": 35.7,
+              "career_place_percent": 64.3
+            },
+            "trainer": "T Jones",
+            "trainer_id": "pf8101",
+            "weight": 57.0
+          },
+          {
+            "horse_id": "pf777001",
+            "horse": "Total Stranger",
+            "age": 2,
+            "comment": null,
+            "colour": null,
+            "dam": null,
+            "dam_id": null,
+            "draw": 6,
+            "form": null,
+            "jockey": "D Lane",
+            "jockey_id": "pf9105",
+            "jockey_claim": null,
+            "margin": null,
+            "number": 2,
+            "odds": [],
+            "owner": null,
+            "position": null,
+            "prize": null,
+            "rating": null,
+            "scratched": false,
+            "scratch_deduction": null,
+            "sex": "Colt",
+            "silk_url": null,
+            "sire": null,
+            "sire_id": null,
+            "sp": null,
+            "stats": {
+              "career_win_percent": 0.0,
+              "career_place_percent": 0.0
+            },
+            "trainer": "M Price",
+            "trainer_id": "pf8105",
+            "weight": 57.0
+          }
+        ],
+        "winning_time": null,
+        "winning_time_hundredths": null
+      }
+    ]
+  }
+]
