@@ -1,0 +1,1610 @@
+{
+  "static": {
+    "n_features": 113,
+    "verdict_counts": {
+      "LIVE_BOTH": 54,
+      "ZERO_AT_SERVE": 15,
+      "DEAD_BOTH_SIDES": 41,
+      "DEAD_AT_TRAIN": 3
+    },
+    "features": [
+      {
+        "feature": "distance_strike_rate",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:57: features[\"distance_strike_rate\"] = 0",
+          "form_feature_builder.py:137: features[\"distance_strike_rate\"] = round(sr * confidence, 4)",
+          "form_feature_builder.py:139: features[\"distance_strike_rate\"] = 0",
+          "form_feature_builder.py:141: features[\"distance_strike_rate\"] = 0"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2580: \"distance_strike_rate\": round(h.get(\"distance_strike_rate\", 0), 3),",
+          "ml_model.py:741: 'distance_strike_rate': 25.0,",
+          "form_feature_builder.py:57: features[\"distance_strike_rate\"] = 0",
+          "form_feature_builder.py:137: features[\"distance_strike_rate\"] = round(sr * confidence, 4)"
+        ]
+      },
+      {
+        "feature": "course_strike_rate",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:56: features[\"course_strike_rate\"] = 0",
+          "form_feature_builder.py:124: features[\"course_strike_rate\"] = round(sr * confidence, 4)",
+          "form_feature_builder.py:126: features[\"course_strike_rate\"] = 0"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2581: \"course_strike_rate\": round(h.get(\"course_strike_rate\", 0), 3),",
+          "ml_model.py:742: 'course_strike_rate': 20.0,",
+          "form_feature_builder.py:56: features[\"course_strike_rate\"] = 0",
+          "form_feature_builder.py:124: features[\"course_strike_rate\"] = round(sr * confidence, 4)"
+        ]
+      },
+      {
+        "feature": "weighted_form_score",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:58: features[\"weighted_form_score\"] = 0",
+          "form_feature_builder.py:170: features[\"weighted_form_score\"] = round(float(np.average(scores, weights=weights)), 2)",
+          "form_feature_builder.py:172: features[\"weighted_form_score\"] = 0"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2576: \"weighted_form_score\": round(h.get(\"weighted_form_score\", 0), 1),",
+          "ml_model.py:743: 'weighted_form_score': 15.0,",
+          "form_feature_builder.py:58: features[\"weighted_form_score\"] = 0",
+          "form_feature_builder.py:170: features[\"weighted_form_score\"] = round(float(np.average(scores, weights=weights)), 2)"
+        ]
+      },
+      {
+        "feature": "is_first_up",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:54: features[\"is_first_up\"] = 1",
+          "form_feature_builder.py:105: features[\"is_first_up\"] = 1 if features[\"days_since_run\"] > 60 or len(prior_runs) == 0 else 0"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2578: \"is_first_up\": bool(h.get(\"is_first_up\", 0)),",
+          "ml_model.py:744: 'is_first_up': 0,",
+          "form_feature_builder.py:54: features[\"is_first_up\"] = 1",
+          "form_feature_builder.py:105: features[\"is_first_up\"] = 1 if features[\"days_since_run\"] > 60 or len(prior_runs) == 0 else 0"
+        ]
+      },
+      {
+        "feature": "is_second_up",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:55: features[\"is_second_up\"] = 0",
+          "form_feature_builder.py:112: features[\"is_second_up\"] = 1 if gap_before > 60 else 0",
+          "form_feature_builder.py:114: features[\"is_second_up\"] = 0",
+          "form_feature_builder.py:116: features[\"is_second_up\"] = 0"
+        ],
+        "serve_evidence": [
+          "ml_model.py:745: 'is_second_up': 1,",
+          "form_feature_builder.py:55: features[\"is_second_up\"] = 0",
+          "form_feature_builder.py:112: features[\"is_second_up\"] = 1 if gap_before > 60 else 0",
+          "form_feature_builder.py:114: features[\"is_second_up\"] = 0"
+        ]
+      },
+      {
+        "feature": "days_since_run",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:53: features[\"days_since_run\"] = 999",
+          "form_feature_builder.py:101: features[\"days_since_run\"] = min(days, 999)",
+          "form_feature_builder.py:103: features[\"days_since_run\"] = 999"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2577: \"days_since_run\": h.get(\"days_since_run\", 999),",
+          "form_feature_builder.py:53: features[\"days_since_run\"] = 999",
+          "form_feature_builder.py:101: features[\"days_since_run\"] = min(days, 999)",
+          "form_feature_builder.py:103: features[\"days_since_run\"] = 999"
+        ]
+      },
+      {
+        "feature": "jockey_trainer_strike_rate",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:67: features[\"jockey_trainer_strike_rate\"] = 0",
+          "form_feature_builder.py:216: features[\"jockey_trainer_strike_rate\"] = round(jockey_wins / len(jockey_runs), 4)",
+          "form_feature_builder.py:218: features[\"jockey_trainer_strike_rate\"] = 0",
+          "form_feature_builder.py:221: features[\"jockey_trainer_strike_rate\"] = 0"
+        ],
+        "serve_evidence": [
+          "ml_model.py:747: 'jockey_trainer_strike_rate': 18.0,",
+          "form_feature_builder.py:67: features[\"jockey_trainer_strike_rate\"] = 0",
+          "form_feature_builder.py:216: features[\"jockey_trainer_strike_rate\"] = round(jockey_wins / len(jockey_runs), 4)",
+          "form_feature_builder.py:218: features[\"jockey_trainer_strike_rate\"] = 0"
+        ]
+      },
+      {
+        "feature": "is_winning_combo",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:66: features[\"is_winning_combo\"] = 0",
+          "form_feature_builder.py:214: features[\"is_winning_combo\"] = 1 if jockey_wins > 0 else 0",
+          "form_feature_builder.py:220: features[\"is_winning_combo\"] = 0",
+          "form_feature_builder.py:223: features[\"is_winning_combo\"] = 0"
+        ],
+        "serve_evidence": [
+          "ml_model.py:748: 'is_winning_combo': 1,",
+          "form_feature_builder.py:66: features[\"is_winning_combo\"] = 0",
+          "form_feature_builder.py:214: features[\"is_winning_combo\"] = 1 if jockey_wins > 0 else 0",
+          "form_feature_builder.py:220: features[\"is_winning_combo\"] = 0"
+        ]
+      },
+      {
+        "feature": "barrier_draw",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP barrier -> barrier_draw"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2261: feat[\"barrier_draw\"] = int(runner.get(\"draw\") or runner.get(\"barrier\") or 0)",
+          "ml_model.py:749: 'barrier_draw': 3,"
+        ]
+      },
+      {
+        "feature": "weight_kg",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "refresh_training_view_v2.py:213 (sql-token): r.weight_kg,"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2263: feat[\"weight_kg\"] = float(wt) if wt else 0",
+          "ml_model.py:751: 'weight_kg': 56,"
+        ]
+      },
+      {
+        "feature": "ground_suitability",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:93 (sql-token): s.ground_suitability,"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "market_odds",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:574: out[\"market_odds\"] = df[\"_effective_odds\"]",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP sp_odds -> market_odds"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2259: feat[\"market_odds\"] = extract_odds(runner) or 0"
+        ]
+      },
+      {
+        "feature": "running_style_score",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "pace_advantage",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_high_pace_expected",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "distance_style_match",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "class_movement",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:61: features[\"class_movement\"] = 0",
+          "form_feature_builder.py:178: features[\"class_movement\"] = round(float(class_diff), 2)",
+          "form_feature_builder.py:182: features[\"class_movement\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:61: features[\"class_movement\"] = 0",
+          "form_feature_builder.py:178: features[\"class_movement\"] = round(float(class_diff), 2)",
+          "form_feature_builder.py:182: features[\"class_movement\"] = 0"
+        ]
+      },
+      {
+        "feature": "is_class_drop",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:59: features[\"is_class_drop\"] = 0",
+          "form_feature_builder.py:179: features[\"is_class_drop\"] = 1 if class_diff < -0.5 else 0",
+          "form_feature_builder.py:183: features[\"is_class_drop\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:59: features[\"is_class_drop\"] = 0",
+          "form_feature_builder.py:179: features[\"is_class_drop\"] = 1 if class_diff < -0.5 else 0",
+          "form_feature_builder.py:183: features[\"is_class_drop\"] = 0"
+        ]
+      },
+      {
+        "feature": "is_class_rise",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:60: features[\"is_class_rise\"] = 0",
+          "form_feature_builder.py:180: features[\"is_class_rise\"] = 1 if class_diff > 0.5 else 0",
+          "form_feature_builder.py:184: features[\"is_class_rise\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:60: features[\"is_class_rise\"] = 0",
+          "form_feature_builder.py:180: features[\"is_class_rise\"] = 1 if class_diff > 0.5 else 0",
+          "form_feature_builder.py:184: features[\"is_class_rise\"] = 0"
+        ]
+      },
+      {
+        "feature": "is_first_time_stakes",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:68: features[\"is_first_time_stakes\"] = 0",
+          "form_feature_builder.py:226: features[\"is_first_time_stakes\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:68: features[\"is_first_time_stakes\"] = 0",
+          "form_feature_builder.py:226: features[\"is_first_time_stakes\"] = 0"
+        ]
+      },
+      {
+        "feature": "is_blinkers_first_time",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_elite_jockey",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_elite_trainer",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_jockey_upgrade",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "barrier_advantage",
+        "train_status": "REFERENCED_ONLY",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "track_bias_score",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_improving",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:63: features[\"is_improving\"] = 0",
+          "form_feature_builder.py:190: features[\"is_improving\"] = 1 if all(d > 0 for d in improvements) else 0",
+          "form_feature_builder.py:193: features[\"is_improving\"] = 0"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2579: \"is_improving\": bool(h.get(\"is_improving\", 0)),",
+          "form_feature_builder.py:63: features[\"is_improving\"] = 0",
+          "form_feature_builder.py:190: features[\"is_improving\"] = 1 if all(d > 0 for d in improvements) else 0",
+          "form_feature_builder.py:193: features[\"is_improving\"] = 0"
+        ]
+      },
+      {
+        "feature": "improvement_score",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:62: features[\"improvement_score\"] = 0",
+          "form_feature_builder.py:189: features[\"improvement_score\"] = round(float(np.mean(improvements)), 2)",
+          "form_feature_builder.py:192: features[\"improvement_score\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:62: features[\"improvement_score\"] = 0",
+          "form_feature_builder.py:189: features[\"improvement_score\"] = round(float(np.mean(improvements)), 2)",
+          "form_feature_builder.py:192: features[\"improvement_score\"] = 0"
+        ]
+      },
+      {
+        "feature": "is_in_form_cycle",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:64: features[\"is_in_form_cycle\"] = 0",
+          "form_feature_builder.py:196: features[\"is_in_form_cycle\"] = 1 if len(last5_pos) >= 3 and (last5_pos[:3] <= 3).sum() >= 2 else 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:64: features[\"is_in_form_cycle\"] = 0",
+          "form_feature_builder.py:196: features[\"is_in_form_cycle\"] = 1 if len(last5_pos) >= 3 and (last5_pos[:3] <= 3).sum() >= 2 else 0"
+        ]
+      },
+      {
+        "feature": "has_dominant_win",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:65: features[\"has_dominant_win\"] = 0",
+          "form_feature_builder.py:206: features[\"has_dominant_win\"] = 1 if dominant else 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:65: features[\"has_dominant_win\"] = 0",
+          "form_feature_builder.py:206: features[\"has_dominant_win\"] = 1 if dominant else 0"
+        ]
+      },
+      {
+        "feature": "is_steam_move",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_drift",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "odds_movement_pct",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "last_start_market_diff",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "avg_market_diff_3runs",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "market_trend_shortening",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "market_trend_drifting",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "empirical_barrier_advantage",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "predicted_settling_pos",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "settling_percentile",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "pace_pressure_index",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "settling_difficulty",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "settling_pace_interaction",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_congested_speed",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "speed_horse_ratio",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "days_since_last_normalized",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "prep_run_x_days_since",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "run_spacing_quality",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "empirical_freshness_score",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_quick_backup",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_long_absence",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "distance_change_staleness",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "class_x_spell",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "steam_velocity",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "drift_velocity",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "late_move_indicator",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "market_confidence",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "relative_move",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "smart_money_score",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "is_insider_signal",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "field_market_agreement",
+        "train_status": "ABSENT",
+        "serve_status": "ABSENT",
+        "verdict": "DEAD_BOTH_SIDES",
+        "train_evidence": [],
+        "serve_evidence": []
+      },
+      {
+        "feature": "z_200m",
+        "train_status": "ASSIGNED",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:53 (sql-token): WHERE (lambda_decay IS NOT NULL OR z_200m IS NOT NULL);",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_z_200m -> z_200m"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "z_400m",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:237 (sql-token): ls.z_400m AS prior_z_400m,",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_z_400m -> z_400m"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "z_600m",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:238 (sql-token): ls.z_600m AS prior_z_600m,",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_z_600m -> z_600m"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "z_800m",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:239 (sql-token): ls.z_800m AS prior_z_800m,",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_z_800m -> z_800m"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "lambda_decay",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:53 (sql-token): WHERE (lambda_decay IS NOT NULL OR z_200m IS NOT NULL);",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_lambda_decay -> lambda_decay"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "svi",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:241 (sql-token): ls.svi AS prior_svi,",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_svi -> svi"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "rsi",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:242 (sql-token): ls.rsi AS prior_rsi,",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_rsi -> rsi"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "trip_cost_seconds",
+        "train_status": "ASSIGNED",
+        "serve_status": "ABSENT",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "refresh_training_view_v2.py:243 (sql-token): ls.trip_cost_seconds AS prior_trip_cost_seconds,",
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP prior_trip_cost_seconds -> trip_cost_seconds"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "distance",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py: via VIEW_TO_FEATURE_MAP distance_m -> distance"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:412: \"distance\": race_input.get(\"distance\", \"1400m\"),",
+          "run_tips_pipeline.py:2264: feat[\"distance\"] = distance_m",
+          "run_tips_pipeline.py:2353: \"distance\": distance,",
+          "run_tips_pipeline.py:2803: \"distance\": distance,"
+        ]
+      },
+      {
+        "feature": "field_size",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "refresh_training_view_v2.py:217 (sql-token): r.field_size,"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:1150: \"going\": r[8], \"field_size\": r[9], \"race_name\": r[10],",
+          "run_tips_pipeline.py:2265: feat[\"field_size\"] = field_size",
+          "run_tips_pipeline.py:2758: \"field_size\": _field_size,",
+          "run_tips_pipeline.py:2806: \"field_size\": field_size,"
+        ]
+      },
+      {
+        "feature": "class_level",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "refresh_training_view_v2.py:209 (sql-token): r.class_level,"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:1149: \"class_level\": r[4], \"position\": r[5], \"margin\": r[6], \"sp\": r[7],",
+          "run_tips_pipeline.py:2266: feat[\"class_level\"] = runner.get(\"class_level\") or 0"
+        ]
+      },
+      {
+        "feature": "form_direction_slope",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:69: features[\"form_direction_slope\"] = 0",
+          "form_feature_builder.py:237: features[\"form_direction_slope\"] = round(float(slope), 4)",
+          "form_feature_builder.py:239: features[\"form_direction_slope\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:69: features[\"form_direction_slope\"] = 0",
+          "form_feature_builder.py:237: features[\"form_direction_slope\"] = round(float(slope), 4)",
+          "form_feature_builder.py:239: features[\"form_direction_slope\"] = 0"
+        ]
+      },
+      {
+        "feature": "speed_rating_trajectory",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:70: features[\"speed_rating_trajectory\"] = 0",
+          "form_feature_builder.py:254: features[\"speed_rating_trajectory\"] = round(float(sr_slope), 4)",
+          "form_feature_builder.py:256: features[\"speed_rating_trajectory\"] = 0",
+          "form_feature_builder.py:258: features[\"speed_rating_trajectory\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:70: features[\"speed_rating_trajectory\"] = 0",
+          "form_feature_builder.py:254: features[\"speed_rating_trajectory\"] = round(float(sr_slope), 4)",
+          "form_feature_builder.py:256: features[\"speed_rating_trajectory\"] = 0",
+          "form_feature_builder.py:258: features[\"speed_rating_trajectory\"] = 0"
+        ]
+      },
+      {
+        "feature": "sectional_trajectory",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:71: features[\"sectional_trajectory\"] = float(\"nan\")",
+          "form_feature_builder.py:264: features[\"sectional_trajectory\"] = round(float(slope), 4)",
+          "form_feature_builder.py:266: features[\"sectional_trajectory\"] = float(\"nan\")",
+          "form_feature_builder.py:268: features[\"sectional_trajectory\"] = float(\"nan\")"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:71: features[\"sectional_trajectory\"] = float(\"nan\")",
+          "form_feature_builder.py:264: features[\"sectional_trajectory\"] = round(float(slope), 4)",
+          "form_feature_builder.py:266: features[\"sectional_trajectory\"] = float(\"nan\")",
+          "form_feature_builder.py:268: features[\"sectional_trajectory\"] = float(\"nan\")"
+        ]
+      },
+      {
+        "feature": "campaign_run_number",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:72: features[\"campaign_run_number\"] = 1",
+          "form_feature_builder.py:415: features[\"campaign_run_number\"] = campaign_count",
+          "form_feature_builder.py:417: features[\"campaign_run_number\"] = 1"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:72: features[\"campaign_run_number\"] = 1",
+          "form_feature_builder.py:415: features[\"campaign_run_number\"] = campaign_count",
+          "form_feature_builder.py:417: features[\"campaign_run_number\"] = 1"
+        ]
+      },
+      {
+        "feature": "weight_change",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:73: features[\"weight_change\"] = 0",
+          "form_feature_builder.py:422: features[\"weight_change\"] = round(float(current_weight_kg) - float(last_weight), 1)",
+          "form_feature_builder.py:424: features[\"weight_change\"] = 0",
+          "form_feature_builder.py:426: features[\"weight_change\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:73: features[\"weight_change\"] = 0",
+          "form_feature_builder.py:422: features[\"weight_change\"] = round(float(current_weight_kg) - float(last_weight), 1)",
+          "form_feature_builder.py:424: features[\"weight_change\"] = 0",
+          "form_feature_builder.py:426: features[\"weight_change\"] = 0"
+        ]
+      },
+      {
+        "feature": "jockey_booking_change",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:74: features[\"jockey_booking_change\"] = 0",
+          "form_feature_builder.py:435: features[\"jockey_booking_change\"] = 1",
+          "form_feature_builder.py:437: features[\"jockey_booking_change\"] = -1",
+          "form_feature_builder.py:439: features[\"jockey_booking_change\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:74: features[\"jockey_booking_change\"] = 0",
+          "form_feature_builder.py:435: features[\"jockey_booking_change\"] = 1",
+          "form_feature_builder.py:437: features[\"jockey_booking_change\"] = -1",
+          "form_feature_builder.py:439: features[\"jockey_booking_change\"] = 0"
+        ]
+      },
+      {
+        "feature": "fresh_x_trajectory",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:75: features[\"fresh_x_trajectory\"] = 0",
+          "form_feature_builder.py:446: features[\"fresh_x_trajectory\"] = round(fds * fresh_flag, 4)"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:75: features[\"fresh_x_trajectory\"] = 0",
+          "form_feature_builder.py:446: features[\"fresh_x_trajectory\"] = round(fds * fresh_flag, 4)"
+        ]
+      },
+      {
+        "feature": "first_up_win_rate",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:76: features[\"first_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:460: features[\"first_up_win_rate\"] = round(0.5 + (raw_rate - 0.5) * confidence, 4)",
+          "form_feature_builder.py:462: features[\"first_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:464: features[\"first_up_win_rate\"] = 0.5"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:76: features[\"first_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:460: features[\"first_up_win_rate\"] = round(0.5 + (raw_rate - 0.5) * confidence, 4)",
+          "form_feature_builder.py:462: features[\"first_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:464: features[\"first_up_win_rate\"] = 0.5"
+        ]
+      },
+      {
+        "feature": "second_up_win_rate",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:77: features[\"second_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:479: features[\"second_up_win_rate\"] = round(0.5 + (raw_rate - 0.5) * confidence, 4)",
+          "form_feature_builder.py:481: features[\"second_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:483: features[\"second_up_win_rate\"] = 0.5"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:77: features[\"second_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:479: features[\"second_up_win_rate\"] = round(0.5 + (raw_rate - 0.5) * confidence, 4)",
+          "form_feature_builder.py:481: features[\"second_up_win_rate\"] = 0.5",
+          "form_feature_builder.py:483: features[\"second_up_win_rate\"] = 0.5"
+        ]
+      },
+      {
+        "feature": "consistency_score",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:78: features[\"consistency_score\"] = 0.5",
+          "form_feature_builder.py:492: features[\"consistency_score\"] = round(max(0, 1.0 - std), 4)",
+          "form_feature_builder.py:494: features[\"consistency_score\"] = 0.5"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:78: features[\"consistency_score\"] = 0.5",
+          "form_feature_builder.py:492: features[\"consistency_score\"] = round(max(0, 1.0 - std), 4)",
+          "form_feature_builder.py:494: features[\"consistency_score\"] = 0.5"
+        ]
+      },
+      {
+        "feature": "trainer_momentum_score",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:79: features[\"trainer_momentum_score\"] = 50",
+          "form_feature_builder.py:497: features[\"trainer_momentum_score\"] = 50"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2296: feat[\"trainer_momentum_score\"] = runner.get(\"trainer_momentum_score\", 50)",
+          "form_feature_builder.py:79: features[\"trainer_momentum_score\"] = 50",
+          "form_feature_builder.py:497: features[\"trainer_momentum_score\"] = 50"
+        ]
+      },
+      {
+        "feature": "going_suitability",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:80: features[\"going_suitability\"] = 0.5",
+          "form_feature_builder.py:505: features[\"going_suitability\"] = 0.5  # untested = neutral",
+          "form_feature_builder.py:514: features[\"going_suitability\"] = round(0.5 + (raw - 0.5) * confidence, 4)",
+          "form_feature_builder.py:516: features[\"going_suitability\"] = 0.5"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:80: features[\"going_suitability\"] = 0.5",
+          "form_feature_builder.py:505: features[\"going_suitability\"] = 0.5  # untested = neutral",
+          "form_feature_builder.py:514: features[\"going_suitability\"] = round(0.5 + (raw - 0.5) * confidence, 4)",
+          "form_feature_builder.py:516: features[\"going_suitability\"] = 0.5"
+        ]
+      },
+      {
+        "feature": "fitness_x_distance",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:657: out[\"fitness_x_distance\"] = fitness_proxy * out[\"distance_strike_rate\"].fillna(0)"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2326: feat[\"fitness_x_distance\"] = _fp * feat.get(\"distance_strike_rate\", 0)"
+        ]
+      },
+      {
+        "feature": "barrier_x_pace_inv",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:662: out[\"barrier_x_pace_inv\"] = out[\"barrier_advantage\"].fillna(0) * _pps",
+          "retrain_v2.py:664: out[\"barrier_x_pace_inv\"] = out[\"barrier_advantage\"].fillna(0) * 0.5"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2328: feat[\"barrier_x_pace_inv\"] = runner.get(\"barrier_advantage\", 0) * (1 - _pps)"
+        ]
+      },
+      {
+        "feature": "sectional_x_going",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:667: out[\"sectional_x_going\"] = out[\"z_200m\"].fillna(0) * out[\"going_suitability\"].fillna(0.5)"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2329: feat[\"sectional_x_going\"] = runner.get(\"z_200m\", 0) * feat.get(\"going_suitability\", 0.5)"
+        ]
+      },
+      {
+        "feature": "class_drop_x_trajectory",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:670: out[\"class_drop_x_trajectory\"] = ("
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2330: feat[\"class_drop_x_trajectory\"] = feat.get(\"is_class_drop\", 0) * feat.get(\"form_direction_slope\", 0)"
+        ]
+      },
+      {
+        "feature": "campaign_run_x_fitness",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:676: out[\"campaign_run_x_fitness\"] = crn * campaign_freshness"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2332: feat[\"campaign_run_x_fitness\"] = _crn * _cf"
+        ]
+      },
+      {
+        "feature": "pace_pressure_score",
+        "train_status": "ASSIGNED",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "retrain_v2.py:474: return {\"pace_pressure_score\": pd.Series(pace_pressure, index=df.index),",
+          "retrain_v2.py:543: return {\"pace_pressure_score\": pd.Series(pace_pressure, index=df.index),",
+          "retrain_v2.py:637: out[\"pace_pressure_score\"] = _pace[\"pace_pressure_score\"]"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "leader_advantage",
+        "train_status": "ASSIGNED",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "retrain_v2.py:475: \"leader_advantage\": pd.Series(leader_adv, index=df.index),",
+          "retrain_v2.py:544: \"leader_advantage\": pd.Series(leader_adv, index=df.index),",
+          "retrain_v2.py:638: out[\"leader_advantage\"] = _pace[\"leader_advantage\"]"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "closer_advantage",
+        "train_status": "ASSIGNED",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "retrain_v2.py:476: \"closer_advantage\": pd.Series(closer_adv, index=df.index)}",
+          "retrain_v2.py:545: \"closer_advantage\": pd.Series(closer_adv, index=df.index)}",
+          "retrain_v2.py:639: out[\"closer_advantage\"] = _pace[\"closer_advantage\"]"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "barrier_relevance_score",
+        "train_status": "ASSIGNED",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "retrain_v2.py:642: out[\"barrier_relevance_score\"] = dist_col.apply("
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "field_size_context",
+        "train_status": "ASSIGNED",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "retrain_v2.py:646: out[\"field_size_context\"] = (out[\"field_size\"].fillna(10) / 16.0).clip(upper=1.0)"
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "market_efficiency_flag",
+        "train_status": "ASSIGNED",
+        "serve_status": "REFERENCED_ONLY",
+        "verdict": "ZERO_AT_SERVE",
+        "train_evidence": [
+          "retrain_v2.py:649: out[\"market_efficiency_flag\"] = cl.apply("
+        ],
+        "serve_evidence": []
+      },
+      {
+        "feature": "td_pace_bias",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:631: out[\"td_pace_bias\"] = 0.5"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2302: feat[\"td_pace_bias\"] = runner.get(\"td_pace_bias\", 0.5)"
+        ]
+      },
+      {
+        "feature": "td_upset_rate",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:632: out[\"td_upset_rate\"] = 0.2"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2303: feat[\"td_upset_rate\"] = runner.get(\"td_upset_rate\", 0.2)"
+        ]
+      },
+      {
+        "feature": "td_barrier_style_edge",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:633: out[\"td_barrier_style_edge\"] = 0"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2304: feat[\"td_barrier_style_edge\"] = runner.get(\"td_barrier_style_edge\", 0)"
+        ]
+      },
+      {
+        "feature": "td_closing_speed_bias",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:634: out[\"td_closing_speed_bias\"] = 0"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2305: feat[\"td_closing_speed_bias\"] = runner.get(\"td_closing_speed_bias\", 0)"
+        ]
+      },
+      {
+        "feature": "distance_direction_flag",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:293: features[\"distance_direction_flag\"] = 1",
+          "form_feature_builder.py:295: features[\"distance_direction_flag\"] = -1",
+          "form_feature_builder.py:297: features[\"distance_direction_flag\"] = 0",
+          "form_feature_builder.py:299: features[\"distance_direction_flag\"] = 0"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:293: features[\"distance_direction_flag\"] = 1",
+          "form_feature_builder.py:295: features[\"distance_direction_flag\"] = -1",
+          "form_feature_builder.py:297: features[\"distance_direction_flag\"] = 0",
+          "form_feature_builder.py:299: features[\"distance_direction_flag\"] = 0"
+        ]
+      },
+      {
+        "feature": "sectional_rank_at_distance",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:348: features[\"sectional_rank_at_distance\"] = round(",
+          "form_feature_builder.py:351: features[\"sectional_rank_at_distance\"] = float(\"nan\")",
+          "form_feature_builder.py:353: features[\"sectional_rank_at_distance\"] = float(\"nan\")"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:348: features[\"sectional_rank_at_distance\"] = round(",
+          "form_feature_builder.py:351: features[\"sectional_rank_at_distance\"] = float(\"nan\")",
+          "form_feature_builder.py:353: features[\"sectional_rank_at_distance\"] = float(\"nan\")"
+        ]
+      },
+      {
+        "feature": "has_sectional_data",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "retrain_v2.py:687: out[\"has_sectional_data\"] = out[\"has_sectional_data\"].clip(0, 1).round().astype(int)",
+          "form_feature_builder.py:84: features[\"has_sectional_data\"] = 0",
+          "form_feature_builder.py:522: features[\"has_sectional_data\"] = 1 if (prior_sectionals is not None and not prior_sectionals.empty) "
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2293: feat[\"has_sectional_data\"] = int(bool(runner.get(\"has_sectional_data\", 0)))",
+          "ml_model.py:222: features[\"has_sectional_data\"] = features[\"has_sectional_data\"].clip(0, 1).round().astype(int)",
+          "form_feature_builder.py:84: features[\"has_sectional_data\"] = 0",
+          "form_feature_builder.py:522: features[\"has_sectional_data\"] = 1 if (prior_sectionals is not None and not prior_sectionals.empty) "
+        ]
+      },
+      {
+        "feature": "is_bounce_candidate",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:81: features[\"is_bounce_candidate\"] = 0",
+          "form_feature_builder.py:544: \"is_bounce_candidate\": 0,",
+          "form_feature_builder.py:602: \"is_bounce_candidate\": is_bounce,"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:81: features[\"is_bounce_candidate\"] = 0",
+          "form_feature_builder.py:544: \"is_bounce_candidate\": 0,",
+          "form_feature_builder.py:602: \"is_bounce_candidate\": is_bounce,"
+        ]
+      },
+      {
+        "feature": "bounce_severity",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:82: features[\"bounce_severity\"] = 0.0",
+          "form_feature_builder.py:545: \"bounce_severity\": 0.0,",
+          "form_feature_builder.py:603: \"bounce_severity\": round(severity, 4),"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:82: features[\"bounce_severity\"] = 0.0",
+          "form_feature_builder.py:545: \"bounce_severity\": 0.0,",
+          "form_feature_builder.py:603: \"bounce_severity\": round(severity, 4),"
+        ]
+      },
+      {
+        "feature": "runs_since_peak",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:83: features[\"runs_since_peak\"] = float(\"nan\")",
+          "form_feature_builder.py:546: \"runs_since_peak\": float(\"nan\"),",
+          "form_feature_builder.py:604: \"runs_since_peak\": runs_since,"
+        ],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2295: feat[\"runs_since_peak\"] = runner.get(\"runs_since_peak\", float(\"nan\"))",
+          "form_feature_builder.py:83: features[\"runs_since_peak\"] = float(\"nan\")",
+          "form_feature_builder.py:546: \"runs_since_peak\": float(\"nan\"),",
+          "form_feature_builder.py:604: \"runs_since_peak\": runs_since,"
+        ]
+      },
+      {
+        "feature": "trial_recency",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:625: \"trial_recency\": 999.0,",
+          "form_feature_builder.py:683: \"trial_recency\": float(min(recency, 999)),"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:625: \"trial_recency\": 999.0,",
+          "form_feature_builder.py:683: \"trial_recency\": float(min(recency, 999)),"
+        ]
+      },
+      {
+        "feature": "trial_count_60d",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:626: \"trial_count_60d\": 0.0,",
+          "form_feature_builder.py:684: \"trial_count_60d\": float(count_60),"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:626: \"trial_count_60d\": 0.0,",
+          "form_feature_builder.py:684: \"trial_count_60d\": float(count_60),"
+        ]
+      },
+      {
+        "feature": "trial_x_experience",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:627: \"trial_x_experience\": 0.0,",
+          "form_feature_builder.py:685: \"trial_x_experience\": float(trial_x_exp),"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:627: \"trial_x_experience\": 0.0,",
+          "form_feature_builder.py:685: \"trial_x_experience\": float(trial_x_exp),"
+        ]
+      },
+      {
+        "feature": "trainer_trial_pattern",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:90: features[\"trainer_trial_pattern\"] = 1.0",
+          "form_feature_builder.py:530: features[\"trainer_trial_pattern\"] = 1.0",
+          "form_feature_builder.py:1122: feats[\"trainer_trial_pattern\"] = trainer_pattern_lookup.get(trainer_key, 1.0)",
+          "form_feature_builder.py:1309: h[\"trainer_trial_pattern\"] = trainer_pattern_lookup.get(trainer_key, 1.0)"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:90: features[\"trainer_trial_pattern\"] = 1.0",
+          "form_feature_builder.py:530: features[\"trainer_trial_pattern\"] = 1.0",
+          "form_feature_builder.py:1122: feats[\"trainer_trial_pattern\"] = trainer_pattern_lookup.get(trainer_key, 1.0)",
+          "form_feature_builder.py:1309: h[\"trainer_trial_pattern\"] = trainer_pattern_lookup.get(trainer_key, 1.0)"
+        ]
+      },
+      {
+        "feature": "trial_quality_score",
+        "train_status": "ASSIGNED",
+        "serve_status": "ASSIGNED",
+        "verdict": "LIVE_BOTH",
+        "train_evidence": [
+          "form_feature_builder.py:91: features[\"trial_quality_score\"] = trial_feats.get(\"trial_quality_score\", 0.0)",
+          "form_feature_builder.py:628: \"trial_quality_score\": 0.0,",
+          "form_feature_builder.py:686: \"trial_quality_score\": float(trial_quality_score),"
+        ],
+        "serve_evidence": [
+          "form_feature_builder.py:91: features[\"trial_quality_score\"] = trial_feats.get(\"trial_quality_score\", 0.0)",
+          "form_feature_builder.py:628: \"trial_quality_score\": 0.0,",
+          "form_feature_builder.py:686: \"trial_quality_score\": float(trial_quality_score),"
+        ]
+      },
+      {
+        "feature": "fair_implied_prob",
+        "train_status": "REFERENCED_ONLY",
+        "serve_status": "ASSIGNED",
+        "verdict": "DEAD_AT_TRAIN",
+        "train_evidence": [],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2256: _rel_mkt = [{\"fair_implied_prob\": 0.0, \"odds_rank\": 0.0, \"odds_rank_pct\": 0.0}] * len(runners)"
+        ]
+      },
+      {
+        "feature": "odds_rank",
+        "train_status": "REFERENCED_ONLY",
+        "serve_status": "ASSIGNED",
+        "verdict": "DEAD_AT_TRAIN",
+        "train_evidence": [],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2256: _rel_mkt = [{\"fair_implied_prob\": 0.0, \"odds_rank\": 0.0, \"odds_rank_pct\": 0.0}] * len(runners)"
+        ]
+      },
+      {
+        "feature": "odds_rank_pct",
+        "train_status": "REFERENCED_ONLY",
+        "serve_status": "ASSIGNED",
+        "verdict": "DEAD_AT_TRAIN",
+        "train_evidence": [],
+        "serve_evidence": [
+          "run_tips_pipeline.py:2256: _rel_mkt = [{\"fair_implied_prob\": 0.0, \"odds_rank\": 0.0, \"odds_rank_pct\": 0.0}] * len(runners)"
+        ]
+      }
+    ]
+  },
+  "pkl": {
+    "pkl": "/Users/sageabdallah/Desktop/Race-Analytics-Export/Race-Analytics/server/python/models/racing_ensemble_v2.pkl",
+    "version": "v2",
+    "trained_at": "2026-04-15T22:47:29.848011",
+    "n_trained_columns": 110,
+    "in_code_not_in_pkl": [
+      "fair_implied_prob",
+      "odds_rank",
+      "odds_rank_pct"
+    ],
+    "in_pkl_not_in_code": [],
+    "importance_source": "stored feature_importance dict",
+    "importances": {
+      "distance_strike_rate": 0.003197,
+      "course_strike_rate": 0.00518,
+      "weighted_form_score": 0.052173,
+      "is_first_up": 0.000114,
+      "is_second_up": 0.0,
+      "days_since_run": 0.026094,
+      "jockey_trainer_strike_rate": 0.005323,
+      "is_winning_combo": 0.004497,
+      "barrier_draw": 0.055234,
+      "weight_kg": 0.018074,
+      "ground_suitability": 0.0,
+      "market_odds": 0.21798,
+      "running_style_score": 0.0,
+      "pace_advantage": 0.0,
+      "is_high_pace_expected": 0.0,
+      "distance_style_match": 0.0,
+      "class_movement": 0.0,
+      "is_class_drop": 0.0,
+      "is_class_rise": 0.0,
+      "is_first_time_stakes": 0.0,
+      "is_blinkers_first_time": 0.0,
+      "is_elite_jockey": 0.0,
+      "is_elite_trainer": 0.0,
+      "is_jockey_upgrade": 0.0,
+      "barrier_advantage": 0.0,
+      "track_bias_score": 0.0,
+      "is_improving": 0.004624,
+      "improvement_score": 0.011814,
+      "is_in_form_cycle": 0.004267,
+      "has_dominant_win": 0.0,
+      "is_steam_move": 0.0,
+      "is_drift": 0.0,
+      "odds_movement_pct": 0.0,
+      "last_start_market_diff": 0.0,
+      "avg_market_diff_3runs": 0.0,
+      "market_trend_shortening": 0.0,
+      "market_trend_drifting": 0.0,
+      "empirical_barrier_advantage": 0.0,
+      "predicted_settling_pos": 0.0,
+      "settling_percentile": 0.0,
+      "pace_pressure_index": 0.0,
+      "settling_difficulty": 0.0,
+      "settling_pace_interaction": 0.0,
+      "is_congested_speed": 0.0,
+      "speed_horse_ratio": 0.0,
+      "days_since_last_normalized": 0.0,
+      "prep_run_x_days_since": 0.0,
+      "run_spacing_quality": 0.0,
+      "empirical_freshness_score": 0.0,
+      "is_quick_backup": 0.0,
+      "is_long_absence": 0.0,
+      "distance_change_staleness": 0.0,
+      "class_x_spell": 0.0,
+      "steam_velocity": 0.0,
+      "drift_velocity": 0.0,
+      "late_move_indicator": 0.0,
+      "market_confidence": 0.0,
+      "relative_move": 0.0,
+      "smart_money_score": 0.0,
+      "is_insider_signal": 0.0,
+      "field_market_agreement": 0.0,
+      "z_200m": 0.005399,
+      "z_400m": 0.00574,
+      "z_600m": 0.007362,
+      "z_800m": 0.023961,
+      "lambda_decay": 0.005823,
+      "svi": 0.005756,
+      "rsi": 0.005836,
+      "trip_cost_seconds": 0.012819,
+      "distance": 0.012791,
+      "field_size": 0.048041,
+      "class_level": 0.005343,
+      "form_direction_slope": 0.005136,
+      "speed_rating_trajectory": 0.011861,
+      "sectional_trajectory": 0.011111,
+      "campaign_run_number": 0.000474,
+      "weight_change": 0.008046,
+      "jockey_booking_change": 0.017662,
+      "fresh_x_trajectory": 0.0,
+      "first_up_win_rate": 0.005362,
+      "second_up_win_rate": 0.005458,
+      "consistency_score": 0.005153,
+      "trainer_momentum_score": 0.0,
+      "going_suitability": 0.0,
+      "fitness_x_distance": 0.003184,
+      "barrier_x_pace_inv": 0.0,
+      "sectional_x_going": 0.005043,
+      "class_drop_x_trajectory": 0.0,
+      "campaign_run_x_fitness": 2e-05,
+      "pace_pressure_score": 0.043649,
+      "leader_advantage": 0.030165,
+      "closer_advantage": 0.056318,
+      "barrier_relevance_score": 0.006311,
+      "field_size_context": 0.039548,
+      "market_efficiency_flag": 0.005839,
+      "td_pace_bias": 0.024943,
+      "td_upset_rate": 0.033391,
+      "td_barrier_style_edge": 0.0,
+      "td_closing_speed_bias": 0.01105,
+      "distance_direction_flag": 0.005551,
+      "sectional_rank_at_distance": 0.011822,
+      "has_sectional_data": 0.003965,
+      "is_bounce_candidate": 0.002457,
+      "bounce_severity": 0.004506,
+      "runs_since_peak": 0.003718,
+      "trial_recency": 0.018019,
+      "trial_count_60d": 0.006531,
+      "trial_x_experience": 0.006544,
+      "trainer_trial_pattern": 0.050254,
+      "trial_quality_score": 0.00947
+    },
+    "zero_importance_features": [
+      "avg_market_diff_3runs",
+      "barrier_advantage",
+      "barrier_x_pace_inv",
+      "class_drop_x_trajectory",
+      "class_movement",
+      "class_x_spell",
+      "days_since_last_normalized",
+      "distance_change_staleness",
+      "distance_style_match",
+      "drift_velocity",
+      "empirical_barrier_advantage",
+      "empirical_freshness_score",
+      "field_market_agreement",
+      "fresh_x_trajectory",
+      "going_suitability",
+      "ground_suitability",
+      "has_dominant_win",
+      "is_blinkers_first_time",
+      "is_class_drop",
+      "is_class_rise",
+      "is_congested_speed",
+      "is_drift",
+      "is_elite_jockey",
+      "is_elite_trainer",
+      "is_first_time_stakes",
+      "is_high_pace_expected",
+      "is_insider_signal",
+      "is_jockey_upgrade",
+      "is_long_absence",
+      "is_quick_backup",
+      "is_second_up",
+      "is_steam_move",
+      "last_start_market_diff",
+      "late_move_indicator",
+      "market_confidence",
+      "market_trend_drifting",
+      "market_trend_shortening",
+      "odds_movement_pct",
+      "pace_advantage",
+      "pace_pressure_index",
+      "predicted_settling_pos",
+      "prep_run_x_days_since",
+      "relative_move",
+      "run_spacing_quality",
+      "running_style_score",
+      "settling_difficulty",
+      "settling_pace_interaction",
+      "settling_percentile",
+      "smart_money_score",
+      "speed_horse_ratio",
+      "steam_velocity",
+      "td_barrier_style_edge",
+      "track_bias_score",
+      "trainer_momentum_score"
+    ],
+    "top15": [
+      [
+        "market_odds",
+        0.21798034919472078
+      ],
+      [
+        "closer_advantage",
+        0.05631790440184561
+      ],
+      [
+        "barrier_draw",
+        0.055233850758422055
+      ],
+      [
+        "weighted_form_score",
+        0.05217341141134362
+      ],
+      [
+        "trainer_trial_pattern",
+        0.05025395847334139
+      ],
+      [
+        "field_size",
+        0.04804079777581704
+      ],
+      [
+        "pace_pressure_score",
+        0.04364925950275491
+      ],
+      [
+        "field_size_context",
+        0.03954752255572335
+      ],
+      [
+        "td_upset_rate",
+        0.03339089850720454
+      ],
+      [
+        "leader_advantage",
+        0.030165084045742096
+      ],
+      [
+        "days_since_run",
+        0.026094433401848135
+      ],
+      [
+        "td_pace_bias",
+        0.024942728632839067
+      ],
+      [
+        "z_800m",
+        0.02396143393122523
+      ],
+      [
+        "weight_kg",
+        0.018073554998287143
+      ],
+      [
+        "trial_recency",
+        0.018019448907880795
+      ]
+    ]
+  }
+}
