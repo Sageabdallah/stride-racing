@@ -150,6 +150,76 @@ dispatchable to Kimi the same day the merge session completes.
 shortened, widened, or re-banded after data exists. That is what PR #18
 fixes in writing, which is why its markers must be resolved *first*.
 
+## 4b. The retrain gate, consolidated (audit of 2026-08-01)
+
+A full audit — pushed-byte review of the open PRs, a leak audit covering
+the new Punting Form stack, and a read-only measurement of prod against
+every gate in §4 — was run on 2026-08-01. This section records where the
+data actually stands and the prerequisites that audit ADDED to the
+retrain. It supersedes any looser statement elsewhere in this document.
+
+### Measured accrual state (prod, 2026-08-01)
+
+| Gate | Requires | Accrued | What starts the clock |
+|---|---|---|---|
+| Snapshot odds for the retrain | 4–6 weeks of daily `tip_time` rows | **zero — `runner_odds_snapshots` does not exist** | merging #2 (creates the table) + deploy |
+| Shadow flag flips (#3, #11) | ≥5 clean race days of shadow JSONs | **zero** (writers unmerged) | merge + deploy |
+| Ledger settlement | daily settled rows | **zero** (`selection_ledger` exists, 0 rows) | merge + deploy + flag |
+| Tier promotion | 200+ settled bets per tier | FLAG 17, CONFIRMED 40, LOCK/CROWD_OVERRIDE 0 — frozen since 2026-04-18 | pipeline restart; multi-month at historical rates |
+| PF Phase C done-criterion | 2 consecutive green scheduled ingestion days | **zero** — no scheduled ingestion has ever run green | merging #28 + enabling the schedule |
+
+Results history is the one healthy input: 144,511 rows continuous through
+2026-07-31, with the Punting Form Phase B backfill (10,998 `pf%` rows,
+2026-06-30 → 2026-07-31, raw payloads archived) seamlessly covering the
+old provider's 2026-07-13 death. Nothing has written since — selections
+have been dead since 2026-04-19, so **no amount of running the current
+pipeline accrues retrain data; the clock starts at deploy and only
+there.** If the merge sessions and deploy land in the first week of
+August, the earliest defensible retrain is early-to-mid September. The PF
+wall (~31 days, sliding) keeps each un-ingested day recoverable for about
+a month — daily ingestion must restart before ~2026-08-28 to keep
+August's early dates safely inside the window.
+
+### Prerequisites the audit added to the retrain (all mechanical, none
+calendar-gated)
+
+1. **Track-alias dedup applied first** (PR #32's `--apply`, its own write
+   approval): 2,531 duplicated result rows would otherwise double races
+   inside the training window.
+2. **F-FORM-ASOF resolved CLEAN** (or its remediation landed): the PF
+   importers stamp `form_string` from `meeting_detail.last10` at import
+   time. If Punting Form regenerates `last10` as-of query time, every
+   PF-sourced training row embeds its own result in its own pace
+   features, and the 10,998 backfilled rows are tainted for training.
+   Verification is dispatched (read-only probe); until its verdict, the
+   retrain is blocked regardless of the calendar.
+3. **Pre-jump snapshot integrity merged** (PR #35, stacked on #2): the
+   snapshot table is append-only and capture fires on every `run_tips`
+   invocation, so a routine rerun of a past date wrote post-jump prices
+   as `tip_time`; the view now admits only provably pre-jump rows and
+   capture refuses post-jump writes. Without it, one rerun inside the
+   accrual window silently contaminates `tip_time_odds`.
+4. **Preflight gates the as-of profiles** (dispatched): `retrain_v2`
+   silently falls back to the leaking legacy `td_*` snapshot when
+   `track_distance_profiles_asof.json` is missing; `retrain_preflight.py`
+   gains a red gate so that fallback can never reach a promotion.
+
+### Standing rules the audit added (evaluation hygiene)
+
+- `backtest.py walk_forward_backtest` has a ZERO purge gap (vs 14d in the
+  production trainer) — its numbers are never quotable as evidence.
+- Franking/Elo are as-of-now by design: never replay the mc_api scoring
+  path over historical dates; retrospective mc_api numbers are inflated.
+- Betfair snapshot capture stays on `baseline`/`morning` kinds until a
+  pre-jump market-status guard exists; the PF Phase E accessors
+  (strike rates, ratings, speedmaps) have no as-of parameter and are
+  serve-time only — never inputs to historical feature building.
+
+**The retrain gate on one line:** #32 applied → F-FORM-ASOF CLEAN (or
+remediated) → #13, #14, #35 and the preflight as-of gate merged → deploy
+→ 4–6 weeks of green snapshot days → `retrain_preflight.py` green on
+both boards → the pre-registered §4 criteria decide, not judgment.
+
 ---
 
 ## 5. No data leakage — the inventory and the invariants
