@@ -53,7 +53,15 @@ def _sample_meet_card(date="2026-08-01"):
 
 
 def test_factory_default_and_unknown():
-    assert get_provider().name == "theracingapi"
+    import os
+    # Default moved to puntingform when The Racing API's upstream died.
+    override = os.environ.pop("RACING_DATA_PROVIDER", None)
+    try:
+        assert get_provider().name == "puntingform"
+    finally:
+        if override is not None:
+            os.environ["RACING_DATA_PROVIDER"] = override
+    assert get_provider("theracingapi").name == "theracingapi"
     assert get_provider("racing_api").name == "theracingapi"
     try:
         get_provider("nonexistent")
