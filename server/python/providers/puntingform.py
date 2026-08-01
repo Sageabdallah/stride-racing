@@ -59,6 +59,7 @@ class PuntingFormProvider(RacingDataProvider):
     def __init__(self):
         self._meet_info: Dict[str, Dict] = {}
         self._bridge_map: Optional[Dict[str, str]] = None
+        self._scratch_map: Optional[Dict] = None
         self._noted = set()
 
     def has_credentials(self) -> bool:
@@ -148,9 +149,31 @@ class PuntingFormProvider(RacingDataProvider):
             meets.append({"meet_id": str(meeting_id), "course": course})
         return meets
 
+    def _scratchings(self) -> Dict:
+        """(meetingId, raceNo, tabNo) -> deduction for every upcoming
+        scratching, fetched once per run. The feed is auxiliary: a failure
+        means the card goes out without LATE scratchings (declared-runner
+        flags from meeting_detail still apply), which beats no card at all —
+        so unlike meeting_detail, an error here is logged, not fatal."""
+        if self._scratch_map is None:
+            try:
+                items = pf_client.scratchings()
+            except pf_client.PFError as e:
+                self._note_once(
+                    "scratchings",
+                    f"scratchings feed unavailable — cards proceed without late scratchings: {e}")
+                items = []
+            self._scratch_map = {}
+            for s in items or []:
+                key = (str(s.get("meetingId")), safe_int(s.get("raceNo")),
+                       safe_int(s.get("tabNo")))
+                if None not in key[1:]:
+                    self._scratch_map[key] = s.get("deduction")
+        return self._scratch_map
+
     def fetch_detailed_races(self, meet_id: str, date_str: str, course: str) -> List[Dict]:
         bridge = self._bridge()
-        self._note_once("scratchings", "scratchings endpoint not yet pinned (DM-3)")
+        scratch_map = self._scratchings()
 
         info = self._meet_info.get(str(meet_id))
         if info is None:
@@ -189,7 +212,8 @@ class PuntingFormProvider(RacingDataProvider):
                 "race_number": race_number,
                 "race_status": self._absent("race_status"),
                 "state": self._take(track, ("state",), "state"),
-                "runners": [self._runner(r, bridge) for r in race.get("runners") or []],
+                "runners": [self._runner(r, bridge, scratch_map, str(meet_id), race_number)
+                            for r in race.get("runners") or []],
                 # Result-side fields: null on every pre-race card, as before.
                 "winning_time": None,
                 "winning_time_hundredths": None,
@@ -244,13 +268,17 @@ class PuntingFormProvider(RacingDataProvider):
 
     # ------------------------------------------------------------------
 
-    def _runner(self, r: Dict, bridge: Dict[str, str]) -> Dict:
+    def _runner(self, r: Dict, bridge: Dict[str, str], scratch_map: Dict = None,
+                meet_id: str = None, race_number: int = None) -> Dict:
         name = str(r.get("name") or r.get("runner") or "").strip()
         runner_id = r.get("runnerId")
         horse_id = bridge.get(norm_name(name))
         if not horse_id:
             # Genuinely new horse — same id rule as the results backfill.
             horse_id = f"pf{runner_id}" if runner_id not in (None, "") else None
+
+        scratch_key = (meet_id, race_number, safe_int(r.get("tabNo")))
+        late_scratched = bool(scratch_map) and scratch_key in scratch_map
 
         return {
             "horse_id": horse_id,
@@ -275,9 +303,13 @@ class PuntingFormProvider(RacingDataProvider):
             "position": None,
             "prize": None,
             "rating": self._take(r, ("rating",), "rating"),
-            # Scratchings feed folds in at DM-3; declared runners default to
-            # not-scratched, flagged (never deleted) once the feed lands.
-            "scratched": bool(r.get("scratched")),
+            # Scratched runners are FLAGGED, never deleted — downstream
+            # field-size logic needs to see them. Declared-runner flags come
+            # from meeting_detail; late scratchings from /Updates/Scratchings.
+            # scratch_deduction is additive (None unless the feed priced it) —
+            # the betting adjustment for future price logic.
+            "scratched": bool(r.get("scratched")) or late_scratched,
+            "scratch_deduction": scratch_map.get(scratch_key) if late_scratched else None,
             "sex": self._take(r, ("sex",), "sex"),
             "silk_url": self._absent("silk_url"),
             "sire": self._take(r, ("sire",), "sire"),
