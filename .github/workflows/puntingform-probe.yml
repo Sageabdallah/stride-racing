@@ -1,0 +1,36 @@
+# Punting Form API probe — Phase A of PUNTINGFORM_MIGRATION.md. Read-only:
+# prints Punting Form's own API reference into the run log and exercises
+# candidate endpoint shapes with the PUNTINGFORM_API_KEY secret. Punting Form
+# has no Betfair-style geo-wall, so this runs on GitHub-hosted runners.
+#
+# Push trigger is scoped to the migration branch + probe files only (GitHub
+# cannot dispatch a workflow that exists solely on a non-default branch);
+# once on main, the Run workflow button takes over.
+
+name: puntingform-probe
+
+on:
+  push:
+    branches: ["claude/betfair-keys-smoke-test-4yqny1"]
+    paths:
+      - "scripts/puntingform_probe.py"
+      - ".github/workflows/puntingform-probe.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: puntingform-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe Punting Form API
+        env:
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
+        run: python3 scripts/puntingform_probe.py

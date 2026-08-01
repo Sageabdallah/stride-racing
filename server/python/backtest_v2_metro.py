@@ -16,6 +16,12 @@ from collections import defaultdict
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+import roi_stats  # shared backtest statistics (roi-roadmap task 02)
+
+# Commission for net ROI: STRIDE_COMMISSION_RATE, default 0.08 until task 01's
+# settlement plumbing merges.
+COMMISSION = roi_stats.commission_rate_from_env()
+
 ENV_PATH = os.path.normpath(os.path.join(SCRIPT_DIR, os.pardir, os.pardir, ".env"))
 EXPLICIT_ENV = r"c:\Users\sagea\OneDrive\Desktop\Race-Analytics\Race-Analytics\.env"
 
@@ -309,6 +315,7 @@ def summarize_results(results, df):
     dates = sorted(df["race_date"].astype(str).unique())
 
     strategy_rows = []
+    stat_blocks = []
     for label, _ in STRATEGIES:
         bets = results[label]["bets"]
         n_bets = len(bets)
@@ -317,7 +324,26 @@ def summarize_results(results, df):
         returned = sum(STAKE * b["sp"] for b in bets if b["won"])
         pnl = returned - staked
         roi = (pnl / staked * 100) if staked else 0.0
-        strategy_rows.append({
+
+        # Full statistics block (CIs, drawdown, streaks, concentration,
+        # reportability) from the shared roi_stats module. CIs and
+        # reportability are on NET returns per the settlement contract.
+        won = [1 if b["won"] else 0 for b in bets]
+        odds = [b["sp"] for b in bets]
+        stats = roi_stats.summarise_bets(won, odds, commission=COMMISSION)
+        # roi/02 + roi/01 acceptance #3: net ROI at BOTH MBR rates, so the
+        # 8% vs 10% comparison falls out of one summary. CI/reportability
+        # above are computed at COMMISSION (0.08) per the settlement contract.
+        if n_bets:
+            stats["roi_net_8pct"] = round(float(np.mean(
+                roi_stats.per_bet_returns(won, odds, commission=0.08))) * 100.0, 2)
+            stats["roi_net_10pct"] = round(float(np.mean(
+                roi_stats.per_bet_returns(won, odds, commission=0.10))) * 100.0, 2)
+        else:
+            stats["roi_net_8pct"] = stats["roi_net_10pct"] = None
+        stat_blocks.append(stats)
+
+        row = {
             "label": label,
             "bets": n_bets,
             "wins": wins,
@@ -326,7 +352,15 @@ def summarize_results(results, df):
             "returned": returned,
             "pnl": pnl,
             "roi": roi,
-        })
+        }
+        row.update({k: stats[k] for k in (
+            "roi_gross", "roi_net", "roi_net_8pct", "roi_net_10pct",
+            "se", "ci95", "ci95_normal", "z",
+            "p_roi_le_zero", "max_drawdown", "max_losing_streak",
+            "expected_max_losing_streak", "roi_minus_top1", "roi_minus_top2",
+            "roi_minus_top3", "reportable", "reportable_status",
+            "reportable_reason", "bootstrap")})
+        strategy_rows.append(row)
 
     summary = {
         "date_from": dates[0] if dates else None,
@@ -335,7 +369,12 @@ def summarize_results(results, df):
         "runners": n_runners,
         "tracks": sorted(df["track"].unique().tolist()),
         "strategies": strategy_rows,
+        "commission_rate": COMMISSION,
     }
+    # Sweep labelling: >1 strategy on one window needs a selection-bias caveat.
+    mc = roi_stats.multi_comparison_block(stat_blocks)
+    if mc is not None:
+        summary["multi_comparison"] = mc
     if "norm_prob" in df.columns:
         summary["calibration"] = _compute_calibration_bins(df)
         summary["confidence_bands"] = _compute_confidence_bands(df)
@@ -354,7 +393,7 @@ def print_results(results, df):
     print(f"\n  Dates: {dates[0]} to {dates[-1]}")
     print(f"  Races: {n_races} | Runners: {n_runners}")
     print(f"  Tracks: {', '.join(sorted(df['track'].unique()))}")
-    print(f"  Staking: Flat ${STAKE} per bet")
+    print(f"  Staking: Flat ${STAKE} per bet | Net ROI/CI at {summary.get('commission_rate', 0)*100:.0f}% commission on winnings")
 
     date_track = df.groupby(["race_date", "track"]).agg(
         races=("race_number", "nunique"),
@@ -365,24 +404,28 @@ def print_results(results, df):
     for _, row in date_track.iterrows():
         print(f"  {str(row['race_date']):<12} {row['track']:<25} {row['races']:>5} {row['runners']:>7}")
 
-    print(f"\n\n  {'Strategy':<35} {'Bets':>5} {'Wins':>5} {'SR%':>7} {'Staked':>9} {'Return':>9} {'P&L':>10} {'ROI':>8}")
-    print(f"  {'-'*35} {'-'*5} {'-'*5} {'-'*7} {'-'*9} {'-'*9} {'-'*10} {'-'*8}")
+    print(f"\n\n  {'Strategy':<35} {'Bets':>5} {'Wins':>5} {'SR%':>7} {'Staked':>9} {'Return':>9} {'P&L':>10} {'ROI':>8}  {'ROI net':>8}  {'95% CI (net)':>18}  Status")
+    print(f"  {'-'*35} {'-'*5} {'-'*5} {'-'*7} {'-'*9} {'-'*9} {'-'*10} {'-'*8}  {'-'*8}  {'-'*18}  {'-'*13}")
 
-    for label, _ in STRATEGIES:
-        bets = results[label]["bets"]
-        n_bets = len(bets)
-        if n_bets == 0:
-            print(f"  {label:<35} {'0':>5} {'0':>5} {'—':>7} {'—':>9} {'—':>9} {'—':>10} {'—':>8}")
+    for row in summary["strategies"]:
+        label = row["label"]
+        if row["bets"] == 0:
+            print(f"  {label:<35} {'0':>5} {'0':>5} {'—':>7} {'—':>9} {'—':>9} {'—':>10} {'—':>8}  {'—':>8}  {'—':>18}  NOT_REPORTABLE")
             continue
+        ci = row.get("ci95") or [None, None]
+        ci_str = (f"[{ci[0]:+.1f}, {ci[1]:+.1f}]%"
+                  if None not in ci else "—")
+        net = row.get("roi_net")
+        net_str = f"{net:+.1f}%" if net is not None else "—"
+        print(f"  {label:<35} {row['bets']:>5} {row['wins']:>5} {row['strike_rate']:>6.1f}% "
+              f"${row['staked']:>7,} ${row['returned']:>7,.0f} ${row['pnl']:>+9,.0f} "
+              f"{row['roi']:>+7.1f}%  {net_str:>8}  {ci_str:>18}  {row['reportable_status']}")
 
-        wins = sum(1 for b in bets if b["won"])
-        sr = wins / n_bets * 100
-        staked = n_bets * STAKE
-        returned = sum(STAKE * b["sp"] for b in bets if b["won"])
-        pnl = returned - staked
-        roi = pnl / staked * 100
-
-        print(f"  {label:<35} {n_bets:>5} {wins:>5} {sr:>6.1f}% ${staked:>7,} ${returned:>7,.0f} ${pnl:>+9,.0f} {roi:>+7.1f}%")
+    mc = summary.get("multi_comparison")
+    if mc:
+        print(f"\n  MULTI-COMPARISON: {mc['n_strategies']} strategies on one window — "
+              f"Bonferroni requires z >= {mc['bonferroni_z_required']}, "
+              f"best observed z = {mc['best_observed_z']} ({mc['verdict']})")
 
     print("\n\n" + "=" * 80)
     print("  DETAILED BET LOG — All strategies")

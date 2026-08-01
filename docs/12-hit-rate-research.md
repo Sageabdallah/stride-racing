@@ -15,7 +15,8 @@ Related docs: [Scoring & output](09-scoring-and-output.md) ·
 
 The 2026-03→04 backtest shows the tension precisely: the model's top pick won
 **33.7%** of races but lost 4.2% at the prices it was offered, while the
-selective edge filter won only 9.9% of its bets at **+12.3% ROI**. Meanwhile
+selective edge filter won only 9.9% of its bets at **+12.3% gross ROI** — a
+band whose 95% CI ([−45, +62]%) spans zero, so it is NOT_REPORTABLE. Meanwhile
 the long-run Australian baseline is that the **market favourite wins ~34.9%**
 of races (second favourite ~19.8%, third ~13.5%).
 

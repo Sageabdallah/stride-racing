@@ -1,0 +1,68 @@
+# Punting Form results backfill — Phase B of PUNTINGFORM_MIGRATION.md.
+# Dry-run by default: fetches and maps but writes nothing until the commit
+# input is set to true. Time-critical: the Starter API only serves ~60 days
+# back, so the gap since The Racing API died must be imported before it ages
+# out. Raw payloads are archived into pf_raw_payloads on commit runs.
+#
+# Push trigger is scoped to this branch + these files for first registration
+# (GitHub cannot dispatch a workflow that exists solely on a non-default
+# branch); push runs are always dry runs of 3 days.
+
+name: pf-backfill
+
+on:
+  push:
+    branches: ["claude/betfair-keys-smoke-test-4yqny1"]
+    paths:
+      - "server/python/pf_client.py"
+      - "server/python/pf_backfill_results.py"
+      - ".github/workflows/pf-backfill.yml"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days back from end date"
+        default: "60"
+      end:
+        description: "Last (most recent) date ISO; empty = yesterday AEST"
+        default: ""
+      commit:
+        description: "Write to the database (false = dry run)"
+        type: choice
+        default: "false"
+        options: ["false", "true"]
+      metro_only:
+        description: "Metro tracks only"
+        type: choice
+        default: "false"
+        options: ["false", "true"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pf-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psycopg2
+        run: pip install --quiet psycopg2-binary
+      - name: Backfill from Punting Form
+        env:
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ inputs.days }}
+          END: ${{ inputs.end }}
+          COMMIT: ${{ inputs.commit }}
+          METRO: ${{ inputs.metro_only }}
+        run: |
+          ARGS="--days ${DAYS:-3}"
+          if [ -n "$END" ]; then ARGS="$ARGS --end $END"; fi
+          if [ "$COMMIT" = "true" ]; then ARGS="$ARGS --commit"; fi
+          if [ "$METRO" = "true" ]; then ARGS="$ARGS --metro-only"; fi
+          echo "running: pf_backfill_results.py $ARGS"
+          python3 server/python/pf_backfill_results.py $ARGS

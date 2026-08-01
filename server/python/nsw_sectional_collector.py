@@ -76,6 +76,7 @@ def track_match_score(left, right):
 
 
 from horse_names import normalize_horse_name, horse_name_match
+from pf_results_mapper import norm_name
 
 
 def get_db_connection():
@@ -251,9 +252,13 @@ def build_horse_sectionals(parsed):
         hid = inter['horse_id']
         if hid not in horse_data:
             horse_info = horses.get(hid, {})
+            # Never invent a placeholder name here: a missing .tol H record
+            # leaves the name as None and the write path (save_to_db)
+            # resolves it against race_results_history or skips the runner.
             horse_data[hid] = {
                 'horse_id': hid,
-                'horse_name': horse_info.get('name', f'Unknown_{hid}'),
+                'horse_name': horse_info.get('name') or None,
+                'finish_position': parsed.get('results', {}).get(hid),
                 'saddle_number': horse_info.get('saddle_number', 0),
                 'barrier': horse_info.get('barrier', 0),
                 'sections': {},
@@ -357,18 +362,94 @@ def match_to_race_history(conn, venue, race_date, race_number, horse_name):
     return best_match or fallback_match
 
 
+def is_placeholder_name(name):
+    """True for any name we must never store: empty/blank, or a literal
+    'Unknown...' placeholder. The write path resolves these against
+    race_results_history or skips the runner — a missing sectional is
+    retryable, a poisoned name is not."""
+    s = str(name or '').strip()
+    return not s or s.lower().startswith('unknown')
+
+
+def fetch_race_candidates(cur, race_date, race_number):
+    """race_results_history rows for one race (same date + race number,
+    any track spelling — track matched in Python)."""
+    cur.execute("""
+        SELECT id, horse_name, track, position, barrier
+        FROM race_results_history
+        WHERE race_date = %s AND race_number = %s
+    """, (race_date, race_number))
+    return cur.fetchall()
+
+
+def resolve_nameless_runner(cur, rec, claimed_keys):
+    """Resolve a nameless/placeholder runner to a race_results_history
+    horse_name for the same race. Returns (horse_name, rrh_id) or None.
+
+    Join keys, in order: finishing position (from the .tol R records /
+    '0m' split), then barrier number — both unique per runner per race.
+    (race_results_history carries no saddlecloth column, so the barrier
+    number is the tab-adjacent numeric available.) Candidates are first
+    narrowed to the best track-name match, and names already claimed by a
+    named runner in the same race are excluded via the mapper's norm_name
+    so one horse can never be assigned twice.
+    """
+    rows = fetch_race_candidates(cur, rec['race_date'], rec['race_number'])
+    if not rows:
+        return None
+    scored = [(track_match_score(rec['track'], r[2]), r) for r in rows]
+    best = max(s for s, _ in scored)
+    if best <= 0:
+        return None
+    cands = [r for s, r in scored
+             if s == best and norm_name(r[1]) not in claimed_keys]
+    finish_pos = rec.get('finish_position')
+    if finish_pos is None:
+        splits = rec.get('splits_json') or {}
+        finish_pos = (splits.get('0m') or {}).get('position')
+    if finish_pos is not None:
+        matches = [r for r in cands if r[3] == finish_pos]
+        if len(matches) == 1:
+            return matches[0][1], matches[0][0]
+    barrier = rec.get('barrier') or 0
+    if barrier:
+        matches = [r for r in cands if r[4] == barrier]
+        if len(matches) == 1:
+            return matches[0][1], matches[0][0]
+    return None
+
+
 def save_to_db(conn, records):
     if not records:
         return 0
 
     cur = conn.cursor()
     saved = 0
+    skipped_races = {}
+    claimed_by_race = {}
+    for rec in records:
+        key = (rec['track'], rec['race_date'], rec['race_number'])
+        if not is_placeholder_name(rec.get('horse_name')):
+            claimed_by_race.setdefault(key, set()).add(norm_name(rec['horse_name']))
 
     for rec in records:
         rec_id = str(uuid.uuid4())
+        key = (rec['track'], rec['race_date'], rec['race_number'])
         try:
             cur.execute("SAVEPOINT sec_row")
-            history_id = match_to_race_history(conn, rec['track'], rec['race_date'], rec['race_number'], rec['horse_name'])
+            horse_name = rec.get('horse_name')
+            history_id = None
+            if is_placeholder_name(horse_name):
+                claimed = claimed_by_race.setdefault(key, set())
+                resolved = resolve_nameless_runner(cur, rec, claimed)
+                if resolved is None:
+                    skipped_races.setdefault(key, []).append(rec.get('horse_id') or '?')
+                    cur.execute("RELEASE SAVEPOINT sec_row")
+                    continue
+                horse_name, history_id = resolved
+                claimed.add(norm_name(horse_name))
+            if history_id is None:
+                history_id = match_to_race_history(conn, rec['track'], rec['race_date'], rec['race_number'], horse_name)
 
             cur.execute("""
                 INSERT INTO sectional_times (
@@ -392,7 +473,7 @@ def save_to_db(conn, records):
                 rec['race_date'],
                 rec['race_number'],
                 rec.get('race_name', ''),
-                rec['horse_name'],
+                horse_name,
                 rec.get('saddle_number', 0),
                 rec.get('distance_m', 0),
                 rec.get('winning_time'),
@@ -414,9 +495,15 @@ def save_to_db(conn, records):
                 saved += 1
             cur.execute("RELEASE SAVEPOINT sec_row")
         except Exception as e:
-            print(f"  ERROR saving {rec['horse_name']}: {e}")
+            print(f"  ERROR saving {rec.get('horse_name') or rec.get('horse_id')}: {e}")
             cur.execute("ROLLBACK TO SAVEPOINT sec_row")
             continue
+
+    for (track, race_date, race_number), hids in sorted(skipped_races.items()):
+        print(f"  WARNING {race_date} {track} R{race_number}: skipped {len(hids)} nameless "
+              f"runner(s) (pidata horse ids: {', '.join(str(h) for h in hids)}) — "
+              f"unresolvable via race_results_history; race stays retryable, "
+              f"no placeholder rows written")
 
     conn.commit()
     return saved
@@ -460,6 +547,8 @@ def process_race(meta_entry, conn=None):
             'race_number': race_number,
             'race_name': race_name,
             'horse_name': hdata['horse_name'],
+            'finish_position': hdata.get('finish_position'),
+            'barrier': hdata.get('barrier', 0),
             'saddle_number': hdata.get('saddle_number', 0),
             'distance_m': int(distance),
             'winning_time': winner_time,
@@ -481,7 +570,7 @@ def process_race(meta_entry, conn=None):
         return save_to_db(conn, records)
     else:
         for rec in records:
-            print(f"    {rec['horse_name']}: L200 {rec.get('last_200m_time', 'N/A')}s @ {rec.get('last_200m_speed', 'N/A')} m/s")
+            print(f"    {rec['horse_name'] or '<unresolved>'}: L200 {rec.get('last_200m_time', 'N/A')}s @ {rec.get('last_200m_speed', 'N/A')} m/s")
         return len(records)
 
 
@@ -521,6 +610,8 @@ def process_race_worker(args):
                 'race_number': race_number,
                 'race_name': race_name,
                 'horse_name': hdata['horse_name'],
+                'finish_position': hdata.get('finish_position'),
+                'barrier': hdata.get('barrier', 0),
                 'saddle_number': hdata.get('saddle_number', 0),
                 'distance_m': int(distance),
                 'winning_time': winner_time,
