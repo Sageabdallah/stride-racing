@@ -151,10 +151,13 @@ plus the convergence stake recommendation (FULL/STANDARD/REDUCED/NONE) — see
 From `examples/backtest_summary.json` (352 metro races, 3,396 runners,
 2026-03-04 → 2026-04-18, flat $100 at SP):
 
-- **Value Edge ≥ 3% ($2–$15): 142 bets, 9.9% strike, +$1,750, +12.3% ROI** — the
-  validated live band.
-- Top Pick: 33.7% strike but −4.2% ROI — the model picks winners at favourite prices;
-  accuracy ≠ value. This asymmetry is exactly why the convergence and EV gates exist.
+- **Value Edge ≥ 3% ($2–$15): 142 bets, 9.9% strike, +$1,750, +12.3% gross ROI** —
+  the selective live band, but **NOT_REPORTABLE**: 95% CI [−45.1, +61.9]% spans zero
+  (z = 0.15; Bonferroni over 6 bands requires z ≥ 2.64), +4.1% net at 8% commission,
+  and removing its single best winner takes it to −5.0%.
+- Top Pick: 33.7% strike but −4.2% gross ROI (95% CI [−23.4, +5.6]%) — the model
+  picks winners at favourite prices; accuracy ≠ value. This asymmetry is exactly why
+  the convergence and EV gates exist.
 - Calibration: Brier 0.0834; the 0.10–0.20 bin is nearly perfect (predicted 0.144 vs
   observed 0.151); the 0.20–0.30 bin under-predicts (0.231 vs 0.328) —
   high-confidence picks win *more* often than stated.
