@@ -18,8 +18,10 @@ here:
     trials/unplaced exclusion (barrier-trial meetings filtered at the
     meeting level; scratched/no-position runners dropped at the runner
     level).
-  * the (race_date, lower(track), race_number) skip-if-existing dedup
-    predicate (load_existing_keys + row_race_key).
+  * the (race_date, canonical_track_key(track), race_number)
+    skip-if-existing dedup predicate (load_existing_keys + row_race_key) —
+    the stored track column keeps the source spelling; only the key
+    canonicalises, closing the F-TRACK-ALIAS double-insert hole.
   * the pf_raw_payloads archival insert (archive_payloads) — every fetched
     payload lands in the archive before the row insert, in the same
     transaction; the Starter subscription only serves ~31 days back, so this
@@ -64,6 +66,105 @@ def norm_name(name):
     '(NZ)', letters+digits only."""
     s = re.sub(r"\([A-Z]{2,3}\)\s*$", "", str(name or "").strip())
     return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+# --------------------------------------------------------- track canonical
+
+# Track-name aliases for the DEDUP KEY ONLY (the stored track column keeps
+# the source spelling). Single-sourced here (moved from
+# auto_results_collector.py, which imports it back); two research scripts
+# under server/python/research/ keep their own copies.
+#
+# Keys are normalised (lowercase, letters+digits only). Targets are the
+# canonical key for one physical track. Entries fall in two groups:
+#   1. the collector's pre-existing map (behaviour pinned, do not re-target);
+#   2. F-TRACK-ALIAS additions — each cites its K5 evidence pair (the
+#      doubled meetings pf_trust_checks.py measured 2026-08-01 on the
+#      2026-06-30..07-13 overlap). Explicit entries ONLY: a false-positive
+#      merge of two real distinct tracks corrupts more than a missed
+#      alias. Targets are never themselves keys (the map is idempotent).
+TRACK_ALIASES = {
+    # --- group 1: pre-existing collector map (pinned) ---
+    "rosehill": "rosehillgardens",
+    "rosehillgardens": "rosehillgardens",
+    "ascot": "ascotwa",
+    "ascotwa": "ascotwa",
+    "randwick": "randwick",
+    # K5 pair: PF 'Randwick' vs old 'Royal Randwick' (1 day)
+    "royalrandwick": "randwick",
+    "kensington": "kensington",
+    "flemington": "flemington",
+    "morphettville": "morphettville",
+    "morphettvilleparks": "morphettville",
+    "doomben": "doomben",
+    "eaglefarm": "eaglefarm",
+    "caulfield": "caulfield",
+    "mrc": "caulfield",
+    "mooneevalley": "mooneevalley",
+    "sandownhillside": "sandownhillside",
+    "sandownlakeside": "sandownlakeside",
+    "sandown": "sandownhillside",
+    "bendigo": "bendigo",
+    "ballarat": "ballarat",
+    "geelong": "geelong",
+    "pakenham": "pakenham",
+    "cranbourne": "cranbourne",
+    # --- group 2: F-TRACK-ALIAS, K5-measured pairs (2026-08-01) ---
+    # K5 pair: PF 'Bairnsdale' vs old 'bet365 Bairnsdale' (1 day)
+    "bet365bairnsdale": "bairnsdale",
+    # K5 pair: PF 'Ballarat Synthetic' vs old 'Sportsbet-Ballarat Synthetic'
+    # (4 days). NOTE: K5 also listed 'Ballarat' vs 'Sportsbet-Ballarat
+    # Synthetic' for 2026-07-12 — a greedy-matching artifact: that day's old
+    # rows have field sizes identical race-by-race to PF's SYNTHETIC meeting
+    # (the turf meeting was never resulted), so the map below is correct and
+    # 'ballarat' must NOT alias to 'ballaratsynthetic' (distinct tracks).
+    "sportsbetballaratsynthetic": "ballaratsynthetic",
+    # K5 pair: PF 'Beaudesert' vs old 'Aquis Beaudesert' (1 day)
+    "aquisbeaudesert": "beaudesert",
+    # K5 pair: PF 'Belmont Park' vs old 'Belmont' (4 days)
+    "belmont": "belmontpark",
+    # K5 pair: PF 'Canterbury' vs old 'Canterbury Park' (1 day)
+    "canterburypark": "canterbury",
+    # K5 pair: PF 'Devonport Synthetic' vs old 'Devonport Tapeta Synthetic' (1 day)
+    "devonporttapetasynthetic": "devonportsynthetic",
+    # K5 pair: PF 'Fannie Bay' vs old 'Darwin' (3 days)
+    "darwin": "fanniebay",
+    # K5 pair: PF 'Geelong' vs old 'Ladbrokes Geelong' (1 day)
+    "ladbrokesgeelong": "geelong",
+    # K5 pair: PF 'Gold Coast' vs old 'Aquis Park Gold Coast' (2 days).
+    # 'Aquis Park Gold Coast Poly' is a DISTINCT synthetic track — no entry.
+    "aquisparkgoldcoast": "goldcoast",
+    # K5 pair: PF 'Hamilton' vs old 'bet365 Hamilton' (1 day)
+    "bet365hamilton": "hamilton",
+    # K5 pair: PF 'Mt Gambier' vs old 'Mount Gambier' (1 day)
+    "mountgambier": "mtgambier",
+    # K5 pair: PF 'Mt Isa' vs old 'Sportsbet Mount Isa' (1 day)
+    "sportsbetmountisa": "mtisa",
+    # K5 pair: PF 'Murray Bridge GH' vs old 'Thomas Farms RC Murray Bridge' (3 days)
+    "thomasfarmsrcmurraybridge": "murraybridgegh",
+    # K5 pair: PF 'Pakenham Synthetic' vs old 'Southside Pakenham Synthetic' (1 day)
+    "southsidepakenhamsynthetic": "pakenhamsynthetic",
+    # K5 pair: PF 'Pinjarra' vs old 'Pinjarra Park' (1 day).
+    # 'Pinjarra Scarpside' is a DISTINCT track — no entry.
+    "pinjarrapark": "pinjarra",
+    # K5 pair: PF 'Pioneer Park' vs old 'Ladbrokes Pioneer Park' (2 days)
+    "ladbrokespioneerpark": "pioneerpark",
+    # K5 pair: PF 'Randwick-Kensington' vs old 'Kensington' (1 day)
+    "randwickkensington": "kensington",
+    # K5 pair: PF 'Sandown-Lakeside' vs old 'Sportsbet Sandown Lakeside' (2 days)
+    "sportsbetsandownlakeside": "sandownlakeside",
+    # K5 pair: PF 'Wangaratta' vs old 'Sportsbet-Wangaratta' (1 day)
+    "sportsbetwangaratta": "wangaratta",
+}
+
+
+def canonical_track_key(value):
+    """Canonical track key for DEDUP/MATCHING ONLY — the stored track
+    column keeps the source spelling. Normalise (lowercase, letters+digits
+    only) then apply the explicit TRACK_ALIASES map; unknown tracks pass
+    through normalised. Idempotent: alias targets are never alias keys."""
+    text = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+    return TRACK_ALIASES.get(text, text)
 
 
 def parse_class_level(rc):
@@ -156,18 +257,22 @@ def is_metro_track(name):
 # ------------------------------------------------------------- DB helpers
 
 def load_existing_keys(cur, dates):
-    """The dedup set: (race_date::text, lower(track), race_number) for every
-    row already in race_results_history on the given ISO dates."""
+    """The dedup set: (race_date::text, canonical_track_key(track),
+    race_number) for every row already in race_results_history on the given
+    ISO dates. The raw track is projected and canonicalised here in Python —
+    the canonical map is explicit and never lives in SQL."""
     cur.execute("""
-        SELECT race_date::text, LOWER(track), race_number
+        SELECT race_date::text, track, race_number
         FROM race_results_history WHERE race_date = ANY(%s)
     """, (list(dates),))
-    return {(r[0], r[1], r[2]) for r in cur.fetchall()}
+    return {(r[0], canonical_track_key(r[1]), r[2]) for r in cur.fetchall()}
 
 
 def row_race_key(row):
-    """The dedup key of one mapped 21-column row."""
-    return (row[4], str(row[3]).lower(), row[18])
+    """The dedup key of one mapped 21-column row: (race_date,
+    canonical_track_key(track), race_number). The STORED track column keeps
+    the source spelling — only the key canonicalises."""
+    return (row[4], canonical_track_key(row[3]), row[18])
 
 
 # The SELECT projects the ORIGINAL-case horse_name so norm_name can strip an

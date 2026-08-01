@@ -130,6 +130,35 @@ caret-delimited CSV service remains available as a fallback shape.
 - **Done when:** discrepancy rate is quantified and either negligible or
   explained in this file.
 
+### F-TRACK-ALIAS — repair status (DM-G2, 2026-08-01)
+
+K5 (on `pf/trust-checks`) measured the doubles; G2 shipped the fix:
+
+- **Future-ingest hole CLOSED:** `canonical_track_key` is single-sourced
+  in `pf_results_mapper` (consolidated from `auto_results_collector.py`,
+  which imports it back; explicit K5-evidenced alias entries only, each
+  citing its measured pair) and the dedup key
+  (`load_existing_keys`/`row_race_key`) now canonicalises. The stored
+  `track` column keeps the source spelling — only the key canonicalises.
+- **Existing doubles REPORTED** (`pf_track_dedup.py`, read-only run
+  2026-08-01): **257 doubled race-days (34 doubled meeting-days — matches
+  K5's ~40), 257 duplicate row-sets, 2,531 rows to delete.** Every doomed
+  set is a `pf%` race_id set; every survivor is the old-pipeline
+  (`met_aus_*`) set; the 10-double eyeball shows identical runner names on
+  both sides. Note: K5's `Ballarat` vs `Sportsbet-Ballarat Synthetic`
+  2026-07-12 pair was a matching artifact — that day's old rows are the
+  SYNTHETIC meeting (field sizes identical race-by-race to PF's synthetic
+  card), so `ballarat` and `ballaratsynthetic` stay distinct keys and the
+  report correctly pairs the old rows with the synthetic PF rows.
+- **`--apply` PENDING the operator's separate explicit prod WRITE
+  approval** (two-gate rule; never run in CI). Single transaction; every
+  deleted row pre-imaged to `pf_track_dedup_backup` (row as jsonb,
+  deleted_at) before any delete; idempotent (second apply = zero deletes).
+  Operator command:
+  `DATABASE_URL=... python3 server/python/pf_track_dedup.py --apply`
+- [ ] [C] `--apply` executed by operator; re-run report shows zero
+      doubles; this box ticked with the run date.
+
 ## Phase E — feature uplift (flags + walk-forward evidence only)
 
 Ranked by expected value; each behind its own flag, promoted only on
