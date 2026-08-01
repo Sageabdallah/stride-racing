@@ -253,3 +253,29 @@ class TestBatchedImport:
 
     def test_empty_records_short_circuit(self):
         assert rc.import_to_database([], "postgres://x") == (0, 0)
+
+
+class TestSplitDistanceTypes:
+    """The feed types split distances inconsistently; a raw subtraction cost
+    a whole meeting ('bet365 Camperdown', 2024-02-06)."""
+
+    def _entry(self, dist):
+        return {"splitTimes": [{"distance": dist, "time": "23.5"}]}
+
+    def test_string_distance_does_not_raise(self):
+        out = rc.extract_split_data(self._entry("1000"), 1400)
+        assert isinstance(out, dict)
+
+    def test_string_and_int_distances_agree(self):
+        as_str = rc.extract_split_data(self._entry("1000"), 1400)
+        as_int = rc.extract_split_data(self._entry(1000), 1400)
+        assert as_str.get("last_400m_time") == as_int.get("last_400m_time")
+        assert as_str.get("last_400m_time") is not None   # 1400-400 = 1000
+
+    def test_junk_distance_is_ignored_not_fatal(self):
+        assert isinstance(rc.extract_split_data(self._entry("n/a"), 1400), dict)
+        assert isinstance(rc.extract_split_data(self._entry(None), 1400), dict)
+
+    def test_800m_site_also_handles_strings(self):
+        out = rc.extract_split_data(self._entry("600"), 1400)   # 1400-800 = 600
+        assert out.get("last_800m_time") is not None

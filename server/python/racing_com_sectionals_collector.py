@@ -292,7 +292,9 @@ def extract_split_data(entry, race_distance):
 
     if not last_400m_time and splits:
         for s in splits:
-            d = s.get("distance", 0)
+            # The feed sometimes types split distances as strings; raw
+            # subtraction below would raise and lose the whole meeting.
+            d = parse_distance(s.get("distance"))
             if d and race_distance and abs(d - (race_distance - 400)) < 50:
                 t_val = s.get("time")
                 if t_val:
@@ -303,7 +305,9 @@ def extract_split_data(entry, race_distance):
 
     if not last_800m_time and splits:
         for s in splits:
-            d = s.get("distance", 0)
+            # The feed sometimes types split distances as strings; raw
+            # subtraction below would raise and lose the whole meeting.
+            d = parse_distance(s.get("distance"))
             if d and race_distance and abs(d - (race_distance - 800)) < 50:
                 t_val = s.get("time")
                 if t_val:
