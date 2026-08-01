@@ -14,6 +14,12 @@ The criteria, and where each comes from:
   roi_significance  the ROI bootstrap CI must not span zero. A CI that
                     straddles zero is not a weak result, it is NO result, and
                     it is reported as NOT REPORTABLE rather than as a loss.
+                    A CI that excludes zero but sits entirely BELOW it is a
+                    significant LOSS (HOLD), caught by roi_positive below.
+  roi_positive      for ROI/BOTH tickets whose CI excludes zero, the CI must
+                    exclude it ABOVE zero. A CI entirely below zero is a
+                    measured, significant loss — HOLD, never a promotion,
+                    even when the candidate improves on a worse baseline.
   lever_direction   the change must move the lever it claimed. A ROI ticket
                     that only moved strike rate did not do what it said.
   other_lever       the other lever may not regress by more than the tolerance.
@@ -115,6 +121,19 @@ def evaluate_ship_criteria(
         add("roi_significance", not spans,
             "CI spans zero — no measurable effect" if spans
             else "CI excludes zero")
+
+    # A CI that excludes zero must exclude it ABOVE, not below. 'not spans_zero'
+    # alone is also satisfied by a CI entirely BELOW zero (a significant LOSS); such
+    # a candidate must never SHIP even if it improves on a worse baseline. Only for
+    # ROI/BOTH tickets; a spanning CI is already NOT_REPORTABLE above.
+    if lever in ("ROI", "BOTH") and spans is False:
+        positive = roi_stats.ci_is_positive(candidate.get("roi_ci95_bootstrap"))
+        if positive is None:
+            add("roi_positive", None, "ROI CI excludes zero but its bounds are unreadable")
+        else:
+            add("roi_positive", positive,
+                "ROI CI lower bound above zero — a significant win" if positive
+                else "ROI CI entirely below zero — a significant loss, not a promotion")
 
     # --- lever direction ---------------------------------------------------
     b_roi, c_roi = _get(baseline, "roi_pct"), _get(candidate, "roi_pct")
@@ -286,6 +305,20 @@ def _self_test():
     r_loss = evaluate_ship_criteria(base, loser, "ROI")
     assert r_loss["verdict"] == HOLD and "lever_direction_roi" in r_loss["failed"], r_loss
     print("  roi_stats consistency: is_reportable agrees; significant loss -> HOLD")
+
+    # A candidate whose own ROI CI is entirely BELOW zero must HOLD, never SHIP,
+    # even when it improves on an even-worse baseline. (The pre-fix hole: 'not
+    # spans_zero' passed roi_significance and the improving lever let it SHIP a loser.)
+    worse_base = {"n_bets": 900, "roi_pct": -10.0, "strike_rate": 0.337,
+                  "brier": 0.128000, "mean_clv_pct": 0.0,
+                  "roi_ci95_bootstrap": {"ci_95": [-14.0, -6.0], "spans_zero": False}}
+    still_losing = {"n_bets": 880, "roi_pct": -5.0, "strike_rate": 0.341,
+                    "brier": 0.126000, "mean_clv_pct": 0.8,
+                    "roi_ci95_bootstrap": {"ci_95": [-9.0, -1.0], "spans_zero": False},
+                    "max_drawdown": 1800.0}
+    r_below = evaluate_ship_criteria(worse_base, still_losing, "ROI")
+    assert r_below["verdict"] == HOLD and "roi_positive" in r_below["failed"], r_below
+    print("  improves on a worse baseline but ROI CI still below zero -> HOLD (not SHIP)")
 
     # Right direction on the lever, but the other lever collapses.
     tradeoff = {**good, "strike_rate": 0.240}

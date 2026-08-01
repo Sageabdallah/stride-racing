@@ -249,17 +249,31 @@ def ci_spans_zero(ci: Any) -> Optional[bool]:
     return None
 
 
+def ci_lower_bound(ci: Any) -> Optional[float]:
+    """Lower bound of a 95% CI. Accepts a roi_ci/harness dict or a bare
+    [lo, hi] pair. None when no usable CI is present."""
+    if isinstance(ci, dict):
+        ci = ci.get('ci95', ci.get('ci_95'))
+    if isinstance(ci, (list, tuple)) and len(ci) == 2 and None not in ci:
+        return float(ci[0])
+    return None
+
+
+def ci_is_positive(ci: Any) -> Optional[bool]:
+    """Is the CI entirely above zero (lower bound > 0 — a significant win)?
+    None when no usable CI. Reads the bounds, NOT any 'spans_zero' flag, so it
+    distinguishes a below-zero CI from an above-zero one."""
+    lo = ci_lower_bound(ci)
+    return None if lo is None else lo > 0.0
+
+
 def is_reportable(ci95: Any, n_bets: Optional[int],
                   min_bets: int = MIN_BETS_REPORTABLE) -> bool:
     """The reportability floor: lower CI bound > 0 AND bets >= min_bets."""
     if n_bets is None or n_bets < min_bets:
         return False
-    if isinstance(ci95, dict):
-        ci95 = ci95.get('ci95', ci95.get('ci_95'))
-    if not (isinstance(ci95, (list, tuple)) and len(ci95) == 2
-            and None not in ci95):
-        return False
-    return float(ci95[0]) > 0.0
+    lo = ci_lower_bound(ci95)
+    return lo is not None and lo > 0.0
 
 
 def summarise_bets(won: Sequence[float], odds: Sequence[float],
