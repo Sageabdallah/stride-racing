@@ -1,0 +1,278 @@
+# Scheduled sectional-times collection (DM-H5) — two weekly windows:
+#   Sunday  night (covers Saturday's races) and Wednesday night (covers
+#   midweek). Sectionals publish within a few days of the race; each run
+#   collects a TRAILING 4-day window, so a missed run self-heals on the
+#   next one. All three collectors are idempotent (dedup via pre-check +
+#   ON CONFLICT DO NOTHING) — re-runs insert zero for already-known races.
+#
+# Cron is UTC: 11:00 UTC = 21:00 AEST (winter) / 22:00 AEDT (summer).
+# The local-time intent is 21:00 AEST.
+#
+# Runner placement (probe run 30701636023, 2026-08-01, net-probe.yml with
+# runner=both): NSW pidata, Racing QLD CSV, and the racing.com GraphQL edge
+# all answered identically from GitHub-hosted (US IP) and the self-hosted
+# syd runner — no geo/bot block — so jobs stay on ubuntu-latest and the
+# self-hosted box stays idle for Betfair. CAVEAT: the probe used a browser
+# UA; the QLD collector sends "Mozilla/5.0 (compatible; RacingAnalytics/1.0)".
+# To keep a Cloudflare block loud, the collector prints anti-bot challenge
+# diagnoses even on the non-verbose backfill path (architect-sanctioned
+# one-line exception to the zero-collector-change constraint, DM-H5) and
+# the qld job greps its log for "anti-bot challenge" — red with the fix
+# (move the job to runs-on: [self-hosted, syd]).
+#
+# Gates: each job snapshots its source's row count BEFORE collecting and
+# goes red if the run lands ZERO new rows (per-run delta — a window-wide
+# count was rejected in review: sectional_times.race_date is TEXT, and an
+# overlapping window lets a dead Wednesday run pass on Sunday's rows).
+# A same-day idempotent re-dispatch can legitimately show zero; the error
+# message says so. Informational window coverage uses the prod-verified
+# regex-guarded cast (race_date ~ '^\d{4}-\d{2}-\d{2}' before ::date).
+#
+# Secrets: DATABASE_URL (required, guarded per job). RACING_COM_API_KEY
+# does NOT exist in repo secrets as of 2026-08-01 — see the racing-com job.
+#
+# No push trigger, deliberately: the pf-* siblings carry a branch-scoped
+# push trigger for first registration, but every run of THESE collectors
+# writes to the prod sectional_times table, so this workflow only runs on
+# its crons or an explicit dispatch (registration happens at merge).
+
+name: sectional-schedules
+
+on:
+  schedule:
+    - cron: "0 11 * * 0"  # Sunday 21:00 AEST (22:00 AEDT) — Saturday's races
+    - cron: "0 11 * * 3"  # Wednesday 21:00 AEST (22:00 AEDT) — midweek
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Trailing collection window in days"
+        required: false
+        default: "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sectional-schedules
+  cancel-in-progress: false
+
+jobs:
+  nsw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psycopg2
+        run: pip install --quiet psycopg2-binary
+      - name: Snapshot pre-run NSW row count
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import os, psycopg2
+          cur = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
+          cur.execute("SELECT COUNT(*) FROM sectional_times WHERE source='nsw_pidata'")
+          n = cur.fetchone()[0]
+          print(f"pre-run nsw_pidata rows: {n}")
+          open("pre_count.txt", "w").write(str(n))
+          EOF
+      - name: Collect NSW sectionals (pidata, trailing window)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ inputs.days || '4' }}
+        run: |
+          set -o pipefail
+          python3 server/python/nsw_sectional_collector.py --days "$DAYS" 2>&1 | tee nsw_sectionals.log
+      - name: Gate — this run landed new NSW rows
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ inputs.days || '4' }}
+        run: |
+          python3 - <<'EOF'
+          import os, psycopg2
+          days = int(os.environ.get("DAYS") or "4")
+          pre = int(open("pre_count.txt").read())
+          cur = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
+          cur.execute("SELECT COUNT(*) FROM sectional_times WHERE source='nsw_pidata'")
+          post = cur.fetchone()[0]
+          print(f"nsw_pidata rows: pre-run {pre}, post-run {post}, delta {post - pre}")
+          # Informational window coverage (race_date is TEXT — regex-guarded
+          # cast, verified against prod 2026-08-01).
+          cur.execute(
+              r"SELECT COUNT(*) FROM sectional_times WHERE source='nsw_pidata' "
+              r"AND race_date ~ '^\d{4}-\d{2}-\d{2}' AND race_date::date >= CURRENT_DATE - %s",
+              (days,),
+          )
+          print(f"nsw_pidata rows in trailing {days}-day window: {cur.fetchone()[0]}")
+          if post <= pre:
+              print("::error::This run inserted ZERO new nsw_pidata rows. A scheduled "
+                    "Sunday/Wednesday window always contains fresh race days, so zero means "
+                    "the collector silently failed (source blocked, schema drift, fetch "
+                    "failure). A same-day idempotent re-dispatch can also show zero — check "
+                    "the collect log before dismissing.")
+              raise SystemExit(1)
+          EOF
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## NSW sectionals (pidata)"
+            echo '```'
+            tail -n 25 nsw_sectionals.log 2>/dev/null || echo "(no log produced)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  qld:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psycopg2
+        run: pip install --quiet psycopg2-binary
+      - name: Snapshot pre-run QLD row count
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import os, psycopg2
+          cur = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
+          cur.execute("SELECT COUNT(*) FROM sectional_times WHERE source='racing_qld'")
+          n = cur.fetchone()[0]
+          print(f"pre-run racing_qld rows: {n}")
+          open("pre_count.txt", "w").write(str(n))
+          EOF
+      - name: Collect QLD sectionals (Racing QLD CSV, trailing window)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ inputs.days || '4' }}
+        run: |
+          set -o pipefail
+          python3 server/python/sectional_times_collector.py --backfill --days "$DAYS" 2>&1 | tee qld_sectionals.log
+          # The collector prints anti-bot diagnoses even on the non-verbose
+          # backfill path (sanctioned DM-H5 exception) — both its challenge
+          # strings contain "anti-bot challenge".
+          if grep -q "anti-bot challenge" qld_sectionals.log; then
+            echo "::error::Racing QLD served an anti-bot challenge to this runner — move the qld job to runs-on: [self-hosted, syd] (see header comment)."
+            exit 1
+          fi
+      - name: Gate — this run landed new QLD rows
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ inputs.days || '4' }}
+        run: |
+          python3 - <<'EOF'
+          import os, psycopg2
+          days = int(os.environ.get("DAYS") or "4")
+          pre = int(open("pre_count.txt").read())
+          cur = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
+          cur.execute("SELECT COUNT(*) FROM sectional_times WHERE source='racing_qld'")
+          post = cur.fetchone()[0]
+          print(f"racing_qld rows: pre-run {pre}, post-run {post}, delta {post - pre}")
+          cur.execute(
+              r"SELECT COUNT(*) FROM sectional_times WHERE source='racing_qld' "
+              r"AND race_date ~ '^\d{4}-\d{2}-\d{2}' AND race_date::date >= CURRENT_DATE - %s",
+              (days,),
+          )
+          print(f"racing_qld rows in trailing {days}-day window: {cur.fetchone()[0]}")
+          if post <= pre:
+              print("::error::This run inserted ZERO new racing_qld rows. A scheduled "
+                    "Sunday/Wednesday window always contains fresh race days, so zero means "
+                    "the collector silently failed (source blocked, schema drift, fetch "
+                    "failure). A same-day idempotent re-dispatch can also show zero — check "
+                    "the collect log before dismissing.")
+              raise SystemExit(1)
+          EOF
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## QLD sectionals (Racing QLD CSV)"
+            echo '```'
+            tail -n 25 qld_sectionals.log 2>/dev/null || echo "(no log produced)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # DISABLED — MISSING SECRET: the racing.com GraphQL collector authenticates
+  # with an x-api-key header read from RACING_COM_API_KEY, which exists in NO
+  # repository secret as of 2026-08-01, and the collector sends an empty key
+  # SILENTLY (every request just fails). Rather than run a guaranteed-empty
+  # job, it is parked here fully wired: to enable, add the RACING_COM_API_KEY
+  # repository secret and delete the `if: false` line.
+  racing-com:
+    if: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psycopg2
+        run: pip install --quiet psycopg2-binary
+      - name: Snapshot pre-run racing.com row count
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Repository secret DATABASE_URL is not set."
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import os, psycopg2
+          cur = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
+          cur.execute("SELECT COUNT(*) FROM sectional_times WHERE source='racing_com'")
+          n = cur.fetchone()[0]
+          print(f"pre-run racing_com rows: {n}")
+          open("pre_count.txt", "w").write(str(n))
+          EOF
+      - name: Collect VIC/SA sectionals (racing.com GraphQL, trailing window)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RACING_COM_API_KEY: ${{ secrets.RACING_COM_API_KEY }}
+          DAYS: ${{ inputs.days || '4' }}
+        run: |
+          set -o pipefail
+          if [ -z "${RACING_COM_API_KEY}" ]; then
+            echo "::error::Repository secret RACING_COM_API_KEY is not set — the collector fails silently without it."
+            exit 1
+          fi
+          python3 server/python/racing_com_sectionals_collector.py --backfill --days "$DAYS" 2>&1 | tee racing_com_sectionals.log
+      - name: Gate — this run landed new racing.com rows
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ inputs.days || '4' }}
+        run: |
+          python3 - <<'EOF'
+          import os, psycopg2
+          days = int(os.environ.get("DAYS") or "4")
+          pre = int(open("pre_count.txt").read())
+          cur = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
+          cur.execute("SELECT COUNT(*) FROM sectional_times WHERE source='racing_com'")
+          post = cur.fetchone()[0]
+          print(f"racing_com rows: pre-run {pre}, post-run {post}, delta {post - pre}")
+          cur.execute(
+              r"SELECT COUNT(*) FROM sectional_times WHERE source='racing_com' "
+              r"AND race_date ~ '^\d{4}-\d{2}-\d{2}' AND race_date::date >= CURRENT_DATE - %s",
+              (days,),
+          )
+          print(f"racing_com rows in trailing {days}-day window: {cur.fetchone()[0]}")
+          if post <= pre:
+              print("::error::This run inserted ZERO new racing_com rows — bad key, source "
+                    "blocked, or silent fetch failure (a same-day idempotent re-dispatch can "
+                    "also show zero — check the collect log before dismissing).")
+              raise SystemExit(1)
+          EOF
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## VIC/SA sectionals (racing.com GraphQL)"
+            echo '```'
+            tail -n 25 racing_com_sectionals.log 2>/dev/null || echo "(no log produced)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
