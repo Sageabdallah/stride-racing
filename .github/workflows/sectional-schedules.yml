@@ -104,15 +104,20 @@ jobs:
           # cast, verified against prod 2026-08-01).
           cur.execute(
               r"SELECT COUNT(*) FROM sectional_times WHERE source='nsw_pidata' "
-              r"AND race_date ~ '^\d{4}-\d{2}-\d{2}' AND race_date::date >= CURRENT_DATE - %s",
+              # race_date is TEXT and holds occasional malformed values, so
+              # never cast it: ISO-8601 strings already sort chronologically,
+              # and a text comparison cannot raise on '3939-01-01' or junk.
+              r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+              r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
               (days,),
           )
           print(f"nsw_pidata rows in trailing {days}-day window: {cur.fetchone()[0]}")
           if post <= pre:
               print("::error::This run inserted ZERO new nsw_pidata rows. A scheduled "
-                    "Sunday/Wednesday window always contains fresh race days, so zero means "
+                    "window normally contains fresh race days, so zero usually means "
                     "the collector silently failed (source blocked, schema drift, fetch "
-                    "failure). A same-day idempotent re-dispatch can also show zero — check "
+                    "failure). Benign zeros: a same-day idempotent re-dispatch, or no "
+                    "meetings at all on this window's new days — check "
                     "the collect log before dismissing.")
               raise SystemExit(1)
           EOF
@@ -178,15 +183,20 @@ jobs:
           print(f"racing_qld rows: pre-run {pre}, post-run {post}, delta {post - pre}")
           cur.execute(
               r"SELECT COUNT(*) FROM sectional_times WHERE source='racing_qld' "
-              r"AND race_date ~ '^\d{4}-\d{2}-\d{2}' AND race_date::date >= CURRENT_DATE - %s",
+              # race_date is TEXT and holds occasional malformed values, so
+              # never cast it: ISO-8601 strings already sort chronologically,
+              # and a text comparison cannot raise on '3939-01-01' or junk.
+              r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+              r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
               (days,),
           )
           print(f"racing_qld rows in trailing {days}-day window: {cur.fetchone()[0]}")
           if post <= pre:
               print("::error::This run inserted ZERO new racing_qld rows. A scheduled "
-                    "Sunday/Wednesday window always contains fresh race days, so zero means "
+                    "window normally contains fresh race days, so zero usually means "
                     "the collector silently failed (source blocked, schema drift, fetch "
-                    "failure). A same-day idempotent re-dispatch can also show zero — check "
+                    "failure). Benign zeros: a same-day idempotent re-dispatch, or no "
+                    "meetings at all on this window's new days — check "
                     "the collect log before dismissing.")
               raise SystemExit(1)
           EOF
@@ -257,7 +267,11 @@ jobs:
           print(f"racing_com rows: pre-run {pre}, post-run {post}, delta {post - pre}")
           cur.execute(
               r"SELECT COUNT(*) FROM sectional_times WHERE source='racing_com' "
-              r"AND race_date ~ '^\d{4}-\d{2}-\d{2}' AND race_date::date >= CURRENT_DATE - %s",
+              # race_date is TEXT and holds occasional malformed values, so
+              # never cast it: ISO-8601 strings already sort chronologically,
+              # and a text comparison cannot raise on '3939-01-01' or junk.
+              r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+              r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
               (days,),
           )
           print(f"racing_com rows in trailing {days}-day window: {cur.fetchone()[0]}")
