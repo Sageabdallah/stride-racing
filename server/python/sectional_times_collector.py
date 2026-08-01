@@ -607,7 +607,9 @@ def collect_for_date_track(date_str, track_name, db_url, verbose=True):
 
     csv_text, matched_variant, diagnosis = download_csv(date_str, track_variants)
     if not csv_text:
-        if verbose:
+        # Anti-bot diagnoses print even when not verbose: a Cloudflare block
+        # must be loud in backfill/scheduled logs, not swallowed (DM-H5).
+        if verbose or "anti-bot" in diagnosis:
             print(f"  No CSV for {track_name} on {date_str} — {diagnosis}")
         return 0, 0, 0, 0
 
