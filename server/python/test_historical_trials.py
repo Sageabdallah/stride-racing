@@ -71,6 +71,10 @@ def _stub_bbt_pf(monkeypatch):
 def _stub_wall(monkeypatch, boundary):
     """Drive the REAL find_wall with a fake 400/200 boundary; returns the
     probe-call counter."""
+    # These tests exercise the no-DB paths; an ambient DATABASE_URL (leaked
+    # by other modules' import-time placeholders) would make main() connect
+    # for real.
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     calls = {"probe": 0}
 
     def probe(iso):
