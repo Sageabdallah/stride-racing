@@ -6,14 +6,12 @@ import re
 import sys
 import time
 import argparse
-import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from results_projection import project_resulted_prediction_audit
-
-RACING_API_BASE_URL = "https://api.theracingapi.com"
+from providers import get_provider, validate_results
 
 
 def normalize_name(value):
@@ -72,14 +70,6 @@ def normalize_finish_position(raw_position, field_size: Optional[int] = None) ->
     return position
 
 
-def get_api_credentials() -> Tuple[str, str]:
-    username = os.environ.get('RACING_API_USERNAME')
-    password = os.environ.get('RACING_API_PASSWORD')
-    if not username or not password:
-        raise ValueError("RACING_API_USERNAME and RACING_API_PASSWORD environment variables required")
-    return username, password
-
-
 def get_db_connection():
     database_url = os.environ.get('DATABASE_URL')
     if not database_url:
@@ -113,69 +103,23 @@ def get_pending_races(conn, target_date: Optional[str] = None) -> List[Dict]:
 
 
 def fetch_results_for_date(race_date: str) -> List[Dict]:
-    username, password = get_api_credentials()
-    all_results = []
-
     try:
-        meets_url = f"{RACING_API_BASE_URL}/v1/australia/meets"
-        params = {'date': race_date}
-        api_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        response = requests.get(meets_url, auth=(username, password), params=params, headers=api_headers, timeout=30)
-
-        if response.status_code != 200:
-            print(f"[AutoResults] Meets API returned {response.status_code}: {response.text[:200]}", file=sys.stderr)
-            return []
-
-        data = response.json()
-        meets = data.get('meets', data) if isinstance(data, dict) else data
-        if not isinstance(meets, list):
-            meets = []
-
-        print(f"[AutoResults] Found {len(meets)} meets for {race_date}", file=sys.stderr)
-
-        for meet in meets:
-            meet_id = meet.get('meet_id') or meet.get('id')
-            track_name = meet.get('track') or meet.get('course') or meet.get('name', 'Unknown')
-            if not meet_id:
-                continue
-
-            try:
-                races_url = f"{RACING_API_BASE_URL}/v1/australia/meets/{meet_id}/races"
-                races_response = requests.get(races_url, auth=(username, password), headers=api_headers, timeout=30)
-
-                if races_response.status_code != 200:
-                    continue
-
-                races_data = races_response.json()
-                races = races_data.get('races', races_data) if isinstance(races_data, dict) else races_data
-                if not isinstance(races, list):
-                    races = []
-
-                for race in races:
-                    status = race.get('race_status', '').lower()
-                    if status in ['results', 'completed', 'final', 'official']:
-                        runners = race.get('runners', [])
-                        has_results = any(r.get('position') or r.get('finishing_position') for r in runners)
-                        if has_results:
-                            all_results.append({
-                                'course': track_name,
-                                'track': track_name,
-                                'race_number': race.get('race_number') or race.get('number'),
-                                'race_name': race.get('race_name') or race.get('name', ''),
-                                'distance': race.get('distance', ''),
-                                'runners': runners
-                            })
-
-            except Exception as e:
-                print(f"[AutoResults] Error fetching races for {track_name}: {e}", file=sys.stderr)
-                continue
-
-        print(f"[AutoResults] Found {len(all_results)} completed races with results", file=sys.stderr)
-        return all_results
-
+        provider = get_provider()
+        all_results = provider.fetch_results(race_date)
     except Exception as e:
         print(f"[AutoResults] Error fetching results: {e}", file=sys.stderr)
         return []
+
+    # Reject the whole date on contract violations — a malformed feed applied
+    # to prediction_audit corrupts franking/learning, whereas an empty return
+    # just increments retry_count and comes back later.
+    report = validate_results(all_results, race_date)
+    report.print_report()
+    if not report.ok:
+        return []
+
+    print(f"[AutoResults] Found {len(all_results)} completed races with results", file=sys.stderr)
+    return all_results
 
 
 def find_race_in_results(track: str, race_number: int, results: List[Dict]) -> Optional[Dict]:
