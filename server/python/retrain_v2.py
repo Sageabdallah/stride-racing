@@ -122,6 +122,45 @@ NAN_PRESERVE_FEATURES = [
     "trial_recency",     # 999 = no trial; keep NaN rather than corrupt with 0 (0 = trial today)
 ]
 
+# Task-12 odds-source modes (env STRIDE_TRAIN_ODDS_SOURCE, default "legacy"):
+#   legacy          — SP-filled odds, today's behavior (default; a retrain run
+#                     without the flag is unchanged)
+#   snapshot        — tip-time snapshot odds ONLY; rows without one are dropped
+#                     upstream (filter_snapshot_rows). Never falls back to SP.
+#   snapshot_hybrid — all rows kept; snapshot odds where odds_source=='snapshot',
+#                     NaN elsewhere, with market_odds + the relative-market trio
+#                     NaN-preserved so trees treat unknown-odds as missing.
+# SP is unknowable at tip time, so training the top feature (market_odds) on it
+# makes the model's dominant input mean something different than at serve.
+_TRAIN_ODDS_MODES = ("legacy", "snapshot", "snapshot_hybrid")
+_HYBRID_NAN_PRESERVE = ("market_odds", "fair_implied_prob", "odds_rank", "odds_rank_pct")
+
+
+def _train_odds_source() -> str:
+    mode = os.environ.get("STRIDE_TRAIN_ODDS_SOURCE", "legacy").strip().lower()
+    if mode not in _TRAIN_ODDS_MODES:
+        print(f"  WARNING: unknown STRIDE_TRAIN_ODDS_SOURCE={mode!r} — using 'legacy'")
+        mode = "legacy"
+    return mode
+
+
+def filter_snapshot_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only rows with tip-time snapshot odds (STRIDE_TRAIN_ODDS_SOURCE=
+    snapshot). Loud by design: a silent row shrink would corrupt every
+    downstream metric, and there is deliberately NO SP fallback."""
+    if "odds_source" not in df.columns:
+        print("  ERROR: STRIDE_TRAIN_ODDS_SOURCE=snapshot but the training frame has "
+              "no odds_source column — refresh training_view_v2 (roi/04) first")
+        sys.exit(2)
+    keep = df["odds_source"].astype(str) == "snapshot"
+    n_keep = int(keep.sum())
+    print(f"  Odds source=snapshot: kept {n_keep:,}/{len(df):,} rows "
+          f"(dropped {len(df) - n_keep:,} without snapshot odds)")
+    if n_keep == 0:
+        print("  ERROR: 0 rows with snapshot odds — refusing to train on an empty frame")
+        sys.exit(2)
+    return df[keep].copy()
+
 # Mapping: training_view_v2 column  ->  FEATURE_COLUMNS name
 VIEW_TO_FEATURE_MAP = {
     # Phase 2 sectional features (prior_ prefix in view)
@@ -315,6 +354,10 @@ def load_training_data() -> pd.DataFrame:
             -- Odds (sp_odds is the most populated)
             sp_odds,
             market_odds,
+            -- Task-12 snapshot odds (roi/04 view columns): tip-time median and
+            -- provenance. Only consumed when STRIDE_TRAIN_ODDS_SOURCE != legacy.
+            tip_time_odds,
+            odds_source,
             -- Stored MC-stage model probability (prediction_audit via the
             -- view). Benchmark column only — never a training feature:
             -- build_feature_matrix restricts to FEATURE_COLUMNS.
@@ -554,8 +597,18 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
 
 
-    # market_odds: prefer view's market_odds (sparse) else use sp_odds
-    if "market_odds" in df.columns and "sp_odds" in df.columns:
+    # market_odds: prefer view's market_odds (sparse) else use sp_odds.
+    # STRIDE_TRAIN_ODDS_SOURCE (task 12) switches the source: SP is unknowable
+    # at tip time, so snapshot modes use tip_time_odds and never fall back to SP.
+    _odds_mode = _train_odds_source()
+    if _odds_mode == "snapshot":
+        # Rows were already filtered to odds_source == 'snapshot' upstream.
+        df["_effective_odds"] = pd.to_numeric(df.get("tip_time_odds"), errors="coerce")
+    elif _odds_mode == "snapshot_hybrid":
+        _is_snap = df.get("odds_source", pd.Series("", index=df.index)).astype(str) == "snapshot"
+        df["_effective_odds"] = pd.to_numeric(
+            df.get("tip_time_odds"), errors="coerce").where(_is_snap)
+    elif "market_odds" in df.columns and "sp_odds" in df.columns:
         df["_effective_odds"] = pd.to_numeric(
             df["market_odds"], errors="coerce"
         ).fillna(pd.to_numeric(df["sp_odds"], errors="coerce"))
@@ -582,6 +635,14 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         print(f"  WARNING: relative market features failed: {_rm_err}")
         for _c in ("fair_implied_prob", "odds_rank", "odds_rank_pct"):
             out[_c] = 0.0
+
+    if _odds_mode == "snapshot_hybrid":
+        # Unknown-odds rows keep NaN (never 0, never SP) so trees isolate the
+        # missing case; the NON_SECTIONAL fill below skips these columns too.
+        _unknown_odds = ~pd.to_numeric(df["_effective_odds"], errors="coerce").gt(1.0)
+        for _c in _HYBRID_NAN_PRESERVE:
+            if _c in out.columns:
+                out.loc[_unknown_odds, _c] = np.nan
 
     for col in FEATURE_COLUMNS:
         if col not in out.columns:
@@ -677,8 +738,9 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
     # step_up_x_dist_slope: excluded (RED coverage) — depends on dist_sectional_slope (13.7%)
 
+    _skip_fill = _HYBRID_NAN_PRESERVE if _odds_mode == "snapshot_hybrid" else ()
     for col in NON_SECTIONAL_FEATURES:
-        if col in out.columns:
+        if col in out.columns and col not in _skip_fill:
             out[col] = out[col].fillna(0)
 
     # Phase 2 sectional columns + NAN_PRESERVE_FEATURES intentionally keep NaN (tree models)
@@ -1418,8 +1480,11 @@ def main():
     print("=" * 70)
     print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Output : {output_model_path}")
+    print(f"  Odds source mode : {_train_odds_source()}  (STRIDE_TRAIN_ODDS_SOURCE)")
 
     df_raw = load_training_data()
+    if _train_odds_source() == "snapshot":
+        df_raw = filter_snapshot_rows(df_raw)
 
     n_total = len(df_raw)
     n_winners = int(df_raw["is_winner"].astype(int).sum())
