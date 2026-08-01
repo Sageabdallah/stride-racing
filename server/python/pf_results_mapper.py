@@ -249,6 +249,32 @@ def aus_race_meetings(meetings):
             and not m.get("isBarrierTrial")]
 
 
+def aus_trial_meetings(meetings):
+    """AUS barrier-trial meetings from a meetingslist payload — the ONLY
+    meetings the trials importer handles (PF marks them isBarrierTrial)."""
+    return [m for m in meetings or []
+            if (m.get("track") or {}).get("country") == "AUS"
+            and m.get("isBarrierTrial")]
+
+
+def assert_trial_partition(meetings):
+    """The results/trials partition over AUS meetings: each AUS meeting is
+    handled by EXACTLY ONE importer (results excludes trials; the trials
+    script includes only trials). A meeting in both — or an AUS meeting in
+    neither — is a bug; fail loudly rather than double- or never-import."""
+    aus = [m for m in meetings or []
+           if (m.get("track") or {}).get("country") == "AUS"]
+    results_ids = {id(m) for m in aus_race_meetings(aus)}
+    trial_ids = {id(m) for m in aus_trial_meetings(aus)}
+    both = results_ids & trial_ids
+    neither = {id(m) for m in aus} - results_ids - trial_ids
+    if both or neither:
+        raise AssertionError(
+            f"results/trials partition broken: {len(both)} meeting(s) in both, "
+            f"{len(neither)} AUS meeting(s) in neither")
+    return aus
+
+
 def is_metro_track(name):
     n = str(name or "").lower()
     return any(t in n or n in t for t in METRO_TRACKS)
