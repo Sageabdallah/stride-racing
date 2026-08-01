@@ -1,0 +1,21 @@
+{
+  "fetched_at": "2026-08-01T06:05:34+00:00",
+  "endpoint": "meeting_detail (/form/meeting)",
+  "meetings": {
+    "241257": {
+      "races": 10,
+      "runners": 98,
+      "file": "meeting_241257.json"
+    },
+    "241265": {
+      "races": 8,
+      "runners": 107,
+      "file": "meeting_241265.json"
+    },
+    "241096": {
+      "races": 8,
+      "runners": 87,
+      "file": "meeting_241096.json"
+    }
+  }
+}
