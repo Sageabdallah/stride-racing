@@ -210,14 +210,11 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # DISABLED — MISSING SECRET: the racing.com GraphQL collector authenticates
-  # with an x-api-key header read from RACING_COM_API_KEY, which exists in NO
-  # repository secret as of 2026-08-01, and the collector sends an empty key
-  # SILENTLY (every request just fails). Rather than run a guaranteed-empty
-  # job, it is parked here fully wired: to enable, add the RACING_COM_API_KEY
-  # repository secret and delete the `if: false` line.
+  # ENABLED 2026-08-02: RACING_COM_API_KEY was never a personal credential.
+  # The collector bootstraps the site's PUBLIC AppSync client key per run and
+  # fails loudly if extraction breaks, so no secret is required and a key
+  # rotation self-heals. Set RACING_COM_API_KEY only to override.
   racing-com:
-    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -247,11 +244,10 @@ jobs:
           DAYS: ${{ inputs.days || '4' }}
         run: |
           set -o pipefail
-          if [ -z "${RACING_COM_API_KEY}" ]; then
-            echo "::error::Repository secret RACING_COM_API_KEY is not set — the collector fails silently without it."
-            exit 1
-          fi
-          python3 server/python/racing_com_sectionals_collector.py --backfill --days "$DAYS" 2>&1 | tee racing_com_sectionals.log
+          # No key guard: the collector bootstraps the public key itself and
+          # raises loudly if the page or key format changes. An unset
+          # RACING_COM_API_KEY is the normal case, not a failure.
+          python3 server/python/racing_com_sectionals_collector.py --from-date "$(date -u -d "$DAYS days ago" +%F)" 2>&1 | tee racing_com_sectionals.log
       - name: Gate — this run landed new racing.com rows
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
