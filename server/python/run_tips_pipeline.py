@@ -2409,6 +2409,12 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 _ml = RacingMLModel()
                 if _ml.is_trained:
                     import pandas as _pd
+                    # Task 03: single shared feature builder (serve_features.py) —
+                    # one assembly used by BOTH inference paths. NaN-preserve
+                    # contract (nan_contract.py) and interaction parity
+                    # (STRIDE_INTERACTION_PARITY, default off) are applied there.
+                    from serve_features import build_feature_row, log_movement_inert_once
+                    log_movement_inert_once(date_str)
                     # Phase 5: within-race relative market position (favourite ladder)
                     try:
                         from relative_market import compute_field_relative_market
@@ -2416,86 +2422,13 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     except Exception:
                         _rel_mkt = [{"fair_implied_prob": 0.0, "odds_rank": 0.0, "odds_rank_pct": 0.0}] * len(runners)
                     for _ri, runner in enumerate(runners):
-                        feat = {}
-                        feat["market_odds"] = extract_odds(runner) or 0
-                        feat.update(_rel_mkt[_ri])
-                        feat["barrier_draw"] = int(runner.get("draw") or runner.get("barrier") or 0)
-                        wt = str(runner.get("weight", "0")).replace("kg", "").strip()
-                        feat["weight_kg"] = float(wt) if wt else 0
-                        feat["distance"] = distance_m
-                        feat["field_size"] = field_size
-                        feat["class_level"] = runner.get("class_level") or 0
-                        for k in ["days_since_run", "is_first_up", "is_second_up", "course_strike_rate",
-                                   "distance_strike_rate", "weighted_form_score", "class_movement",
-                                   "is_class_drop", "is_class_rise", "improvement_score", "is_improving",
-                                   "is_in_form_cycle", "has_dominant_win", "is_winning_combo",
-                                   "jockey_trainer_strike_rate", "is_first_time_stakes",
-                                   "form_direction_slope", "speed_rating_trajectory",
-                                   "sectional_trajectory", "campaign_run_number",
-                                   "weight_change", "jockey_booking_change",
-                                   "fresh_x_trajectory", "first_up_win_rate",
-                                   "second_up_win_rate", "consistency_score",
-                                   "going_suitability",
-                                   "dist_sectional_slope",
-                                   "distance_direction_flag",
-                                   "dist_sectional_recency_weighted",
-                                   "sectional_rank_at_distance",
-                                   "sectional_result_divergence",
-                                   "first_at_distance_sectional_quality",
-                                   "is_bounce_candidate",
-                                   "bounce_severity",
-                                   "trial_recency",
-                                   "trial_count_60d",
-                                   "trial_x_experience",
-                                   "trainer_trial_pattern",
-                                   "trial_quality_score"]:
-                            feat[k] = runner.get(k, 0)
-                        # Explicit binary — data availability flag, [0,1] enforced
-                        feat["has_sectional_data"] = int(bool(runner.get("has_sectional_data", 0)))
-                        # runs_since_peak: NaN-preserving (tree models handle missingness)
-                        feat["runs_since_peak"] = runner.get("runs_since_peak", float("nan"))
-                        feat["trainer_momentum_score"] = runner.get("trainer_momentum_score", 50)
-                        for k in ["pace_pressure_score", "leader_advantage",
-                                   "closer_advantage", "barrier_relevance_score",
-                                   "field_size_context", "market_efficiency_flag",
-                                   "pace_clarity_score"]:
-                            feat[k] = runner.get(k, 0.5)
-                        feat["td_pace_bias"] = runner.get("td_pace_bias", 0.5)
-                        feat["td_upset_rate"] = runner.get("td_upset_rate", 0.2)
-                        feat["td_barrier_style_edge"] = runner.get("td_barrier_style_edge", 0)
-                        feat["td_closing_speed_bias"] = runner.get("td_closing_speed_bias", 0)
-                        # STRIDE_INTERACTION_PARITY: compute the five interaction
-                        # features from the same definitions training used
-                        # (feature_interactions.py) instead of restating them
-                        # here. barrier_x_pace_inv is inverted between the two —
-                        # training fits barrier_advantage * pace_pressure_score,
-                        # the inline version below serves
-                        # barrier_advantage * (1 - pace_pressure_score) — and the
-                        # two agree only at 0.5, which is the default used when
-                        # pace data is missing. Default OFF: enabling changes
-                        # which horses are tipped, so it needs a backtest first.
-                        if os.environ.get("STRIDE_INTERACTION_PARITY", "false").strip().lower() in ("true", "1", "yes"):
-                            from feature_interactions import compute_interactions
-                            _src = dict(feat)
-                            for _k in ("pace_pressure_score", "barrier_advantage", "z_200m"):
-                                if runner.get(_k) is not None:
-                                    _src[_k] = runner.get(_k)
-                            feat.update(compute_interactions(_src))
-                        else:
-                            _crn = feat.get("campaign_run_number", 1)
-                            _fp = max(0, 1 - abs(_crn - 3) * 0.15)
-                            feat["fitness_x_distance"] = _fp * feat.get("distance_strike_rate", 0)
-                            _pps = runner.get("pace_pressure_score", 0.5)
-                            feat["barrier_x_pace_inv"] = runner.get("barrier_advantage", 0) * (1 - _pps)
-                            feat["sectional_x_going"] = runner.get("z_200m", 0) * feat.get("going_suitability", 0.5)
-                            feat["class_drop_x_trajectory"] = feat.get("is_class_drop", 0) * feat.get("form_direction_slope", 0)
-                            _cf = max(0, 1 - max(0, _crn - 5) * 0.2)
-                            feat["campaign_run_x_fitness"] = _crn * _cf
-                        import math as _math
-                        _ddir = max(0, feat.get("distance_direction_flag", 0))
-                        _dslope = feat.get("dist_sectional_slope", 0)
-                        _dslope = 0 if (_dslope is None or (isinstance(_dslope, float) and _math.isnan(_dslope))) else _dslope
-                        feat["step_up_x_dist_slope"] = round(_ddir * max(0, _dslope), 4)
+                        feat = build_feature_row(
+                            runner,
+                            market_odds=extract_odds(runner),
+                            distance_m=distance_m,
+                            field_size=field_size,
+                            rel_market=_rel_mkt[_ri],
+                        )
                         df = _pd.DataFrame([feat])
                         X = _ml.prepare_features(df)
                         ml_prob = float(_ml.predict_proba(X, distance_m=distance_m)[0])
