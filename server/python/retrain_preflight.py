@@ -41,6 +41,8 @@ PARITY_TESTS = ("test_feature_parity.py", "test_serve_feature_liveness.py")
 EXPECTED_KEYS = ("xgb_model", "lgb_model", "cb_model", "feature_columns",
                  "feature_importance", "trained_at", "version")
 
+ASOF_TD_PROFILES = SCRIPT_DIR / "intelligence" / "track_distance_profiles_asof.json"
+
 GREEN, RED, AMBER = "GREEN", "RED", "AMBER"
 SYM = {GREEN: "OK  ", RED: "FAIL", AMBER: "PEND"}
 
@@ -173,6 +175,45 @@ def gate_lockstep(staging_obj, retrain_path=None, ml_model_path=None):
         rows.append(_row("lockstep:nan-preserve", RED,
                          f"retrain_v2 {sorted(retrain_np)} != ml_model {sorted(model_np)}"))
     return rows, retrain_cols
+
+
+def gate_asof_td_profiles(retrain_path=None, asof_path=None):
+    """N3: retrain_v2 prefers intelligence/track_distance_profiles_asof.json
+    (strictly-earlier-months buckets, the L2 leak fix) but on a missing file
+    only WARNS and falls back to the legacy snapshot — which is computed
+    over data that includes races AFTER the subject race. A retrain run on a
+    box without the as-of file would silently reintroduce that leak, so any
+    td_* feature in FEATURE_COLUMNS demands the as-of file present, valid,
+    and non-empty. Staging-independent: gates the retrain inputs, not the
+    candidate artifact."""
+    retrain = Path(retrain_path) if retrain_path else SCRIPT_DIR / "retrain_v2.py"
+    asof = Path(asof_path) if asof_path else ASOF_TD_PROFILES
+    cols = _parse_list_literal(retrain, "FEATURE_COLUMNS")
+    if cols is None:
+        return [_row("asof-td-profiles", RED,
+                     f"could not parse FEATURE_COLUMNS from {retrain.name} — "
+                     "cannot rule out td_* features")]
+    td_feats = [c for c in cols if isinstance(c, str) and c.startswith("td_")]
+    if not td_feats:
+        return [_row("asof-td-profiles", GREEN,
+                     "not applicable — no td_* feature in FEATURE_COLUMNS")]
+    if not asof.exists():
+        return [_row("asof-td-profiles", RED,
+                     f"{len(td_feats)} td_* features in FEATURE_COLUMNS but "
+                     f"{asof.name} is absent — retrain_v2 would silently fall "
+                     "back to the legacy snapshot computed over post-race "
+                     "data (N3)")]
+    try:
+        obj = json.loads(asof.read_text(encoding="utf-8"))
+    except Exception as e:
+        return [_row("asof-td-profiles", RED,
+                     f"{asof.name} is not valid JSON: {e}")]
+    if not isinstance(obj, dict) or not obj:
+        return [_row("asof-td-profiles", RED,
+                     f"{asof.name} holds no as-of buckets")]
+    return [_row("asof-td-profiles", GREEN,
+                 f"{asof.name}: {len(obj)} monthly bucket(s) covering "
+                 f"{len(td_feats)} td_* features")]
 
 
 def gate_parity_suites(test_paths=None):
@@ -315,6 +356,8 @@ def run_preflight(staging: str, metrics: str | None = None,
         board1 += lock_rows
         board1 += gate_parity_suites(parity_test_paths)
         board1 += gate_freshness(staging_obj, live_pkl)
+
+    board1 += gate_asof_td_profiles(retrain_path)
 
     board2 += gate_shadow_metrics(metrics)
     board2 += gate_preregistration(prereg_path)

@@ -154,6 +154,69 @@ def test_nan_preserve_mismatch(tmp_path, layout):
     assert _status(rows, "lockstep:nan-preserve") == rp.RED
 
 
+# ------------------------------------------------- gate 4b: as-of td profiles
+
+TD_COLS = ["a", "td_pace_bias", "td_upset_rate"]
+
+
+def test_asof_td_missing_file_red_and_blocks_exit(tmp_path, layout, monkeypatch):
+    retrain_f = _write_cols_file(tmp_path / "retrain_v2.py", TD_COLS)
+    missing = tmp_path / "intelligence" / "track_distance_profiles_asof.json"
+    rows = rp.gate_asof_td_profiles(retrain_f, missing)
+    assert _status(rows, "asof-td-profiles") == rp.RED
+    assert "silently fall back" in rows[0]["detail"]
+    # wired into board 1 and the exit code like its siblings: a RED here
+    # blocks promotion exactly as any other board-1 RED does
+    import feature_liveness_audit as fla
+    monkeypatch.setattr(fla, "audit_static", lambda cols=None: {
+        "n_features": 3, "verdict_counts": {"LIVE_BOTH": 3}, "features": []})
+    boards = rp.run_preflight(str(layout["staging"]),
+                              live_pkl=layout["live"],
+                              backups_dir=layout["backups"],
+                              prereg_path=layout["models"] / "nope.md",
+                              parity_test_paths={},
+                              retrain_path=retrain_f,
+                              ml_model_path=_write_cols_file(
+                                  tmp_path / "ml_model.py", TD_COLS,
+                                  class_attr=True))
+    row = next(r for r in boards["board1"] if r["name"] == "asof-td-profiles")
+    assert row["status"] == rp.RED
+    n_red = sum(1 for r in boards["board1"] + boards["board2"]
+                if r["status"] == rp.RED)
+    assert n_red >= 1  # main() returns 1 iff n_red — nonzero exit
+    assert "PROMOTION: BLOCKED" in rp.render(boards)
+
+
+def test_asof_td_valid_file_green(tmp_path):
+    retrain_f = _write_cols_file(tmp_path / "retrain_v2.py", TD_COLS)
+    asof = tmp_path / "track_distance_profiles_asof.json"
+    asof.write_text(json.dumps({"2026-06": {"bucket": 1},
+                                "2026-07": {"bucket": 2}}))
+    rows = rp.gate_asof_td_profiles(retrain_f, asof)
+    assert _status(rows, "asof-td-profiles") == rp.GREEN
+    assert "2 monthly bucket(s)" in rows[0]["detail"]
+
+
+def test_asof_td_no_td_features_green_na(tmp_path):
+    retrain_f = _write_cols_file(tmp_path / "retrain_v2.py", CODE_COLS)
+    rows = rp.gate_asof_td_profiles(
+        retrain_f, tmp_path / "does-not-need-to-exist.json")
+    assert _status(rows, "asof-td-profiles") == rp.GREEN
+    assert "not applicable" in rows[0]["detail"]
+
+
+def test_asof_td_invalid_json_and_empty_buckets_red(tmp_path):
+    retrain_f = _write_cols_file(tmp_path / "retrain_v2.py", TD_COLS)
+    asof = tmp_path / "track_distance_profiles_asof.json"
+    asof.write_text("{not json")
+    assert _status(rp.gate_asof_td_profiles(retrain_f, asof),
+                   "asof-td-profiles") == rp.RED
+    asof.write_text("{}")
+    rows = rp.gate_asof_td_profiles(retrain_f, asof)
+    assert _status(rows, "asof-td-profiles") == rp.RED
+    assert "no as-of buckets" in rows[0]["detail"]
+
+
 # ------------------------------------------------------- gate 5: parity suites
 
 def test_parity_absent_amber():
