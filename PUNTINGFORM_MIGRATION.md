@@ -127,6 +127,21 @@ caret-delimited CSV service remains available as a fallback shape.
 - [ ] [C] Sectionals sanity: PF vs racing.com/RQ values where both exist
 - [ ] [C] Coverage report: PF meeting coverage vs the meeting calendar by
       state (the 92%-of-TAB claim, verified on our own data)
+- [x] [C] **F-SEC-PLACEHOLDER** (sectional collector `Unknown_<id>` runner
+      names): root cause fixed in `nsw_sectional_collector.py` — when a .tol
+      file lacks the horse-metadata record the write path now resolves the
+      runner against `race_results_history` (same race + finishing position,
+      falling back to barrier; `pf_results_mapper.norm_name` claimed-name
+      exclusion) or skips the runner with one warning per race; no new
+      placeholder rows can be written. Prod report (read-only, 2026-08-01):
+      **20 placeholder rows, all `source='nsw_pidata'` — 2026-01: 8
+      (Canterbury Park 2026-01-01 R7), 2026-06: 7 (Hawkesbury 2026-06-04 R2),
+      2026-07: 5 (Gosford 2026-07-09 R4); 20/20 join-resolvable.** The gated
+      backfill-fix (`server/python/fix_sectional_placeholder_names.py
+      --apply`: backup table `sectional_times_placeholder_backup_20260801`,
+      idempotent updates of the resolvable rows only) is built and tested
+      but **not yet run — it awaits the operator's explicit prod WRITE
+      approval** (two-gate rule).
 - **Done when:** discrepancy rate is quantified and either negligible or
   explained in this file.
 
