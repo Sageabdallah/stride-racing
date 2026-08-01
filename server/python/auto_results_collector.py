@@ -12,6 +12,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from results_projection import project_resulted_prediction_audit
 from providers import get_provider, validate_results
+# Single-sourced in pf_results_mapper (F-TRACK-ALIAS); imported back so the
+# selection-matching below keys tracks identically to the results dedup key.
+from pf_results_mapper import canonical_track_key
 
 
 def normalize_name(value):
@@ -19,39 +22,6 @@ def normalize_name(value):
     if not value:
         return ""
     return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
-
-
-TRACK_ALIASES = {
-    "rosehill": "rosehillgardens",
-    "rosehillgardens": "rosehillgardens",
-    "ascot": "ascotwa",
-    "ascotwa": "ascotwa",
-    "randwick": "randwick",
-    "royalrandwick": "randwick",
-    "kensington": "kensington",
-    "flemington": "flemington",
-    "morphettville": "morphettville",
-    "morphettvilleparks": "morphettville",
-    "doomben": "doomben",
-    "eaglefarm": "eaglefarm",
-    "caulfield": "caulfield",
-    "mrc": "caulfield",
-    "mooneevalley": "mooneevalley",
-    "sandownhillside": "sandownhillside",
-    "sandownlakeside": "sandownlakeside",
-    "sandown": "sandownhillside",
-    "bendigo": "bendigo",
-    "ballarat": "ballarat",
-    "geelong": "geelong",
-    "pakenham": "pakenham",
-    "cranbourne": "cranbourne",
-}
-
-
-def canonical_track_key(value):
-    """Canonicalize track name for reliable matching."""
-    text = normalize_name(value)
-    return TRACK_ALIASES.get(text, text)
 
 
 def normalize_finish_position(raw_position, field_size: Optional[int] = None) -> Optional[int]:
