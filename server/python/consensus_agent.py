@@ -134,6 +134,7 @@ def load_accuracy_multipliers(lookback_days=ACCURACY_LOOKBACK_DAYS):
             FROM source_accuracy
             WHERE tipster_id IS NOT NULL
               AND race_date >= (CURRENT_DATE - INTERVAL '%s days')
+              AND race_date < CURRENT_DATE
             GROUP BY tipster_id
         """ % int(lookback_days))
         rows = cur.fetchall()
