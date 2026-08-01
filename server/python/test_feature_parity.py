@@ -55,7 +55,12 @@ def flags_on(monkeypatch):
 
 @pytest.fixture(scope="module")
 def retrain_v2_mod():
-    """Lazy retrain_v2 import — skips gracefully without psycopg2/DB env."""
+    """Lazy retrain_v2 import — skips gracefully without psycopg2/DB env.
+
+    The placeholder URL exists only for import time and is removed after —
+    leaving it set sends every later test in the session at localhost:5432.
+    """
+    placeholder = "DATABASE_URL" not in os.environ
     os.environ.setdefault("DATABASE_URL", "postgresql://parity:parity@localhost/parity")
     try:
         import psycopg2  # noqa: F401
@@ -66,9 +71,14 @@ def retrain_v2_mod():
         sys.modules.setdefault("psycopg2", stub)
         sys.modules.setdefault("psycopg2.extras", extras)
     try:
-        return importlib.import_module("retrain_v2")
+        mod = importlib.import_module("retrain_v2")
     except (ImportError, SystemExit) as exc:
+        if placeholder:
+            os.environ.pop("DATABASE_URL", None)
         pytest.skip(f"retrain_v2 not importable in this environment: {exc}")
+    yield mod
+    if placeholder:
+        os.environ.pop("DATABASE_URL", None)
 
 
 def _serve_vector(runner, market_odds, distance_m, field_size, rel_market):
@@ -121,11 +131,15 @@ def test_nan_contract_flag_on_passes_nan_through(flags_on):
     # Genuinely numeric-complete columns still get their legacy defaults.
     assert X["days_since_run"] == 0.0
     assert X["market_odds"] == 6.0
-    assert X["trainer_momentum_score"] == 50.0
+    # trainer_momentum_score left the trained set in the task-12 prep pruning;
+    # the aligned vector must no longer carry it.
+    assert "trainer_momentum_score" not in X
     assert X["has_sectional_data"] == 0
-    # Movement columns inert.
+    # Movement columns inert — those the task-12 prep pruning removed must be
+    # absent from the aligned vector; any survivor serves 0.
     for col in MOVEMENT_FEATURES:
-        assert X[col] == 0.0
+        if col in X:
+            assert X[col] == 0.0
 
 
 def test_nan_contract_flag_on_keeps_known_values(flags_on):
