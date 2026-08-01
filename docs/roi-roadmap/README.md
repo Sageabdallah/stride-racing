@@ -83,7 +83,7 @@ of accumulation. Every day delayed is a day added to the retrain date.
 | 02 | ⬜ | | |
 | 03 | ⬜ | | |
 | 04 | 🟡 | 2026-07-27 | branch `roi/04-as-of-odds-snapshot` (migration `migrations/runner_odds_snapshots.sql`; capture live, coverage pending 3 race days) |
-| 05 | ⬜ | | |
+| 05 | 🟡 | 2026-07-27 | roi/05-calibrator-and-normalisation |
 | 06 | ⬜ | | |
 | 07 | ⬜ | | |
 | 08 | ⬜ | | |
