@@ -69,6 +69,27 @@ def norm_name(name):
     return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
+# DISTINCT ON + race_date DESC = most recent row wins per name, so a horse
+# keeps its latest identity even if earlier rows carried a different id.
+# Selects the original-case name: norm_name only strips uppercase country
+# suffixes, so a pre-lowered "ocean deep (nz)" would keep its suffix and
+# never match the card-side "Ocean Deep (NZ)".
+BRIDGE_SQL = """
+    SELECT DISTINCT ON (LOWER(horse_name)) horse_name, horse_id
+    FROM race_results_history ORDER BY LOWER(horse_name), race_date DESC
+"""
+
+
+def load_horse_id_bridge(cur):
+    """norm_name -> horse_id for every horse in race_results_history.
+
+    Shared by this backfill and the racecard serve path (providers/puntingform):
+    both sides must apply the identical rule or a horse's identity forks
+    between its form history and its serve-time card."""
+    cur.execute(BRIDGE_SQL)
+    return {norm_name(name): hid for name, hid in cur.fetchall()}
+
+
 def parse_class_level(rc):
     if not rc:
         return 1
@@ -273,11 +294,7 @@ def main():
             FROM race_results_history WHERE race_date >= %s
         """, (dates[-1],))
         existing = {(r[0], r[1], r[2]) for r in cur.fetchall()}
-        cur.execute("""
-            SELECT DISTINCT ON (LOWER(horse_name)) LOWER(horse_name), horse_id
-            FROM race_results_history ORDER BY LOWER(horse_name), race_date DESC
-        """)
-        bridge = {norm_name(name): hid for name, hid in cur.fetchall()}
+        bridge = load_horse_id_bridge(cur)
         print(f"ID bridge loaded: {len(bridge)} known horses; "
               f"{len(existing)} existing race keys in window")
     else:
