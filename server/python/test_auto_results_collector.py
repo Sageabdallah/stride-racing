@@ -45,9 +45,14 @@ PF_RESULTS = [
 
 
 def _stub_pf(monkeypatch):
-    monkeypatch.setattr(arc.pf_client, "meetings_for_date",
+    # The fetch logic lives in providers/puntingform now; the collector only
+    # routes through get_provider(). pf_client is one shared module object,
+    # so patching it here patches the provider's view of it too. RACING_DATA_
+    # PROVIDER is cleared so the factory default (puntingform) is what routes.
+    monkeypatch.delenv("RACING_DATA_PROVIDER", raising=False)
+    monkeypatch.setattr(pf_client, "meetings_for_date",
                         lambda d: list(PF_MEETINGS))
-    monkeypatch.setattr(arc.pf_client, "results_for_meeting",
+    monkeypatch.setattr(pf_client, "results_for_meeting",
                         lambda mid: list(PF_RESULTS))
 
 
@@ -116,19 +121,22 @@ def test_fetch_output_flows_through_existing_matcher(monkeypatch):
 
 
 def test_fetch_results_error_returns_empty_list(monkeypatch):
+    monkeypatch.delenv("RACING_DATA_PROVIDER", raising=False)
+
     def boom(date):
         raise pf_client.PFError("/form/meetingslist: 400 Bad Request")
-    monkeypatch.setattr(arc.pf_client, "meetings_for_date", boom)
+    monkeypatch.setattr(pf_client, "meetings_for_date", boom)
     assert arc.fetch_results_for_date("2026-07-19") == []
 
 
 def test_fetch_results_per_meeting_error_skips_meeting(monkeypatch):
-    monkeypatch.setattr(arc.pf_client, "meetings_for_date",
+    monkeypatch.delenv("RACING_DATA_PROVIDER", raising=False)
+    monkeypatch.setattr(pf_client, "meetings_for_date",
                         lambda d: list(PF_MEETINGS[:1]))
 
     def boom(mid):
         raise pf_client.PFError("/form/results: 500 Server Error")
-    monkeypatch.setattr(arc.pf_client, "results_for_meeting", boom)
+    monkeypatch.setattr(pf_client, "results_for_meeting", boom)
     assert arc.fetch_results_for_date("2026-07-19") == []
 
 

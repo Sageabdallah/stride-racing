@@ -48,9 +48,14 @@ __all__ = [
     "norm_name", "safe_int", "safe_float", "parse_class_level",
     "parse_distance", "race_meta", "normalize_finish_position",
     "aus_race_meetings", "is_metro_track", "build_rows", "row_race_key",
-    "load_existing_keys", "load_bridge", "archive_payloads",
-    "RRH_COLUMNS", "RAW_TABLE_DDL", "collect_day", "main",
+    "load_existing_keys", "load_bridge", "load_horse_id_bridge",
+    "archive_payloads", "RRH_COLUMNS", "RAW_TABLE_DDL", "collect_day", "main",
 ]
+
+# The racecard serve path (providers/puntingform) imported the bridge under
+# this name before the mapper extraction; both names must resolve to the SAME
+# function or serve and settle drift apart.
+load_horse_id_bridge = load_bridge
 
 
 def collect_day(iso_date, metro_only=False, verbose=True):

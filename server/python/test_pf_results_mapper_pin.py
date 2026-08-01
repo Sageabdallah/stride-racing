@@ -154,3 +154,35 @@ def test_norm_name_rules():
     assert norm_name("42 Wallaby Way") == "42wallabyway"
     assert norm_name("") == ""
     assert norm_name(None) == ""
+
+
+class _SqlAwareCursor:
+    """Reproduces Postgres faithfully for load_bridge: the projected name is
+    lowercased iff the SELECT list projects LOWER(horse_name). The buggy
+    projection hands norm_name a pre-lowercased "(nz)" it cannot strip — this
+    fake makes that regression fail a test instead of forking horses in prod."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self._result = []
+
+    def execute(self, sql, params=None):
+        text = " ".join(sql.split()).lower()
+        projection = text.split(" from ")[0].split(
+            "distinct on (lower(horse_name))", 1)[-1]
+        lowered = "lower(horse_name)" in projection
+        self._result = [(n.lower() if lowered else n, h) for n, h in self._rows]
+
+    def fetchall(self):
+        return self._result
+
+
+def test_load_bridge_bridges_country_suffixed_db_names():
+    # The DB side of the suffix rule: race_results_history stores
+    # "Ocean Deep (NZ)" in original case, and load_bridge's SQL must keep that
+    # case so norm_name yields "oceandeep" — the same key the card side
+    # produces. The 2026-07-31 backfill ran with a LOWER() projection here and
+    # forked every country-suffixed horse; this pins the fix.
+    from pf_results_mapper import load_bridge
+    bridge = load_bridge(_SqlAwareCursor([("Ocean Deep (NZ)", "hrs_aus_7")]))
+    assert bridge == {"oceandeep": "hrs_aus_7"}

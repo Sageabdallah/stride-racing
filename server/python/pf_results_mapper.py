@@ -170,12 +170,21 @@ def row_race_key(row):
     return (row[4], str(row[3]).lower(), row[18])
 
 
+# The SELECT projects the ORIGINAL-case horse_name so norm_name can strip an
+# uppercase country suffix like "(NZ)"; projecting LOWER(horse_name) here
+# hands norm_name a lowercase "(nz)" it cannot strip, corrupting the key
+# ("oceandeepnz" vs the card-side "oceandeep") so every country-suffixed
+# horse forks a fresh id instead of bridging. DISTINCT ON/ORDER BY still
+# lower for grouping; only the projection keeps case.
+BRIDGE_SQL = """
+    SELECT DISTINCT ON (LOWER(horse_name)) horse_name, horse_id
+    FROM race_results_history ORDER BY LOWER(horse_name), race_date DESC
+"""
+
+
 def load_bridge(cur):
     """normalised name -> existing horse_id; most recent prior row wins."""
-    cur.execute("""
-        SELECT DISTINCT ON (LOWER(horse_name)) LOWER(horse_name), horse_id
-        FROM race_results_history ORDER BY LOWER(horse_name), race_date DESC
-    """)
+    cur.execute(BRIDGE_SQL)
     return {norm_name(name): hid for name, hid in cur.fetchall()}
 
 
