@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Sequence
 sys.path.insert(0, os.path.dirname(__file__))
 
 from portfolio_risk import closing_line_value, ev_at_price, shadow_stake_plan
+import roi_stats
 
 # Staking ladder as coded in run_tips_pipeline.compute_staking (:1007-1015).
 STAKE_UNITS = {"2u": 2.0, "1u": 1.0, "0u": 0.0}
@@ -222,9 +223,10 @@ def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
 
     return {
         "n_bets": n,
-        # MIN_BETS_REPORTABLE = 200 in shadow_pl_tracker; the same floor applies
-        # here so a 30-bet week is never read as a result.
-        "reportable": n >= 200,
+        # Reportability floor = roi_stats.MIN_BETS_REPORTABLE (single source of
+        # truth, roi-roadmap task 02) so a 30-bet week is never read as a result
+        # and the floor can never drift between modules.
+        "reportable": n >= roi_stats.MIN_BETS_REPORTABLE,
         "strike_rate": round(wins / n, 4),
         "total_staked": round(staked, 2),
         "profit": round(float(pnl.sum()), 2),

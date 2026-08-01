@@ -94,19 +94,10 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
 
 
-# Phase 2 sectional feature names (as they appear in FEATURE_COLUMNS)
-PHASE2_FEATURES = [
-    "z_200m",
-    "z_400m",
-    "z_600m",
-    "z_800m",
-    "lambda_decay",
-    "svi",
-    "rsi",
-    "trip_cost_seconds",
-    "sectional_trajectory",  # Phase 3: slope of last_200m_time, NaN when missing
-    "sectional_rank_at_distance",  # Phase 4: within-race closing rank at distance, NaN when missing
-]
+# Phase 2 sectional feature names and the NaN-preserve contract now live in
+# nan_contract.py — ONE definition shared with the serve path (ml_model.py
+# STRIDE_SERVE_NAN_CONTRACT). Task 03: single source of truth, do not restate.
+from nan_contract import PHASE2_FEATURES, NAN_PRESERVE_FEATURES, TRAINER_NAN_PRESERVE
 
 # Phase 5 within-race relative-market trio (relative_market.py) — ablated as
 # a unit so the walk-forward delta isolates their causal contribution
@@ -116,11 +107,44 @@ PHASE5_FEATURES = [
     "odds_rank_pct",
 ]
 
-# Features that preserve NaN (like PHASE2) but are NOT ablated with sectionals
-NAN_PRESERVE_FEATURES = [
-    "runs_since_peak",   # NaN when <5 prior runs; tree models exploit missingness
-    "trial_recency",     # 999 = no trial; keep NaN rather than corrupt with 0 (0 = trial today)
-]
+# Task-12 odds-source modes (env STRIDE_TRAIN_ODDS_SOURCE, default "legacy"):
+#   legacy          — SP-filled odds, today's behavior (default; a retrain run
+#                     without the flag is unchanged)
+#   snapshot        — tip-time snapshot odds ONLY; rows without one are dropped
+#                     upstream (filter_snapshot_rows). Never falls back to SP.
+#   snapshot_hybrid — all rows kept; snapshot odds where odds_source=='snapshot',
+#                     NaN elsewhere, with market_odds + the relative-market trio
+#                     NaN-preserved so trees treat unknown-odds as missing.
+# SP is unknowable at tip time, so training the top feature (market_odds) on it
+# makes the model's dominant input mean something different than at serve.
+_TRAIN_ODDS_MODES = ("legacy", "snapshot", "snapshot_hybrid")
+_HYBRID_NAN_PRESERVE = ("market_odds", "fair_implied_prob", "odds_rank", "odds_rank_pct")
+
+
+def _train_odds_source() -> str:
+    mode = os.environ.get("STRIDE_TRAIN_ODDS_SOURCE", "legacy").strip().lower()
+    if mode not in _TRAIN_ODDS_MODES:
+        print(f"  WARNING: unknown STRIDE_TRAIN_ODDS_SOURCE={mode!r} — using 'legacy'")
+        mode = "legacy"
+    return mode
+
+
+def filter_snapshot_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only rows with tip-time snapshot odds (STRIDE_TRAIN_ODDS_SOURCE=
+    snapshot). Loud by design: a silent row shrink would corrupt every
+    downstream metric, and there is deliberately NO SP fallback."""
+    if "odds_source" not in df.columns:
+        print("  ERROR: STRIDE_TRAIN_ODDS_SOURCE=snapshot but the training frame has "
+              "no odds_source column — refresh training_view_v2 (roi/04) first")
+        sys.exit(2)
+    keep = df["odds_source"].astype(str) == "snapshot"
+    n_keep = int(keep.sum())
+    print(f"  Odds source=snapshot: kept {n_keep:,}/{len(df):,} rows "
+          f"(dropped {len(df) - n_keep:,} without snapshot odds)")
+    if n_keep == 0:
+        print("  ERROR: 0 rows with snapshot odds — refusing to train on an empty frame")
+        sys.exit(2)
+    return df[keep].copy()
 
 # Mapping: training_view_v2 column  ->  FEATURE_COLUMNS name
 VIEW_TO_FEATURE_MAP = {
@@ -148,7 +172,10 @@ VIEW_TO_FEATURE_MAP = {
     "distance_strike_rate": "distance_strike_rate",
 }
 
-# Full FEATURE_COLUMNS list as defined in RacingMLModel (77 total)
+# FEATURE_COLUMNS — kept in lockstep with ml_model.RacingMLModel.FEATURE_COLUMNS
+# (enforced by test_feature_columns_lockstep.py). 68 columns after the task-12
+# pruning of 45 dead/constant features (docs/research/TASK12_FEATURE_DECISIONS.md);
+# takes effect at the next retrain — the live pkl carries its own trained columns.
 FEATURE_COLUMNS = [
     "distance_strike_rate",
     "course_strike_rate",
@@ -162,55 +189,13 @@ FEATURE_COLUMNS = [
     "weight_kg",
     "ground_suitability",
     "market_odds",
-    "running_style_score",
-    "pace_advantage",
-    "is_high_pace_expected",
-    "distance_style_match",
     "class_movement",
     "is_class_drop",
     "is_class_rise",
-    "is_first_time_stakes",
-    "is_blinkers_first_time",
-    "is_elite_jockey",
-    "is_elite_trainer",
-    "is_jockey_upgrade",
-    "barrier_advantage",
-    "track_bias_score",
     "is_improving",
     "improvement_score",
     "is_in_form_cycle",
     "has_dominant_win",
-    "is_steam_move",
-    "is_drift",
-    "odds_movement_pct",
-    "last_start_market_diff",
-    "avg_market_diff_3runs",
-    "market_trend_shortening",
-    "market_trend_drifting",
-    "empirical_barrier_advantage",
-    "predicted_settling_pos",
-    "settling_percentile",
-    "pace_pressure_index",
-    "settling_difficulty",
-    "settling_pace_interaction",
-    "is_congested_speed",
-    "speed_horse_ratio",
-    "days_since_last_normalized",
-    "prep_run_x_days_since",
-    "run_spacing_quality",
-    "empirical_freshness_score",
-    "is_quick_backup",
-    "is_long_absence",
-    "distance_change_staleness",
-    "class_x_spell",
-    "steam_velocity",
-    "drift_velocity",
-    "late_move_indicator",
-    "market_confidence",
-    "relative_move",
-    "smart_money_score",
-    "is_insider_signal",
-    "field_market_agreement",
     "z_200m",
     "z_400m",
     "z_600m",
@@ -232,10 +217,8 @@ FEATURE_COLUMNS = [
     "first_up_win_rate",
     "second_up_win_rate",
     "consistency_score",
-    "trainer_momentum_score",
     "going_suitability",
     "fitness_x_distance",
-    "barrier_x_pace_inv",
     "sectional_x_going",
     "class_drop_x_trajectory",
     "campaign_run_x_fitness",
@@ -247,7 +230,6 @@ FEATURE_COLUMNS = [
     "market_efficiency_flag",
     "td_pace_bias",
     "td_upset_rate",
-    "td_barrier_style_edge",
     "td_closing_speed_bias",
     # RED (<20% coverage) features excluded from this retrain:
     #   dist_sectional_slope (13.7%), dist_sectional_recency_weighted (13.4%),
@@ -274,8 +256,10 @@ FEATURE_COLUMNS = [
     "odds_rank_pct",
 ]
 
-# Non-sectional features — fill NaN with 0 for these (exclude both PHASE2 and NAN_PRESERVE)
-NON_SECTIONAL_FEATURES = [f for f in FEATURE_COLUMNS if f not in PHASE2_FEATURES and f not in NAN_PRESERVE_FEATURES]
+# Non-sectional features — fill NaN with 0 for these. NAN_PRESERVE_FEATURES
+# from nan_contract is the FULL preserve set (PHASE2 + trainer preserve list),
+# so this equals the old `not in PHASE2 and not in NAN_PRESERVE` exactly.
+NON_SECTIONAL_FEATURES = [f for f in FEATURE_COLUMNS if f not in NAN_PRESERVE_FEATURES]
 
 MODELS_DIR = os.path.join(SCRIPT_DIR, "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -315,6 +299,10 @@ def load_training_data() -> pd.DataFrame:
             -- Odds (sp_odds is the most populated)
             sp_odds,
             market_odds,
+            -- Task-12 snapshot odds (roi/04 view columns): tip-time median and
+            -- provenance. Only consumed when STRIDE_TRAIN_ODDS_SOURCE != legacy.
+            tip_time_odds,
+            odds_source,
             -- Stored MC-stage model probability (prediction_audit via the
             -- view). Benchmark column only — never a training feature:
             -- build_feature_matrix restricts to FEATURE_COLUMNS.
@@ -554,8 +542,18 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
 
 
-    # market_odds: prefer view's market_odds (sparse) else use sp_odds
-    if "market_odds" in df.columns and "sp_odds" in df.columns:
+    # market_odds: prefer view's market_odds (sparse) else use sp_odds.
+    # STRIDE_TRAIN_ODDS_SOURCE (task 12) switches the source: SP is unknowable
+    # at tip time, so snapshot modes use tip_time_odds and never fall back to SP.
+    _odds_mode = _train_odds_source()
+    if _odds_mode == "snapshot":
+        # Rows were already filtered to odds_source == 'snapshot' upstream.
+        df["_effective_odds"] = pd.to_numeric(df.get("tip_time_odds"), errors="coerce")
+    elif _odds_mode == "snapshot_hybrid":
+        _is_snap = df.get("odds_source", pd.Series("", index=df.index)).astype(str) == "snapshot"
+        df["_effective_odds"] = pd.to_numeric(
+            df.get("tip_time_odds"), errors="coerce").where(_is_snap)
+    elif "market_odds" in df.columns and "sp_odds" in df.columns:
         df["_effective_odds"] = pd.to_numeric(
             df["market_odds"], errors="coerce"
         ).fillna(pd.to_numeric(df["sp_odds"], errors="coerce"))
@@ -583,6 +581,14 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         for _c in ("fair_implied_prob", "odds_rank", "odds_rank_pct"):
             out[_c] = 0.0
 
+    if _odds_mode == "snapshot_hybrid":
+        # Unknown-odds rows keep NaN (never 0, never SP) so trees isolate the
+        # missing case; the NON_SECTIONAL fill below skips these columns too.
+        _unknown_odds = ~pd.to_numeric(df["_effective_odds"], errors="coerce").gt(1.0)
+        for _c in _HYBRID_NAN_PRESERVE:
+            if _c in out.columns:
+                out.loc[_unknown_odds, _c] = np.nan
+
     for col in FEATURE_COLUMNS:
         if col not in out.columns:
             out[col] = np.nan
@@ -599,29 +605,32 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             out.update(form_df)
             print(f"  Form features applied: {sorted(form_cols_present)}")
 
-    _td_profiles = {}
-    _td_profile_path = os.path.join(SCRIPT_DIR, "intelligence", "track_distance_profiles.json")
-    if os.path.exists(_td_profile_path):
-        try:
-            import json as _json
-            with open(_td_profile_path) as _f:
-                _td_profiles = _json.load(_f)
-            print(f"  Track-distance profiles loaded: {len(_td_profiles)} entries")
-        except Exception as _e:
-            print(f"  WARNING: Track-distance profiles load failed: {_e}")
+    # As-of (monthly-bucketed) profiles kill the aggregate leak: each row is
+    # scored against races strictly before its own month. Legacy snapshot is a
+    # leaking fallback only (warned about inside the loader).
+    from track_profiler import (
+        lookup_profile as _td_lookup,
+        load_td_profiles_for_training as _td_load,
+        select_bucket as _td_select_bucket,
+    )
+    _td_profiles_asof, _td_profiles = _td_load(SCRIPT_DIR)
 
-    if _td_profiles:
-        from track_profiler import lookup_profile as _td_lookup
+    if _td_profiles_asof or _td_profiles:
         _tracks = df["track"].astype(str).str.strip().values
         _dists = pd.to_numeric(df.get("distance_m", pd.Series(dtype=float)), errors="coerce").fillna(0).astype(int).values
         _barriers_raw = df["barrier"].values if "barrier" in df.columns else [None] * len(df)
+        _race_dates = (pd.to_datetime(df["race_date"], errors="coerce")
+                       if "race_date" in df.columns
+                       else pd.Series(pd.NaT, index=df.index))
         td_features = []
         for i in range(len(df)):
             try:
                 b = int(_barriers_raw[i]) if pd.notna(_barriers_raw[i]) else None
             except (ValueError, TypeError):
                 b = None
-            td_features.append(_td_lookup(_td_profiles, _tracks[i], int(_dists[i]),
+            _profiles_i = (_td_select_bucket(_td_profiles_asof, _race_dates.iloc[i])
+                           if _td_profiles_asof else _td_profiles)
+            td_features.append(_td_lookup(_profiles_i, _tracks[i], int(_dists[i]),
                                           barrier=b, running_style=None))
         td_df = pd.DataFrame(td_features, index=df.index)
         for col in ["td_pace_bias", "td_upset_rate", "td_barrier_style_edge", "td_closing_speed_bias"]:
@@ -656,12 +665,9 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     fitness_proxy = (1 - (crn - 3).abs() * 0.15).clip(lower=0)
     out["fitness_x_distance"] = fitness_proxy * out["distance_strike_rate"].fillna(0)
 
-    # barrier_x_pace_inv: use computed pace_pressure_score if it has meaningful variation
-    _pps = out["pace_pressure_score"]
-    if _pps.std() >= 0.05:
-        out["barrier_x_pace_inv"] = out["barrier_advantage"].fillna(0) * _pps
-    else:
-        out["barrier_x_pace_inv"] = out["barrier_advantage"].fillna(0) * 0.5
+    # barrier_x_pace_inv removed (task-12 pruning): its only input,
+    # barrier_advantage, was never assigned at train, so the product was
+    # identically 0 (finding 6c). Re-entry path: task-14 plumbing decision.
 
     # sectional_x_going: z_200m * going_suitability
     out["sectional_x_going"] = out["z_200m"].fillna(0) * out["going_suitability"].fillna(0.5)
@@ -677,8 +683,9 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
     # step_up_x_dist_slope: excluded (RED coverage) — depends on dist_sectional_slope (13.7%)
 
+    _skip_fill = _HYBRID_NAN_PRESERVE if _odds_mode == "snapshot_hybrid" else ()
     for col in NON_SECTIONAL_FEATURES:
-        if col in out.columns:
+        if col in out.columns and col not in _skip_fill:
             out[col] = out[col].fillna(0)
 
     # Phase 2 sectional columns + NAN_PRESERVE_FEATURES intentionally keep NaN (tree models)
@@ -1418,8 +1425,11 @@ def main():
     print("=" * 70)
     print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Output : {output_model_path}")
+    print(f"  Odds source mode : {_train_odds_source()}  (STRIDE_TRAIN_ODDS_SOURCE)")
 
     df_raw = load_training_data()
+    if _train_odds_source() == "snapshot":
+        df_raw = filter_snapshot_rows(df_raw)
 
     n_total = len(df_raw)
     n_winners = int(df_raw["is_winner"].astype(int).sum())

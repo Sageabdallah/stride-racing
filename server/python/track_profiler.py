@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
-"""Track-Distance Profile Builder — analyses last 2 years of race results to produce per track-distance profiles for pace bias, barrier heatmap, winning sectional profile, upset rate, and closing speed bias."""
+"""Track-Distance Profile Builder — analyses last 2 years of race results to produce per track-distance profiles for pace bias, barrier heatmap, winning sectional profile, upset rate, and closing speed bias.
 
+RUN-TASK (retrain session only — heavy reads against prod, do not run casually):
+    python track_profiler.py --buckets 2024-05 2026-08
+Builds one as-of profile set per month M (races strictly before M-01) and writes
+intelligence/track_distance_profiles_asof.json. retrain_v2.py prefers this file
+over the legacy single snapshot so td_* training features never see the row's
+own race or its future.
+"""
+
+import argparse
 import json
 import os
 import sys
 from collections import defaultdict
-from typing import Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-except ImportError:
-    print("psycopg2 required", file=sys.stderr)
-    sys.exit(1)
+
+def _import_psycopg2():
+    """Lazy so the pure helpers (lookup/select/load) stay importable without a DB driver."""
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        return psycopg2, RealDictCursor
+    except ImportError:
+        print("psycopg2 required", file=sys.stderr)
+        sys.exit(1)
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INTELLIGENCE_DIR = os.path.join(SCRIPT_DIR, "intelligence")
 OUTPUT_PATH = os.path.join(INTELLIGENCE_DIR, "track_distance_profiles.json")
+ASOF_OUTPUT_PATH = os.path.join(INTELLIGENCE_DIR, "track_distance_profiles_asof.json")
 MIN_RUNNERS = 100
 
 
@@ -57,29 +74,46 @@ def _infer_running_style(form_string: str, barrier: int) -> str:
     return "midfield"
 
 
-def build_profiles(conn) -> Dict[str, Any]:
+def build_profiles(conn, as_of: Optional[str] = None) -> Dict[str, Any]:
     """
     Build track-distance profiles from historical data.
 
+    as_of ('YYYY-MM-DD' or None): when set, the window is [as_of - 2 years, as_of)
+    — strictly before the anchor, so the anchor date itself and everything after
+    it stay out of the aggregate. None keeps the legacy serve-time behaviour
+    (rolling 2 years up to today; a fresh serve snapshot only contains the past).
+
     Returns dict keyed by "{track}_{distance_m}" with profile data.
     """
+    _, RealDictCursor = _import_psycopg2()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
+    if as_of:
+        results_filter = ("race_date::date >= %(as_of)s::date - INTERVAL '2 years'\n"
+                          "          AND race_date::date < %(as_of)s::date")
+        sect_filter = ("st.race_date::date >= %(as_of)s::date - INTERVAL '2 years'\n"
+                       "          AND st.race_date::date < %(as_of)s::date")
+        params = {"as_of": as_of}
+    else:
+        results_filter = "race_date::date >= CURRENT_DATE - INTERVAL '2 years'"
+        sect_filter = "st.race_date::date >= CURRENT_DATE - INTERVAL '2 years'"
+        params = {}
+
     print("  Loading race_results_history (last 2 years)...", file=sys.stderr)
-    cur.execute("""
+    cur.execute(f"""
         SELECT track, distance_m, position, barrier, sp_odds,
                field_size, form_string, margin_lengths, horse_name,
                race_date, race_number
         FROM race_results_history
         WHERE position IS NOT NULL
-          AND race_date::date >= CURRENT_DATE - INTERVAL '2 years'
+          AND {results_filter}
         ORDER BY track, distance_m, race_date, race_number
-    """)
+    """, params)
     rows = cur.fetchall()
     print(f"  {len(rows)} rows loaded", file=sys.stderr)
 
     print("  Loading sectional_times for winners...", file=sys.stderr)
-    cur.execute("""
+    cur.execute(f"""
         SELECT st.track, st.distance_m, st.last_200m_time, st.horse_name, st.race_date
         FROM sectional_times st
         JOIN race_results_history rr
@@ -88,8 +122,8 @@ def build_profiles(conn) -> Dict[str, Any]:
          AND st.track = rr.track
         WHERE rr.position = 1
           AND st.last_200m_time IS NOT NULL
-          AND st.race_date::date >= CURRENT_DATE - INTERVAL '2 years'
-    """)
+          AND {sect_filter}
+    """, params)
     sectional_rows = cur.fetchall()
     cur.close()
 
@@ -257,6 +291,99 @@ def save_profiles(profiles: Dict[str, Any]):
     print(f"  Saved to {OUTPUT_PATH}", file=sys.stderr)
 
 
+def _month_range(start_month: str, end_month: str):
+    """Inclusive 'YYYY-MM' iteration, stdlib-only."""
+    y, m = int(start_month[:4]), int(start_month[5:7])
+    ey, em = int(end_month[:4]), int(end_month[5:7])
+    while (y, m) <= (ey, em):
+        yield f"{y:04d}-{m:02d}"
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+
+
+def build_profiles_buckets(conn, start_month: str, end_month: str) -> Dict[str, Any]:
+    """One as-of profile set per month in [start_month, end_month] (YYYY-MM).
+
+    Bucket M is built with as_of = M-01, i.e. contains only races with
+    race_date < M-01, so any training row in month M is scored against data
+    strictly before its own race.
+    """
+    combined: Dict[str, Any] = {}
+    for month in _month_range(start_month, end_month):
+        print(f"  Building as-of bucket {month} (races < {month}-01)...", file=sys.stderr)
+        combined[month] = build_profiles(conn, as_of=f"{month}-01")
+    combined["_meta"] = {
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "as_of_rule": "bucket M contains only races with race_date < M-01",
+    }
+    return combined
+
+
+def save_profiles_asof(combined: Dict[str, Any]):
+    """Save the monthly-bucketed as-of profiles to the intelligence directory."""
+    os.makedirs(INTELLIGENCE_DIR, exist_ok=True)
+    with open(ASOF_OUTPUT_PATH, "w") as f:
+        json.dump(combined, f, indent=2, default=str)
+    print(f"  Saved to {ASOF_OUTPUT_PATH}", file=sys.stderr)
+
+
+def load_profiles_asof(path: str = ASOF_OUTPUT_PATH) -> Dict[str, Any]:
+    """Load monthly-bucketed as-of profiles; {} when absent or invalid.
+
+    Strips "_meta" so the result maps "YYYY-MM" -> profiles dict only.
+    """
+    try:
+        with open(path) as f:
+            combined = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(combined, dict):
+        return {}
+    combined.pop("_meta", None)
+    return combined
+
+
+def select_bucket(asof_buckets: Dict[str, Any], race_date) -> Dict[str, Any]:
+    """Profile dict strictly as-of a training row's race date.
+
+    Bucket "YYYY-MM" holds only races before that month's 1st, so the row's own
+    race (and its future) can never be inside the aggregate. Missing bucket or
+    unparseable date returns {} -> lookup_profile yields the no-data defaults.
+    """
+    rd = pd.to_datetime(race_date, errors="coerce")
+    if pd.isna(rd):
+        return {}
+    return asof_buckets.get(rd.strftime("%Y-%m"), {}) or {}
+
+
+def load_td_profiles_for_training(script_dir: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Load td profiles for retraining: (asof_buckets, legacy_profiles).
+
+    Exactly one of the two is non-empty. Prefers the monthly as-of buckets;
+    falls back to the legacy single snapshot with a loud warning because that
+    snapshot leaks (each row's own result is inside the aggregate). Both absent
+    -> ({}, {}) and the caller fills the no-data defaults.
+    """
+    asof = load_profiles_asof(os.path.join(
+        script_dir, "intelligence", "track_distance_profiles_asof.json"))
+    if asof:
+        print(f"  As-of track-distance profiles loaded: {len(asof)} monthly buckets")
+        return asof, {}
+
+    legacy_path = os.path.join(script_dir, "intelligence", "track_distance_profiles.json")
+    if os.path.exists(legacy_path):
+        try:
+            with open(legacy_path) as f:
+                legacy = json.load(f)
+            print(f"  Track-distance profiles loaded: {len(legacy)} entries")
+            print("  WARNING: td profiles are NOT as-of (legacy snapshot) — known leak")
+            return {}, legacy
+        except Exception as e:
+            print(f"  WARNING: Track-distance profiles load failed: {e}")
+    return {}, {}
+
+
 def lookup_profile(
     profiles: Dict[str, Any],
     track: str,
@@ -312,13 +439,26 @@ def lookup_profile(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Build track-distance profiles.")
+    parser.add_argument("--buckets", nargs=2, metavar=("START_MONTH", "END_MONTH"),
+                        help="Build monthly as-of buckets (YYYY-MM YYYY-MM) into "
+                             "intelligence/track_distance_profiles_asof.json "
+                             "(retrain-session run-task; heavy prod reads)")
+    args = parser.parse_args()
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         print("DATABASE_URL not set", file=sys.stderr)
         sys.exit(1)
 
+    psycopg2, _ = _import_psycopg2()
     conn = psycopg2.connect(database_url)
     try:
+        if args.buckets:
+            combined = build_profiles_buckets(conn, args.buckets[0], args.buckets[1])
+            save_profiles_asof(combined)
+            sys.exit(0)
+
         profiles = build_profiles(conn)
         save_profiles(profiles)
 
