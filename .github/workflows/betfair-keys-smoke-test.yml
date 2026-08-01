@@ -1,0 +1,101 @@
+# Betfair credentials smoke test — proves the Betfair secrets stored in this
+# repo's Actions secrets actually work, without touching money. All logic
+# lives in scripts/betfair_keys_smoke.py so the exact same test can run
+# locally (see that file's docstring) — useful because Betfair's edge blocks
+# GitHub's US-based runner IPs with an HTML 403 page, which the script
+# detects and reports as "untestable from this network" rather than a
+# credential failure. It also falls back to a browser TLS fingerprint
+# (curl_cffi) and the SSO keepAlive endpoint before giving up.
+#
+# Secrets are mapped under many candidate names; the script reports which
+# exist (never values), uses a stored session token when present (validated
+# read-only, never logged out), otherwise makes ONE login attempt (AU host
+# first, per the docs: identitysso.betfair.com.au) and never retries a
+# credential failure — repeated failures are what lock accounts.
+
+name: betfair-keys-smoke-test
+
+# Manual runs only (Actions tab -> betfair-keys-smoke-test -> Run workflow).
+# NOTE: from GitHub-hosted runners this always ends at "untestable" — Betfair's
+# edge blocks their US datacenter IPs (see scripts/BETFAIR_KEYS_STATUS.md).
+# It becomes genuinely useful on a self-hosted runner in an allowed country;
+# until then, run scripts/betfair_keys_smoke.py directly on such a machine.
+on:
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "SSO host order (AU account -> au first)"
+        type: choice
+        default: "au-then-com"
+        options: ["au-then-com", "com-then-au", "au-only", "com-only"]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: betfair-keys-smoke-test
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # Self-hosted Mac runner on an AU IP — Betfair's edge serves HTML 403 to
+    # GitHub's US datacenter runners, so this job is untestable there.
+    # GATED 2026-08-01: no self-hosted runner is registered on this repo yet;
+    # do not merge until one shows online in Settings -> Actions -> Runners.
+    # If the runner is registered with an extra label, append it, e.g.:
+    #   runs-on: [self-hosted, macOS, <operator-label>]
+    runs-on: [self-hosted]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install curl_cffi (browser TLS fingerprint for edge-block retry)
+        run: pip install --quiet curl_cffi || echo "curl_cffi install failed — script degrades gracefully"
+
+      - name: Betfair keys smoke test
+        env:
+          BETFAIR_APP_KEY: ${{ secrets.BETFAIR_APP_KEY }}
+          BETFAIR_APPKEY: ${{ secrets.BETFAIR_APPKEY }}
+          BETFAIR_API_KEY: ${{ secrets.BETFAIR_API_KEY }}
+          BETFAIR_KEY: ${{ secrets.BETFAIR_KEY }}
+          BF_APP_KEY: ${{ secrets.BF_APP_KEY }}
+          BETFAIR_APP_KEY_LIVE: ${{ secrets.BETFAIR_APP_KEY_LIVE }}
+          BETFAIR_APP_KEY_DELAYED: ${{ secrets.BETFAIR_APP_KEY_DELAYED }}
+          BETFAIR_LIVE_APP_KEY: ${{ secrets.BETFAIR_LIVE_APP_KEY }}
+          BETFAIR_DELAYED_APP_KEY: ${{ secrets.BETFAIR_DELAYED_APP_KEY }}
+          BETFAIR_USERNAME: ${{ secrets.BETFAIR_USERNAME }}
+          BETFAIR_USER: ${{ secrets.BETFAIR_USER }}
+          BETFAIR_EMAIL: ${{ secrets.BETFAIR_EMAIL }}
+          BETFAIR_LOGIN: ${{ secrets.BETFAIR_LOGIN }}
+          BF_USERNAME: ${{ secrets.BF_USERNAME }}
+          BF_USER: ${{ secrets.BF_USER }}
+          BETFAIR_UN: ${{ secrets.BETFAIR_UN }}
+          BETFAIR_USR: ${{ secrets.BETFAIR_USR }}
+          BETFAIR_USER_NAME: ${{ secrets.BETFAIR_USER_NAME }}
+          BETFAIR_USERID: ${{ secrets.BETFAIR_USERID }}
+          BETFAIR_ACCOUNT: ${{ secrets.BETFAIR_ACCOUNT }}
+          USERNAME: ${{ secrets.USERNAME }}
+          EMAIL: ${{ secrets.EMAIL }}
+          BETFAIR_PASSWORD: ${{ secrets.BETFAIR_PASSWORD }}
+          BETFAIR_PASS: ${{ secrets.BETFAIR_PASS }}
+          BETFAIR_PW: ${{ secrets.BETFAIR_PW }}
+          BF_PASSWORD: ${{ secrets.BF_PASSWORD }}
+          BF_PASS: ${{ secrets.BF_PASS }}
+          BETFAIR_PWD: ${{ secrets.BETFAIR_PWD }}
+          BETFAIR_PASSWD: ${{ secrets.BETFAIR_PASSWD }}
+          BETFAIR_LOGIN_PASSWORD: ${{ secrets.BETFAIR_LOGIN_PASSWORD }}
+          BETFAIR_SECRET: ${{ secrets.BETFAIR_SECRET }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          BETFAIR_SESSION_TOKEN: ${{ secrets.BETFAIR_SESSION_TOKEN }}
+          BETFAIR_SSOID: ${{ secrets.BETFAIR_SSOID }}
+          BETFAIR_TOKEN: ${{ secrets.BETFAIR_TOKEN }}
+          BETFAIR_SESSION: ${{ secrets.BETFAIR_SESSION }}
+          SESSION_TOKEN: ${{ secrets.SESSION_TOKEN }}
+          SSOID: ${{ secrets.SSOID }}
+          BETFAIR_CERT: ${{ secrets.BETFAIR_CERT }}
+          BETFAIR_CERT_PEM: ${{ secrets.BETFAIR_CERT_PEM }}
+          BETFAIR_CERT_KEY: ${{ secrets.BETFAIR_CERT_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SMOKE_HOSTS: ${{ inputs.hosts }}
+        run: python3 scripts/betfair_keys_smoke.py

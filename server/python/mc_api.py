@@ -7670,6 +7670,18 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                     _norm_place = max(0.0, float(r.get('_rawPlaceProb', 0.0))) * _place_sum_target / _raw_place_total
                     r['placePercentage'] = round(min(100.0, _norm_place), 2)
 
+            # Task 05: shared overround-corrected market probability for the
+            # standalone edge (STRIDE_SHARED_MARKET_PROB, default OFF — the
+            # legacy raw-implied edge below is byte-identical when off).
+            _shared_market_prob = os.environ.get("STRIDE_SHARED_MARKET_PROB", "false").strip().lower() in ("true", "1", "yes")
+            _mkt_overround = 1.0
+            if _shared_market_prob:
+                try:
+                    from market_prob import overround as _mp_overround, true_market_prob_pct as _mp_true_market
+                    _mkt_overround = _mp_overround([r.get('marketOdds') for r in results])
+                except Exception:
+                    _shared_market_prob = False
+
             for r in results:
                 _m_odds = r.get('marketOdds')
                 try:
@@ -7679,7 +7691,10 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 r['marketOdds'] = _m_odds
 
                 if _m_odds and _m_odds > 1:
-                    _implied = 100.0 / _m_odds
+                    if _shared_market_prob:
+                        _implied = _mp_true_market(_m_odds, _mkt_overround)
+                    else:
+                        _implied = 100.0 / _m_odds
                     _edge = r['winPercentage'] - _implied
                     _ev = ((r['winPercentage'] / 100.0) * _m_odds) - 1.0
                     r['marketImpliedWinPct'] = round(_implied, 2)

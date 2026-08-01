@@ -106,19 +106,36 @@ starting prices.
 
 ### ROI by selection band
 
-| Strategy | Bets | Strike rate | P&L | ROI |
-|---|---:|---:|---:|---:|
-| **Value Edge ≥ 3% ($2–$15)** | **142** | **9.9%** | **+$1,750** | **+12.3%** |
-| Top Pick (highest prob) | 344 | 33.7% | −$1,445 | −4.2% |
-| All $2–$20, positive edge | 333 | 7.5% | −$1,800 | −5.4% |
-| Big Value $5–$15, ≥ 5% edge | 54 | 7.4% | −$800 | −14.8% |
-| Mid-Range $3–$8, ≥ 5% edge | 25 | 12.0% | −$700 | −28.0% |
-| Short Price $2–$5, ≥ 3% edge | 7 | 0.0% | −$700 | −100.0% |
+Net ROI is after 8% commission on winnings (NSW/ACT tote is 10% — both rates
+are in the JSON). CI is the 95% bootstrap interval on net ROI (10k resamples,
+resampling bets). A band is REPORTABLE only when its CI excludes zero **and**
+it has ≥ 200 bets.
 
-The headline is **Value Edge ≥ 3%** — the model's selective edge filter
-finds 142 bets in this window at **+12.3% ROI**. Top Pick lands 33.7% of
-the time but at favourite prices and loses 4.2%. That's the value-versus-
-accuracy tradeoff the convergence layer is designed to navigate.
+| Strategy | Bets | Strike rate | P&L | ROI (gross) | ROI (net 8%) | 95% CI (net) | Status |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Value Edge ≥ 3% ($2–$15) | 142 | 9.9% | +$1,750 | +12.3% | +4.1% | [−45.1, +61.9]% | **NOT_REPORTABLE** |
+| Top Pick (highest prob) | 344 | 33.7% | −$1,445 | −4.2% | −9.2% | [−23.4, +5.6]% | NOT_REPORTABLE |
+| All $2–$20, positive edge | 333 | 7.5% | −$1,800 | −5.4% | −12.4% | [−45.6, +23.5]% | NOT_REPORTABLE |
+| Big Value $5–$15, ≥ 5% edge | 54 | 7.4% | −$800 | −14.8% | −21.0% | [−87.9, +64.7]% | NOT_REPORTABLE |
+| Mid-Range $3–$8, ≥ 5% edge | 25 | 12.0% | −$700 | −28.0% | −32.8% | [−100.0, +49.4]% | NOT_REPORTABLE |
+| Short Price $2–$5, ≥ 3% edge | 7 | 0.0% | −$700 | −100.0% | −100.0% | [−100.0, −100.0]% | NOT_REPORTABLE |
+
+The old headline — Value Edge ≥ 3% at +12.3% gross — does **not** survive
+scrutiny, and this table now says so instead of hiding it:
+
+- Its 95% CI spans zero ([−45.1, +61.9]%); z = 0.15, bootstrap P(ROI ≤ 0) ≈ 46%.
+- It is the best of 6 bands tried on one window: Bonferroni requires z ≥ 2.64.
+- At 8% commission the +12.3% gross is +4.1% net (10%: +2.1%) — two-thirds
+  to five-sixths of the apparent edge is commission.
+- Remove its single best winner and the band is at −5.0% (two: −13.6%).
+  The "edge" is 1–2 horses.
+- Its 142-bet path includes a max losing streak of 30 and a 46.7-unit
+  drawdown — a real bankroll would have lived through that.
+
+No band is reportable on this window. Top Pick lands 33.7% of the time but
+at favourite prices (−9.2% net). The value-versus-accuracy tradeoff the
+convergence layer navigates is real; a statistically validated edge on this
+sample is not.
 
 ### Calibration
 
