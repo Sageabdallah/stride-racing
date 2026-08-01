@@ -12,6 +12,17 @@ import pandas as pd
 from typing import Dict, Optional
 
 
+def _race_anchor(race_date_str: Optional[str]) -> pd.Timestamp:
+    """Anchor for recency features: the subject race date when known, else the
+    wall clock (live serve path, where now ~= race day). Never raises — bad or
+    missing input falls back to now() so serving is never blocked by a bad date."""
+    if race_date_str:
+        ts = pd.to_datetime(race_date_str, errors="coerce")
+        if pd.notna(ts):
+            return ts
+    return pd.Timestamp.now()
+
+
 def _normalise_going(going_str: str) -> str:
     """Normalise going description to one of: firm, good, soft, heavy, synthetic."""
     g = (going_str or "").lower().strip()
@@ -95,7 +106,11 @@ def compute_single_horse_features(
     if pd.notna(last_run_date):
         days = 999
         try:
-            days = max(0, (pd.Timestamp.now() - last_run_date).days)
+            # Anchor to the subject race, not the wall clock: at train time
+            # now() is the retrain date, which inflates days_since_run for
+            # every historical row by however long ago the retrain runs.
+            anchor = _race_anchor(race_date_str)
+            days = max(0, (anchor - last_run_date).days)
         except Exception:
             pass
         features["days_since_run"] = min(days, 999)
@@ -304,7 +319,7 @@ def compute_single_horse_features(
             and current_distance_m):
         _sect_rw = prior_sectionals.dropna(subset=["last_200m_time", "distance_m"]).copy()
         if len(_sect_rw) >= 2:
-            _today = pd.to_datetime(race_date_str) if race_date_str else pd.Timestamp.now()
+            _today = _race_anchor(race_date_str)
 
             def _recency_w(rd):
                 d = (_today - rd).days if pd.notna(rd) else 365
@@ -981,6 +996,8 @@ def batch_compute_form_features(training_df: pd.DataFrame, conn) -> pd.DataFrame
     )
     if not months:
         print("  WARNING: training_df has no valid race_dates for time-aware form features")
+        # Wall clock is intentional here: this bucket is only a fallback when no
+        # row has a race_date (live-serve shape), so "latest month" == current month.
         months = [pd.Timestamp.utcnow().strftime("%Y-%m-01")]
 
     print(f"  Building time-aware lookups for {len(months)} month buckets "

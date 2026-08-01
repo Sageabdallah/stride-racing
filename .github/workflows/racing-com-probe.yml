@@ -1,0 +1,36 @@
+# Racing.com GraphQL capability probe — read-only recon for replacing the
+# discontinued Racing API (AU). Runs scripts/racing_com_probe.py with the
+# repo's existing RACING_COM_API_KEY secret. racing.com is not geo-blocked
+# from GitHub runners (unlike Betfair), so this runs anywhere.
+#
+# Push trigger is scoped to the migration branch + probe files only, because
+# GitHub cannot dispatch a workflow that exists solely on a non-default
+# branch; drop the push trigger if this merges to main.
+
+name: racing-com-probe
+
+on:
+  push:
+    branches: ["claude/betfair-keys-smoke-test-4yqny1"]
+    paths:
+      - "scripts/racing_com_probe.py"
+      - ".github/workflows/racing-com-probe.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: racing-com-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe racing.com GraphQL capabilities
+        env:
+          RACING_COM_API_KEY: ${{ secrets.RACING_COM_API_KEY }}
+        run: python3 scripts/racing_com_probe.py

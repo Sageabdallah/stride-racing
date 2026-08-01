@@ -243,6 +243,16 @@ class TestReportable:
         assert roi_stats.ci_spans_zero({'ci_95': [-1.0, 2.0]}) is True
         assert roi_stats.ci_spans_zero({'ci95': [1.0, 2.0]}) is False
         assert roi_stats.ci_spans_zero(None) is None
+
+    def test_ci_is_positive_and_lower_bound(self):
+        assert roi_stats.ci_is_positive({"ci_95": [0.4, 4.6]}) is True
+        assert roi_stats.ci_is_positive([0.4, 4.6]) is True
+        assert roi_stats.ci_is_positive({"ci_95": [-9.0, -1.0]}) is False
+        assert roi_stats.ci_is_positive({"ci_95": [-1.5, 6.2], "spans_zero": True}) is False
+        assert roi_stats.ci_is_positive({}) is None
+        assert roi_stats.ci_is_positive(None) is None
+        assert roi_stats.ci_lower_bound({"ci_95": [0.4, 4.6]}) == 0.4
+        assert roi_stats.ci_lower_bound(None) is None
         assert roi_stats.ci_spans_zero({}) is None
 
     def test_reportability_floor_is_single_sourced(self):

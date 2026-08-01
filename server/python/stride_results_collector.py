@@ -769,6 +769,21 @@ def collect_results(dates: List[str], parallel: bool = False,
     except Exception as e:
         print(f"  Shadow matching failed (non-fatal): {e}", file=sys.stderr)
 
+    print(f"\n[Step 5c] Settling selection ledger rows...", file=sys.stderr)
+    try:
+        from selection_ledger import settle_pending_rows
+        ledger_settled = 0
+        for date in dates:
+            out = settle_pending_rows(conn, date) or {}
+            ledger_settled += out.get("settled") or 0
+            if out.get("reason") and "net_settlement" in str(out["reason"]):
+                # Missing migration: the loud warning is already emitted —
+                # once per run is enough, and every date would fail the same way.
+                break
+        print(f"  Selection ledger: {ledger_settled} rows settled", file=sys.stderr)
+    except Exception as e:
+        print(f"  Ledger settlement failed (non-fatal): {e}", file=sys.stderr)
+
     franking_summary = {"horses_recomputed": 0}
     if not skip_franking and needed:
         print(f"\n[Step 6] Triggering franking updates...", file=sys.stderr)

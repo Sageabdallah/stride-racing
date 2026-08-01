@@ -1242,6 +1242,99 @@ def _safe_json(val):
         return None
 
 
+def launch_late_odds_watcher(date_str):
+    """ROI task 04 (G1): start the day's T-5min late-odds watcher, detached.
+
+    The tips run is the one step every real invocation path shares — the
+    /stride-full runbook and the Node scheduler both reach run_tips_pipeline
+    without ever running run_full_pipeline.py, so a watcher wired only into
+    that orchestrator leaves the odds clock dead under automation. Launching
+    here (fire-and-forget, start_new_session) covers every path;
+    capture_late_odds deduplicates via a per-date pidfile, so a second launch
+    from run_full_pipeline is a no-op. Gated by the same
+    STRIDE_ODDS_SNAPSHOT_WRITE switch as the tip_time hook
+    (STRIDE_SKIP_ODDS_WATCH=true also skips), and a launch failure must never
+    break tipping.
+    """
+    try:
+        if os.environ.get("STRIDE_SKIP_ODDS_WATCH", "false").strip().lower() in ("true", "1", "yes"):
+            print("  [LATE_ODDS] watcher skipped (STRIDE_SKIP_ODDS_WATCH)", file=sys.stderr)
+            return
+        from odds_snapshots import snapshot_write_enabled
+        if not snapshot_write_enabled():
+            print("  [LATE_ODDS] watcher skipped (STRIDE_ODDS_SNAPSHOT_WRITE off)", file=sys.stderr)
+            return
+        script_dir = Path(__file__).resolve().parent
+        log_path = script_dir / "logs" / f"late_odds_{date_str}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "ab") as logf:
+            proc = subprocess.Popen(
+                [sys.executable, str(script_dir / "capture_late_odds.py"),
+                 "--watch", "--date", date_str],
+                cwd=str(script_dir), stdout=logf, stderr=logf,
+                start_new_session=True)
+        print(f"  [LATE_ODDS] watcher launched (pid {proc.pid}) -> {log_path.name}",
+              file=sys.stderr)
+    except Exception as e:  # a monitoring miss must never fail tipping
+        print(f"  [LATE_ODDS] watcher launch failed (non-fatal): {e}", file=sys.stderr)
+
+
+def persist_selection_ledger(race_tips, date_str):
+    """Write one selection-ledger row per race — bet or refused (roi-roadmap 01).
+
+    Measurement only: a no-op unless STRIDE_LEDGER_WRITE=true (default off),
+    and every failure is logged and swallowed — this must never delay or break
+    the tips pipeline. Refused rows carry the would-be price so EV-gate
+    quality becomes measurable; they are staked 0u and can never book P&L.
+    """
+    try:
+        from selection_ledger import _stride_flag, build_ledger_row, persist_rows
+    except Exception as _imp_err:
+        print(f"  [LEDGER] selection_ledger unavailable: {_imp_err}", file=sys.stderr)
+        return
+    if not _stride_flag("STRIDE_LEDGER_WRITE"):
+        return
+
+    rows = []
+    for race in race_tips:
+        if race.get("error"):
+            continue
+        race_key = {"race_date": date_str, "track": race.get("track"),
+                    "race_number": race.get("race_number")}
+        bet_pick = race.get("bet_pick")
+        if isinstance(bet_pick, dict) and bet_pick.get("should_bet"):
+            rows.append(build_ledger_row(bet_pick, race_key, refused=False))
+            continue
+        leader = race.get("raw_model_leader")
+        if not isinstance(leader, dict) or not leader.get("horse"):
+            continue
+        refused_pick = dict(leader)
+        refused_pick["should_bet"] = False
+        refused_pick["staking"] = "0u"  # a refused row must never book P&L
+        refused_pick["selection_origin"] = (
+            leader.get("selection_origin") or "ev_gate_refused")
+        rows.append(build_ledger_row(refused_pick, race_key, refused=True))
+
+    if not rows:
+        return
+    try:
+        conn = db_connect()
+    except Exception as _db_err:
+        print(f"  [LEDGER] DB unavailable — {len(rows)} row(s) not written: {_db_err}",
+              file=sys.stderr)
+        return
+    try:
+        persist_rows(conn, rows)
+    except Exception as _write_err:
+        print(f"  [LEDGER] write failed (pipeline unaffected): {_write_err}",
+              file=sys.stderr)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def store_selections_in_db(race_tips, date_str):
     """Insert top picks into the selections table with full enrichment data."""
     try:
@@ -2155,6 +2248,19 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             field_size = len(runners)
             print(f"\n  {track} R{race_num} — {race_name} {distance} ({going}) | {field_size} runners", file=sys.stderr)
 
+            # ROI task 04: persist the odds actually knowable at prediction
+            # time — one tip_time row per runner per bookmaker. Measurement
+            # only: fire-and-forget, degrades to a no-op without a DB, and
+            # must never delay or break tipping (STRIDE_ODDS_SNAPSHOT_WRITE=0
+            # disables).
+            try:
+                from odds_snapshots import capture_tip_time_snapshots
+                capture_tip_time_snapshots(
+                    track=track, race_number=race_num, date_str=date_str,
+                    runners=runners, race=race)
+            except Exception:
+                pass
+
             try:
                 from race_normaliser import normalise_race as norm_race
                 race["course"] = track
@@ -2888,9 +2994,16 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             except Exception as _conv_db_err:
                 print(f"  [BLENDER] Convergence DB write failed: {_conv_db_err}", file=sys.stderr)
 
+    # roi-roadmap 01: ledger capture is measurement-only and must never block
+    # the pipeline; it no-ops unless STRIDE_LEDGER_WRITE=true.
+    persist_selection_ledger(all_race_tips, date_str)
+
     if store_in_db:
         store_selections_in_db(all_race_tips, date_str)
         store_final_probs_in_audit(all_race_tips, date_str)
+        # ROI task 04 (G1): tips is the invocation point every real path
+        # shares — the odds clock starts here, or it does not start at all.
+        launch_late_odds_watcher(date_str)
     else:
         print("  [DB] Skipping selection storage by request", file=sys.stderr)
 

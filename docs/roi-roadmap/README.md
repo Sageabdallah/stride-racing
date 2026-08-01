@@ -79,10 +79,10 @@ of accumulation. Every day delayed is a day added to the retrain date.
 
 | Task | Status | Date | Evidence link |
 |------|--------|------|---------------|
-| 01 | ⬜ | | |
+| 01 | 🟡 | 2026-07-27 | `roi/01-ledger-clv-net-settlement` |
 | 02 | ⬜ | | |
 | 03 | ⬜ | | |
-| 04 | ⬜ | | |
+| 04 | 🟡 | 2026-07-27 | branch `roi/04-as-of-odds-snapshot` (migration `migrations/runner_odds_snapshots.sql`; capture live, coverage pending 3 race days) |
 | 05 | ⬜ | | |
 | 06 | ⬜ | | |
 | 07 | ⬜ | | |
