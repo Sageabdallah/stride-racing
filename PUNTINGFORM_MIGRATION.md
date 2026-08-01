@@ -236,6 +236,21 @@ alias finding below).
       window is only ~5 weeks (weekday cells average 4–5 samples), the
       historical baseline is winter-only, and 8 country one-off tracks
       rest on manual state assignment (noted in the script).
+- [x] [C] **F-SEC-PLACEHOLDER** (sectional collector `Unknown_<id>` runner
+      names): root cause fixed in `nsw_sectional_collector.py` — when a .tol
+      file lacks the horse-metadata record the write path now resolves the
+      runner against `race_results_history` (same race + finishing position,
+      falling back to barrier; `pf_results_mapper.norm_name` claimed-name
+      exclusion) or skips the runner with one warning per race; no new
+      placeholder rows can be written. Prod report (read-only, 2026-08-01):
+      **20 placeholder rows, all `source='nsw_pidata'` — 2026-01: 8
+      (Canterbury Park 2026-01-01 R7), 2026-06: 7 (Hawkesbury 2026-06-04 R2),
+      2026-07: 5 (Gosford 2026-07-09 R4); 20/20 join-resolvable.** The gated
+      backfill-fix (`server/python/fix_sectional_placeholder_names.py
+      --apply`: backup table `sectional_times_placeholder_backup_20260801`,
+      idempotent updates of the resolvable rows only) is built and tested
+      but **not yet run — it awaits the operator's explicit prod WRITE
+      approval** (two-gate rule).
 - **Done when:** discrepancy rate is quantified and either negligible or
   explained in this file. — **Met 2026-08-01**, with two named follow-ups
   (F-TRACK-ALIAS, F-SEC-PLACEHOLDER) above.
