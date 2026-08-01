@@ -137,8 +137,20 @@ caret-delimited CSV service remains available as a fallback shape.
       `TARGET_TRACKS` filtering so downstream code is untouched)
 - [ ] [C] `fetch_and_import_date.py` + `auto_results_collector.py` → PF
       results (existing racing.com fallback retained)
-- [ ] [C] `download_historical.py` + `backfill_barrier_trials.py` → PF within
-      the 60-day window; document the pre-window limitation
+- [x] [C] `download_historical.py` + `backfill_barrier_trials.py` → PF within
+      the window (2026-08-01, branch pf/historical-trials): bulk results go
+      through `pf_results_mapper` into `race_results_history` (target-track
+      filter kept); trials come ONLY from `isBarrierTrial` meetings and keep
+      the exact `trials_<date>.json` contract `import_barrier_trials_to_db.py`
+      loads into `barrier_trial_results` (19 columns, unchanged — verified by
+      feeding PF output through the real importer in tests). The
+      results/trials partition is asserted on every fetched date.
+      **Pre-window limitation:** the Starter wall measured **~31 days** on
+      2026-08-01 (meetingslist 400s before 2026-07-01 — tighter than the
+      ~53 first assumed; pf-verify run 30642646209). Both scripts probe the
+      wall at runtime before fetching, print each skipped date with the
+      reason, and exit `3` (partial-due-to-wall) vs `1` (fetch failure) vs
+      `0` — pre-window dates are unrecoverable without the $1,100 archive.
 - [ ] [C] `odds_movement.py` → Betfair prices (delayed key now; live key when
       activated). Note: Betfair calls cannot run on GitHub-hosted runners —
       Mac/self-hosted runner only
