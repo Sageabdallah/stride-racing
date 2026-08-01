@@ -140,6 +140,15 @@ walk-forward + promotion-gate evidence (`retrain_preflight.py`):
   service, and the Starter-tier levers below move up the ranking. PF
   sectionals become a paid upgrade decision only if the model's sectional
   features prove valuable enough to fund Modeller.
+- **Plan correction (2026-08-01, from the published reference pages):** the
+  "token based authentication" on Ratings is the SAME `apiKey` query
+  parameter as every other endpoint — no second auth mode exists. All five
+  endpoint contracts are pinned and wrapped as typed `pf_client` accessors
+  with docstring contracts: `/Updates/Scratchings?jurisdiction=` (timeStamp +
+  deduction per item), `/Updates/Conditions?jurisdiction=`,
+  `/User/Speedmaps?meetingId=&raceNo=` (pfScore, neuralPrice, speed, settle,
+  mapA2E, jockeyA2E), `/Ratings/MeetingRatings?meetingId=`,
+  `/form/strikerate?entityType=&jurisdiction=`.
 - [ ] [C] **Speedmaps** (Starter ✓) — settling-position/pace-pressure
       features into the existing pace interactions
 - [ ] [C] **PF Ratings** (Starter ✓) — consensus-pillar input and value
@@ -147,7 +156,13 @@ walk-forward + promotion-gate evidence (`retrain_preflight.py`):
 - [ ] [C] **Strike Rates** (Starter ✓) — trainer/jockey actual-vs-expected as
       features (upgrade on raw win% the model uses today)
 - [ ] [C] **Conditions** (Starter ✓) — track grading + weather as serve-time
-      features; **Scratchings** into the serve pipeline for late changes
+      features
+- [x] [C] **Scratchings into the serve pipeline** (2026-08-01): the racecard
+      provider folds `/Updates/Scratchings` into every card — late-scratched
+      runners flagged (never deleted) with the deduction carried in the new
+      additive `scratch_deduction` runner field; a scratchings-feed failure
+      costs late scratchings only, never the card (declared-runner flags
+      from meeting_detail still apply). Golden-pinned.
 - [ ] [C] Retrain + walk-forward A/B: current features vs +PF features
 - **Done when:** the A/B shows the PF feature set wins (or the losers are
   documented and dropped).
