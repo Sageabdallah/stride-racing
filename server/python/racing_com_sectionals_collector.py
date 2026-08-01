@@ -22,8 +22,47 @@ from difflib import SequenceMatcher
 sys.path.insert(0, os.path.dirname(__file__))
 
 GRAPHQL_ENDPOINT = "https://graphql.rmdprod.racing.com/"
-API_KEY = os.getenv("RACING_COM_API_KEY", "")
 REFERER = "https://www.racing.com/"
+
+# The key is the site's PUBLIC AppSync client key — the same one every browser
+# visitor is served, not a personal credential. It rotates, so bootstrap it
+# from the page each run rather than storing a copy that silently goes stale.
+API_KEY_PAGE = "https://www.racing.com/layouts/app.aspx"
+API_KEY_PATTERN = r'headerAPIKey:\s*"(da2-[a-z0-9]+)"'
+_API_KEY_CACHE = None
+
+
+def resolve_api_key(verbose=False):
+    """RACING_COM_API_KEY if set, else extract from the page. Never returns
+    empty: a keyless request would fail as an opaque 4xx much later."""
+    global _API_KEY_CACHE
+    if _API_KEY_CACHE:
+        return _API_KEY_CACHE
+    env_key = os.getenv("RACING_COM_API_KEY", "").strip()
+    if env_key:
+        _API_KEY_CACHE = env_key
+        if verbose:
+            print("  API key: from RACING_COM_API_KEY")
+        return _API_KEY_CACHE
+    req = urllib.request.Request(
+        API_KEY_PAGE, headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+    except Exception as e:
+        raise RuntimeError(
+            f"racing.com key bootstrap FAILED fetching {API_KEY_PAGE}: {e}. "
+            "Set RACING_COM_API_KEY to override.") from e
+    m = re.search(API_KEY_PATTERN, html)
+    if not m:
+        raise RuntimeError(
+            f"racing.com key bootstrap FAILED: no {API_KEY_PATTERN!r} match in "
+            f"{API_KEY_PAGE} ({len(html)} bytes) — the page or key format "
+            "changed. Set RACING_COM_API_KEY to override while it is fixed.")
+    _API_KEY_CACHE = m.group(1)
+    if verbose:
+        print(f"  API key: bootstrapped from page ({len(_API_KEY_CACHE)} chars)")
+    return _API_KEY_CACHE
 
 SPONSOR_PREFIXES = [
     r"Picklebet\s+Park\s+",
@@ -141,7 +180,7 @@ def graphql_request(query, verbose=False):
     params = urllib.parse.urlencode({"query": query})
     url = f"{GRAPHQL_ENDPOINT}?{params}"
     headers = {
-        "x-api-key": API_KEY,
+        "x-api-key": resolve_api_key(verbose),
         "referer": REFERER,
         "User-Agent": "Mozilla/5.0 (compatible; RacingAnalytics/1.0)",
         "Accept": "application/json",
@@ -253,7 +292,9 @@ def extract_split_data(entry, race_distance):
 
     if not last_400m_time and splits:
         for s in splits:
-            d = s.get("distance", 0)
+            # The feed sometimes types split distances as strings; raw
+            # subtraction below would raise and lose the whole meeting.
+            d = parse_distance(s.get("distance"))
             if d and race_distance and abs(d - (race_distance - 400)) < 50:
                 t_val = s.get("time")
                 if t_val:
@@ -264,7 +305,9 @@ def extract_split_data(entry, race_distance):
 
     if not last_800m_time and splits:
         for s in splits:
-            d = s.get("distance", 0)
+            # The feed sometimes types split distances as strings; raw
+            # subtraction below would raise and lose the whole meeting.
+            d = parse_distance(s.get("distance"))
             if d and race_distance and abs(d - (race_distance - 800)) < 50:
                 t_val = s.get("time")
                 if t_val:
@@ -453,52 +496,51 @@ def match_to_race_results(records, db_url):
     return matched, unmatched
 
 
-def import_to_database(records, db_url, batch_size=50):
+def import_to_database(records, db_url, batch_size=500):
+    """Insert a meeting's records in batched statements.
+
+    The INSERT already carries ON CONFLICT DO NOTHING, so the old per-record
+    existence SELECT only served to count skips — at two cross-region round
+    trips per runner it dominated runtime (Neon is us-east-1; collectors run
+    from Sydney). One execute_values call per batch does the same work:
+    rowcount gives the rows actually written, and everything else was a
+    duplicate. Records are de-duplicated on the conflict key first so a
+    payload repeating a runner cannot inflate the batch.
+    """
     import psycopg2
+    from psycopg2.extras import execute_values
 
     if not records:
         return 0, 0
 
+    deduped = {}
+    for record in records:
+        key = (record["race_date"], record["track"], record["race_number"],
+               record["horse_name"])
+        deduped.setdefault(key, record)
+    batch_records = list(deduped.values())
+
     conn = psycopg2.connect(db_url)
     cur = conn.cursor()
 
+    sql = """
+        INSERT INTO sectional_times (
+            race_results_history_id, track, race_date, race_number, race_name,
+            horse_name, saddle_number, distance_m, winning_time, track_config,
+            splits_json, last_200m_speed, last_200m_time,
+            last_400m_speed, last_400m_time,
+            last_600m_speed, last_600m_time,
+            last_800m_speed, last_800m_time,
+            finishing_burst, avg_speed, source
+        ) VALUES %s
+        ON CONFLICT (race_date, track, race_number, horse_name) DO NOTHING
+    """
+
     imported = 0
-    skipped = 0
-
-    for i in range(0, len(records), batch_size):
-        batch = records[i:i + batch_size]
-
-        for record in batch:
-            cur.execute("""
-                SELECT id FROM sectional_times
-                WHERE race_date = %s AND track = %s AND race_number = %s AND horse_name = %s
-                LIMIT 1
-            """, (record["race_date"], record["track"], record["race_number"], record["horse_name"]))
-
-            if cur.fetchone():
-                skipped += 1
-                continue
-
-            cur.execute("""
-                INSERT INTO sectional_times (
-                    race_results_history_id, track, race_date, race_number, race_name,
-                    horse_name, saddle_number, distance_m, winning_time, track_config,
-                    splits_json, last_200m_speed, last_200m_time,
-                    last_400m_speed, last_400m_time,
-                    last_600m_speed, last_600m_time,
-                    last_800m_speed, last_800m_time,
-                    finishing_burst, avg_speed, source
-                ) VALUES (
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s,
-                    %s, %s,
-                    %s, %s,
-                    %s, %s, 'racing_com'
-                )
-                ON CONFLICT (race_date, track, race_number, horse_name) DO NOTHING
-            """, (
+    try:
+        for i in range(0, len(batch_records), batch_size):
+            batch = batch_records[i:i + batch_size]
+            values = [(
                 record.get("race_results_history_id"),
                 record["track"],
                 record["race_date"],
@@ -520,16 +562,16 @@ def import_to_database(records, db_url, batch_size=50):
                 record.get("last_800m_time"),
                 record.get("finishing_burst"),
                 record.get("avg_speed"),
-            ))
-            imported += 1
+                "racing_com",
+            ) for record in batch]
+            execute_values(cur, sql, values, page_size=len(values))
+            imported += max(cur.rowcount, 0)
+            conn.commit()
+    finally:
+        cur.close()
+        conn.close()
 
-        conn.commit()
-
-    cur.close()
-    conn.close()
-
-    return imported, skipped
-
+    return imported, len(records) - imported
 
 def collect_for_date(date_str, states="VIC|SA", db_url=None, verbose=False, tracks=None):
     today = datetime.now()
@@ -587,6 +629,89 @@ def collect_for_date(date_str, states="VIC|SA", db_url=None, verbose=False, trac
         total_imported += imported
         time.sleep(0.75)
 
+    return total_imported
+
+
+def collect_from_date(from_date, states="VIC|SA", db_url=None, verbose=False,
+                      max_windows=400):
+    """Backfill every meeting from `from_date` to today.
+
+    GetRaceMeetingsByState caps each response at roughly 100-150 meetings
+    starting at the daysBack boundary, so a single large daysBack silently
+    returns a sliver of the range. This walks a cursor forward instead: each
+    call starts where the previous response ended, and a window that fails to
+    advance the cursor is nudged a day so a dense date can never wedge the
+    loop. Meetings already seen are skipped, so overlapping windows cost one
+    dict lookup rather than a refetch.
+    """
+    states_pipe = states.replace(",", "|")
+    today = datetime.now().date()
+    cursor = datetime.strptime(from_date, "%Y-%m-%d").date()
+
+    seen_ids = set()
+    total_imported = total_records = total_meetings = 0
+    windows = 0
+
+    print(f"  Paging {from_date} -> {today} for {states}")
+
+    while cursor <= today and windows < max_windows:
+        windows += 1
+        days_back = (today - cursor).days
+        meetings = get_meetings(days_back, states_pipe, verbose) or []
+        time.sleep(0.75)
+
+        fresh = []
+        max_date = cursor
+        for m in meetings:
+            mdate = (m.get("date") or "")[:10]
+            if not mdate:
+                continue
+            try:
+                d = datetime.strptime(mdate, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if d > max_date:
+                max_date = d
+            if d < cursor or d > today:
+                continue
+            mid = m.get("id")
+            if mid and mid not in seen_ids:
+                seen_ids.add(mid)
+                fresh.append(m)
+
+        if verbose or fresh:
+            print(f"  [window {windows}] from {cursor} (daysBack={days_back}): "
+                  f"{len(meetings)} returned, {len(fresh)} new")
+
+        for meeting in fresh:
+            try:
+                records = process_meeting(meeting, db_url, verbose)
+                if not records:
+                    continue
+                total_records += len(records)
+                matched, _ = match_to_race_results(records, db_url)
+                imported, skipped = import_to_database(records, db_url)
+                total_imported += imported
+                total_meetings += 1
+                venue = normalize_track_name(
+                    meeting.get("venue") or meeting.get("trackName") or "")
+                meet_date = (meeting.get("date") or "")[:10]
+                if imported > 0:
+                    print(f"  [{meet_date}] {venue}: {imported} imported "
+                          f"({matched} matched, {skipped} skipped)")
+            except Exception as e:
+                venue = meeting.get("venue") or meeting.get("trackName") or "Unknown"
+                print(f"  Error processing {venue}: {e}")
+            time.sleep(0.75)
+
+        cursor = max_date + timedelta(days=1) if max_date > cursor \
+            else cursor + timedelta(days=1)
+
+    if windows >= max_windows:
+        print(f"  STOPPED at the {max_windows}-window guard, cursor {cursor} — "
+              "rerun with --from-date at that cursor to continue")
+    print(f"  Done: {total_meetings} meetings with data, {total_records} records, "
+          f"{total_imported} imported ({len(seen_ids)} meetings seen)")
     return total_imported
 
 
@@ -664,6 +789,9 @@ def main():
     parser.add_argument("--backfill", action="store_true", help="Backfill last N days")
     parser.add_argument("--days", type=int, default=30, help="Number of days to backfill (default: 30)")
     parser.add_argument("--states", type=str, default="VIC,SA", help="Comma-separated states (default: VIC,SA)")
+    parser.add_argument("--from-date", type=str, dest="from_date",
+                        help="Backfill every meeting from this date (YYYY-MM-DD) "
+                             "to today, paging past the API's per-call cap")
     parser.add_argument("--tracks", type=str, help="Comma-separated track filter for single-date mode")
     parser.add_argument("--verbose", action="store_true", help="Enable detailed logging")
     args = parser.parse_args()
@@ -680,7 +808,11 @@ def main():
     print("  States: " + args.states)
     print("=" * 60)
 
-    if args.backfill:
+    if args.from_date:
+        print(f"\n  Mode: Paged backfill from {args.from_date}")
+        total = collect_from_date(args.from_date, states_pipe, db_url, args.verbose)
+
+    elif args.backfill:
         print(f"\n  Mode: Backfill last {args.days} days")
         total = collect_backfill(args.days, states_pipe, db_url, args.verbose)
         print(f"\n  Total imported: {total}")
