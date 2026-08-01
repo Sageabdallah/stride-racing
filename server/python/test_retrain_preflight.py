@@ -156,8 +156,11 @@ def test_nan_preserve_mismatch(tmp_path, layout):
 
 # ------------------------------------------------------- gate 5: parity suites
 
-def test_parity_absent_amber():
-    rows = rp.gate_parity_suites({})  # nothing on this branch
+def test_parity_absent_amber(tmp_path):
+    # Point every suite at a path that does not exist — the repo copies now
+    # land with roi/03, so "absent" must be simulated, not assumed.
+    missing = {name: str(tmp_path / name) for name in rp.PARITY_TESTS}
+    rows = rp.gate_parity_suites(missing)
     assert all(r["status"] == rp.AMBER for r in rows)
     assert all("not present" in r["detail"] for r in rows)
 
