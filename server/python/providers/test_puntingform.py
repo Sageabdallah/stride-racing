@@ -63,14 +63,17 @@ def _fixture(name):
         return json.load(f)
 
 
-def _wire(monkeypatch, tmp_path, meetings_fn, detail_fn, bridge_rows=BRIDGE_ROWS):
+def _wire(monkeypatch, tmp_path, meetings_fn, detail_fn, bridge_rows=BRIDGE_ROWS,
+          scratchings_fn=lambda: []):
     """Point the whole serve path at fixtures: env, pf_client, DB cursor,
-    output dir. Returns the directory download_racecards will write into."""
+    output dir. Returns the directory download_racecards will write into.
+    scratchings_fn defaults to an empty feed so no test can reach the wire."""
     monkeypatch.setenv("PUNTINGFORM_API_KEY", "test-key")
     monkeypatch.setenv("DATABASE_URL", "postgresql://fixture/only")
     monkeypatch.delenv("RACING_DATA_PROVIDER", raising=False)
     monkeypatch.setattr(pf_client, "meetings_for_date", meetings_fn)
     monkeypatch.setattr(pf_client, "meeting_detail", detail_fn)
+    monkeypatch.setattr(pf_client, "scratchings", scratchings_fn)
     monkeypatch.setattr(
         PuntingFormProvider, "_open_cursor",
         lambda self, url: (FakeConn(), FakeCursor(bridge_rows)),
@@ -102,22 +105,56 @@ def _assert_matches_golden(actual_path, golden_name):
 # ----------------------------------------------------------------------
 
 def test_golden_racecard_full_day(monkeypatch, tmp_path):
-    """Meetings discovery -> detail -> bridge -> byte-stable card on disk.
-    Wagga (AUS, non-target) and Te Rapa (NZ) must be filtered out."""
+    """Meetings discovery -> detail -> bridge -> scratchings -> byte-stable
+    card on disk. Wagga (AUS, non-target) and Te Rapa (NZ) must be filtered
+    out; the scratchings feed (Silver Comet, R2 tab 2, deduction 0.04) is
+    wired so the golden permanently pins the late-scratching fold-in."""
     meetings = _fixture("pf_meetingslist_2026-08-01.json")
     detail = _fixture("pf_meeting_detail_195431.json")
+    scratchings = _fixture("pf_scratchings.json")
 
     def detail_fn(meeting_id):
         # Any request beyond the target meeting is a filtering regression.
         assert str(meeting_id) == "195431", f"unexpected meeting_detail({meeting_id})"
         return detail
 
-    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, detail_fn)
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, detail_fn,
+                    scratchings_fn=lambda: scratchings)
     _run_download(monkeypatch, "2026-08-01")
 
     card_path = out_dir / "racecard_2026-08-01.json"
     assert card_path.exists()
     _assert_matches_golden(card_path, "racecard_golden_2026-08-01.json")
+
+    card = json.loads(card_path.read_text())
+    runners = {r["horse"]: r for race in card[0]["races"] for r in race["runners"]}
+    assert runners["Silver Comet"]["scratched"] is True
+    assert runners["Silver Comet"]["scratch_deduction"] == 0.04
+    assert runners["Fast Horse"]["scratched"] is False
+    assert runners["Fast Horse"]["scratch_deduction"] is None
+
+
+def test_scratchings_feed_failure_does_not_sink_card(monkeypatch, tmp_path, capsys):
+    """The scratchings feed is auxiliary: meeting_detail failing aborts the
+    run (a card missing a meeting is worse than no card), but a scratchings
+    failure only costs LATE scratchings — the card still ships, with one
+    warning."""
+    meetings = _fixture("pf_meetingslist_2026-08-01.json")
+    detail = _fixture("pf_meeting_detail_195431.json")
+
+    def boom():
+        raise pf_client.PFError("/Updates/Scratchings: 500 upstream")
+
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings,
+                    lambda mid: detail, scratchings_fn=boom)
+    _run_download(monkeypatch, "2026-08-01")
+
+    card_path = out_dir / "racecard_2026-08-01.json"
+    assert card_path.exists()
+    card = json.loads(card_path.read_text())
+    assert all(r["scratched"] is False
+               for race in card[0]["races"] for r in race["runners"])
+    assert "scratchings feed unavailable" in capsys.readouterr().err
 
     card = json.loads(card_path.read_text())
     assert [m["course"] for m in card] == ["Randwick"]
@@ -235,3 +272,31 @@ def test_factory_theracingapi_still_selectable(monkeypatch):
     monkeypatch.setenv("RACING_DATA_PROVIDER", "theracingapi")
     assert get_provider().name == "theracingapi"
     assert get_provider("theracingapi").name == "theracingapi"
+
+
+def test_phase_e_accessor_contracts(monkeypatch):
+    """Pin each Phase E accessor to its confirmed endpoint path and params —
+    the reference pages are the source of truth (all take the same apiKey
+    query auth; the 'token based authentication' note on Ratings means this
+    same parameter, not a second mode)."""
+    calls = []
+    monkeypatch.setattr(pf_client, "get",
+                        lambda path, params=None, **kw: calls.append((path, params)) or [])
+    pf_client.scratchings()
+    pf_client.scratchings(jurisdiction=1)
+    pf_client.conditions()
+    pf_client.speedmaps_for_meeting(195431)
+    pf_client.speedmaps_for_meeting(195431, race_no=3)
+    pf_client.ratings_for_meeting(195431)
+    pf_client.strike_rates()
+    pf_client.strike_rates(entity_type=0, jurisdiction=2)
+    assert calls == [
+        ("/Updates/Scratchings", {}),
+        ("/Updates/Scratchings", {"jurisdiction": 1}),
+        ("/Updates/Conditions", {}),
+        ("/User/Speedmaps", {"meetingId": 195431, "raceNo": 0}),
+        ("/User/Speedmaps", {"meetingId": 195431, "raceNo": 3}),
+        ("/Ratings/MeetingRatings", {"meetingId": 195431}),
+        ("/form/strikerate", {}),
+        ("/form/strikerate", {"entityType": 0, "jurisdiction": 2}),
+    ]
