@@ -127,6 +127,44 @@ caret-delimited CSV service remains available as a fallback shape.
 - [ ] [C] Sectionals sanity: PF vs racing.com/RQ values where both exist
 - [ ] [C] Coverage report: PF meeting coverage vs the meeting calendar by
       state (the 92%-of-TAB claim, verified on our own data)
+- [x] **[C] F-FORM-ASOF (2026-08-01, probe branch `probe/pf-last10-asof`): is
+      `meeting_detail.last10` frozen as-of the race card or regenerated as-of
+      query time? — VERDICT: CLEAN (frozen as-of the card).** `form_string`
+      populated from `last10` at import time does NOT embed the subject
+      race's own result; the PF-3 leak hypothesis is rejected and the
+      task-12 retrain is unblocked on this front.
+  - **Method:** three meetings inside the API wall with full recorded
+    finishes, across three states — Randwick 2026-07-11 (NSW,
+    meetingId 241257, 98 runners), Belmont Park 2026-07-11 (WA,
+    meetingId 241265, 107 runners), Murray Bridge GH 2026-07-07 (SA,
+    meetingId 241096, 87 runners). Fresh `meeting_detail` fetched
+    2026-08-01 (workflow run 30687071784, artifact `pf-last10-asof-3`);
+    per runner: fresh `last10` head vs finish AT the meeting vs finish of
+    the PRIOR run (both from `race_results_history`). 292 runners
+    classified; raw payloads + full evidence table committed under
+    `scripts/fixtures/pf_last10_asof/`.
+  - **Decoding (established on this data):** the RIGHTMOST character is
+    the most recent run — decided 94.7% vs 54.7% (leftmost) on
+    discriminating runners; strings are right-aligned, shorter strings =
+    fewer runs on record; `x` = spell (no letter codes f/p observed in
+    292 strings); `0` = a finish of 10th or worse (12 runners had both
+    finishes ≥10 with head `0`).
+  - **Measurement A:** 238 discriminating runners (meet ≠ prior after
+    0-encoding): **230 CLEAN (96.6%)**, 2 ADVERSE (0.8%), 6 neither —
+    ≥90% agreement threshold met. ALL 8 outliers have prior DB rows
+    5–6 months stale (2026-01/2026-02), i.e. DB coverage gaps (intervening
+    runs not in `race_results_history`), not PF regeneration. Sequence
+    corroboration: per-runner digit alignment of fresh `last10`
+    (rightmost-recent) against the DB finish sequence — **0 of 249**
+    runners align better with the subject race included than without
+    (93 align frozen-at-card exactly, 158 imperfect on DB gaps).
+  - **Measurement B: NOT-APPLICABLE.** `pf_raw_payloads` holds
+    `kind='results'` payloads only (one per meeting, matched for all
+    three meetingIds); results payloads carry NO `last10` field
+    (verified on the archived bytes) — `last10` appears only in
+    `meeting_detail` payloads, which the 2026-07-31 archive run did not
+    store. No archive-drift comparison is possible; the verdict rests on
+    Measurement A.
 - **Done when:** discrepancy rate is quantified and either negligible or
   explained in this file.
 

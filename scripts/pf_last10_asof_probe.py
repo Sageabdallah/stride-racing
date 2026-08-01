@@ -57,7 +57,7 @@ def cmd_fetch(meeting_ids):
 # ---------------------------------------------------------------- compare
 
 def norm_name(name):
-    from pf_results_mapper import norm_name as _n
+    from pf_backfill_results import norm_name as _n
     return _n(name)
 
 
@@ -142,46 +142,57 @@ def cmd_compare(artifact_dir, only_ids=()):
                         "prior_finish": prior[0] if prior else None,
                         "prior_date": prior[1] if prior else None,
                     })
-        # --- decode orientation & classify
+        # --- decode & classify
+        # Decoding established on this dataset (recorded in PUNTINGFORM_MIGRATION.md
+        # F-FORM-ASOF): the RIGHTMOST character is the most recent run (94.7%
+        # of decided discriminating runners vs 54.7% for leftmost); '0' means
+        # a finish of 10th or worse; 'x' marks a spell; strings are
+        # right-aligned, shorter strings = fewer runs on record.
+        def enc(f):
+            return None if f is None else ("0" if f >= 10 else str(f))
         for e in evidence:
             seq = digits_only(e["last10"])
-            meet = str(e["finish_at_meeting"]) if e["finish_at_meeting"] is not None else None
-            prior = str(e["prior_finish"]) if e["prior_finish"] is not None else None
-            # leftmost-as-most-recent: first digit is the candidate head
-            head_l = seq[0] if seq else None
-            # rightmost-as-most-recent: last digit is the candidate head
-            head_r = seq[-1] if seq else None
-            def call(head):
-                if head is None:
-                    return "no-form"
-                if meet is not None and head == meet:
-                    return "ADVERSE"
-                if prior is not None and head == prior:
-                    return "CLEAN"
-                return "neither"
-            e["head_if_leftmost_recent"] = head_l
-            e["head_if_rightmost_recent"] = head_r
-            e["call_leftmost"] = call(head_l)
-            e["call_rightmost"] = call(head_r)
+            head = seq[-1] if seq else None
+            m, p = enc(e["finish_at_meeting"]), enc(e["prior_finish"])
+            e["head_rightmost"] = head
+            e["discriminating"] = bool(
+                m is not None and p is not None and m != p)
+            if head is None:
+                e["call"] = "no-form"
+            elif e["discriminating"] and head == m:
+                e["call"] = "ADVERSE"   # head == the meeting's own finish
+            elif p is not None and head == p:
+                e["call"] = "CLEAN"     # head == the prior run's finish
+            elif m is not None and head == m:
+                e["call"] = "consistent-both"  # m == p after 0-encoding
+            else:
+                e["call"] = "neither"
         out = {"evidence": evidence, "measurement_b": b_notes}
         with open("pf_last10_asof_evidence.json", "w") as f:
             json.dump(out, f, indent=2)
         # --- print the table + split
-        hdr = f"{'runner':28} {'meet':>4} {'prior':>5} {'last10':>12} {'L-call':>8} {'R-call':>8}"
+        hdr = f"{'runner':28} {'meet':>4} {'prior':>5} {'last10':>12} {'head':>4} {'call':>16}"
+        print(hdr)
         for e in evidence:
             print(f"{e['runner'][:28]:28} {str(e['finish_at_meeting']):>4} "
                   f"{str(e['prior_finish']):>5} {str(e['last10'])[:12]:>12} "
-                  f"{e['call_leftmost']:>8} {e['call_rightmost']:>8}")
-        print(hdr)
-        for orient in ("leftmost", "rightmost"):
-            calls = [e[f"call_{orient}"] for e in evidence]
-            n = len(calls) or 1
-            print(f"orientation {orient:>9}: ADVERSE {calls.count('ADVERSE')}"
-                  f" ({100.0*calls.count('ADVERSE')/n:.1f}%), "
-                  f"CLEAN {calls.count('CLEAN')}"
-                  f" ({100.0*calls.count('CLEAN')/n:.1f}%), "
-                  f"neither {calls.count('neither')}, "
-                  f"no-form {calls.count('no-form')} of {len(calls)}")
+                  f"{str(e['head_rightmost']):>4} {e['call']:>16}")
+        disc = [e for e in evidence if e["discriminating"]]
+        d_adv = sum(1 for e in disc if e["call"] == "ADVERSE")
+        d_cln = sum(1 for e in disc if e["call"] == "CLEAN")
+        d_nei = sum(1 for e in disc if e["call"] == "neither")
+        n = len(disc) or 1
+        print(f"\ndiscriminating runners (meet != prior after 0-encoding): "
+              f"{len(disc)} of {len(evidence)}")
+        print(f"  CLEAN   {d_cln} ({100.0*d_cln/n:.1f}%)  <- head == prior finish")
+        print(f"  ADVERSE {d_adv} ({100.0*d_adv/n:.1f}%)  <- head == meeting finish")
+        print(f"  neither {d_nei}")
+        calls = [e["call"] for e in evidence]
+        print(f"all runners: {calls.count('CLEAN')} CLEAN, "
+              f"{calls.count('ADVERSE')} ADVERSE, "
+              f"{calls.count('consistent-both')} consistent-both, "
+              f"{calls.count('neither')} neither, "
+              f"{calls.count('no-form')} no-form of {len(calls)}")
         for b in b_notes:
             print(f"measurement B {b['meetingId']}: archive kinds="
                   f"{b['archive_kinds_in_table']} matched="
