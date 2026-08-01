@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Automated Race Results Collector — monitors race_schedule, fetches results from Punting Form (The Racing API is dead), and updates prediction_audit. Derived analytics/training tables are projected from prediction_audit."""
+"""Automated Race Results Collector — monitors race_schedule, fetches results from The Racing API, and updates prediction_audit. Derived analytics/training tables are projected from prediction_audit."""
 
 import os
 import re
@@ -11,10 +11,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from results_projection import project_resulted_prediction_audit
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pf_client
-from pf_results_mapper import aus_race_meetings
+from providers import get_provider, validate_results
 
 
 def normalize_name(value):
@@ -106,56 +103,20 @@ def get_pending_races(conn, target_date: Optional[str] = None) -> List[Dict]:
 
 
 def fetch_results_for_date(race_date: str) -> List[Dict]:
-    """Fetch resulted races for a date from Punting Form (The Racing API
-    ceased AU coverage; its credentials return 401). Returns the same
-    internal shape as before: {course, track, race_number, race_name,
-    distance, runners:[{horse_name, horse, position, sp}]}. Error contract
-    unchanged: failures return [] so the caller increments retry_count and
-    comes back later instead of settling on partial data."""
     try:
-        meetings = aus_race_meetings(pf_client.meetings_for_date(race_date))
-    except pf_client.PFError as e:
-        print(f"[AutoResults] PF meetings fetch failed for {race_date}: {e}", file=sys.stderr)
+        provider = get_provider()
+        all_results = provider.fetch_results(race_date)
+    except Exception as e:
+        print(f"[AutoResults] Error fetching results: {e}", file=sys.stderr)
         return []
 
-    print(f"[AutoResults] Found {len(meetings)} meets for {race_date}", file=sys.stderr)
-
-    all_results = []
-    for meet in meetings:
-        meet_id = meet.get('meetingId')
-        track_name = (meet.get('track') or {}).get('name') or 'Unknown'
-        if not meet_id:
-            continue
-
-        try:
-            blocks = pf_client.results_for_meeting(meet_id)
-        except pf_client.PFError as e:
-            print(f"[AutoResults] Error fetching races for {track_name}: {e}", file=sys.stderr)
-            continue
-
-        for block in blocks or []:
-            block_track = block.get('track') or track_name
-            for rr in block.get('raceResults') or []:
-                runners = rr.get('runners') or []
-                has_results = any(
-                    normalize_finish_position(r.get('position')) is not None
-                    for r in runners)
-                if not has_results:
-                    continue
-                all_results.append({
-                    'course': block_track,
-                    'track': block_track,
-                    'race_number': rr.get('raceNumber'),
-                    'race_name': rr.get('raceName') or '',
-                    'distance': rr.get('distance') or '',
-                    'runners': [
-                        {'horse_name': r.get('runner'),
-                         'horse': r.get('runner'),
-                         'position': r.get('position'),
-                         'sp': r.get('price')}
-                        for r in runners
-                    ]
-                })
+    # Reject the whole date on contract violations — a malformed feed applied
+    # to prediction_audit corrupts franking/learning, whereas an empty return
+    # just increments retry_count and comes back later.
+    report = validate_results(all_results, race_date)
+    report.print_report()
+    if not report.ok:
+        return []
 
     print(f"[AutoResults] Found {len(all_results)} completed races with results", file=sys.stderr)
     return all_results
