@@ -492,52 +492,51 @@ def match_to_race_results(records, db_url):
     return matched, unmatched
 
 
-def import_to_database(records, db_url, batch_size=50):
+def import_to_database(records, db_url, batch_size=500):
+    """Insert a meeting's records in batched statements.
+
+    The INSERT already carries ON CONFLICT DO NOTHING, so the old per-record
+    existence SELECT only served to count skips — at two cross-region round
+    trips per runner it dominated runtime (Neon is us-east-1; collectors run
+    from Sydney). One execute_values call per batch does the same work:
+    rowcount gives the rows actually written, and everything else was a
+    duplicate. Records are de-duplicated on the conflict key first so a
+    payload repeating a runner cannot inflate the batch.
+    """
     import psycopg2
+    from psycopg2.extras import execute_values
 
     if not records:
         return 0, 0
 
+    deduped = {}
+    for record in records:
+        key = (record["race_date"], record["track"], record["race_number"],
+               record["horse_name"])
+        deduped.setdefault(key, record)
+    batch_records = list(deduped.values())
+
     conn = psycopg2.connect(db_url)
     cur = conn.cursor()
 
+    sql = """
+        INSERT INTO sectional_times (
+            race_results_history_id, track, race_date, race_number, race_name,
+            horse_name, saddle_number, distance_m, winning_time, track_config,
+            splits_json, last_200m_speed, last_200m_time,
+            last_400m_speed, last_400m_time,
+            last_600m_speed, last_600m_time,
+            last_800m_speed, last_800m_time,
+            finishing_burst, avg_speed, source
+        ) VALUES %s
+        ON CONFLICT (race_date, track, race_number, horse_name) DO NOTHING
+    """
+
     imported = 0
-    skipped = 0
-
-    for i in range(0, len(records), batch_size):
-        batch = records[i:i + batch_size]
-
-        for record in batch:
-            cur.execute("""
-                SELECT id FROM sectional_times
-                WHERE race_date = %s AND track = %s AND race_number = %s AND horse_name = %s
-                LIMIT 1
-            """, (record["race_date"], record["track"], record["race_number"], record["horse_name"]))
-
-            if cur.fetchone():
-                skipped += 1
-                continue
-
-            cur.execute("""
-                INSERT INTO sectional_times (
-                    race_results_history_id, track, race_date, race_number, race_name,
-                    horse_name, saddle_number, distance_m, winning_time, track_config,
-                    splits_json, last_200m_speed, last_200m_time,
-                    last_400m_speed, last_400m_time,
-                    last_600m_speed, last_600m_time,
-                    last_800m_speed, last_800m_time,
-                    finishing_burst, avg_speed, source
-                ) VALUES (
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s,
-                    %s, %s,
-                    %s, %s,
-                    %s, %s, 'racing_com'
-                )
-                ON CONFLICT (race_date, track, race_number, horse_name) DO NOTHING
-            """, (
+    try:
+        for i in range(0, len(batch_records), batch_size):
+            batch = batch_records[i:i + batch_size]
+            values = [(
                 record.get("race_results_history_id"),
                 record["track"],
                 record["race_date"],
@@ -559,16 +558,16 @@ def import_to_database(records, db_url, batch_size=50):
                 record.get("last_800m_time"),
                 record.get("finishing_burst"),
                 record.get("avg_speed"),
-            ))
-            imported += 1
+                "racing_com",
+            ) for record in batch]
+            execute_values(cur, sql, values, page_size=len(values))
+            imported += max(cur.rowcount, 0)
+            conn.commit()
+    finally:
+        cur.close()
+        conn.close()
 
-        conn.commit()
-
-    cur.close()
-    conn.close()
-
-    return imported, skipped
-
+    return imported, len(records) - imported
 
 def collect_for_date(date_str, states="VIC|SA", db_url=None, verbose=False, tracks=None):
     today = datetime.now()

@@ -157,3 +157,99 @@ class TestPagedBackfill:
         out = capsys.readouterr().out
         assert "STOPPED at the 3-window guard" in out
         assert "--from-date" in out
+
+
+class _BatchCursor:
+    """Records statements; mimics rowcount for a multi-row ON CONFLICT insert."""
+
+    def __init__(self, already_present=0):
+        self.already_present = already_present
+        self.statements = []
+        self.rowcount = 0
+
+    def execute(self, sql, params=None):
+        self.statements.append((sql, params))
+
+    def close(self):
+        pass
+
+
+class _BatchConn:
+    def __init__(self, cur):
+        self._cur = cur
+        self.commits = 0
+
+    def cursor(self):
+        return self._cur
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+
+def _records(n, date="2026-08-01"):
+    return [{"race_date": date, "track": "Flemington", "race_number": 1,
+             "horse_name": f"Horse {i}", "splits_json": [{"distance": 200}]}
+            for i in range(n)]
+
+
+class TestBatchedImport:
+    def _patch(self, monkeypatch, cur, captured):
+        import types
+        fake_pg = types.ModuleType("psycopg2")
+        fake_pg.connect = lambda url: _BatchConn(cur)
+        fake_extras = types.ModuleType("psycopg2.extras")
+
+        def _execute_values(c, sql, values, page_size=None):
+            captured.append((sql, values))
+            c.statements.append((sql, values))
+            c.rowcount = len(values) - cur.already_present
+        fake_extras.execute_values = _execute_values
+        fake_pg.extras = fake_extras
+        monkeypatch.setitem(sys.modules, "psycopg2", fake_pg)
+        monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
+
+    def test_single_statement_per_batch_not_per_record(self, monkeypatch):
+        cur = _BatchCursor()
+        captured = []
+        self._patch(monkeypatch, cur, captured)
+        imported, skipped = rc.import_to_database(_records(80), "postgres://x")
+        assert len(captured) == 1          # one round trip, not 160
+        assert imported == 80 and skipped == 0
+
+    def test_no_per_record_existence_select(self, monkeypatch):
+        cur = _BatchCursor()
+        self._patch(monkeypatch, cur, [])
+        rc.import_to_database(_records(10), "postgres://x")
+        assert not any("SELECT id FROM sectional_times" in str(s)
+                       for s, _ in cur.statements)
+
+    def test_conflict_clause_preserved(self, monkeypatch):
+        cur = _BatchCursor()
+        captured = []
+        self._patch(monkeypatch, cur, captured)
+        rc.import_to_database(_records(3), "postgres://x")
+        sql = captured[0][0]
+        assert "ON CONFLICT (race_date, track, race_number, horse_name) DO NOTHING" in sql
+        assert "VALUES %s" in sql
+
+    def test_duplicates_in_payload_collapse(self, monkeypatch):
+        cur = _BatchCursor()
+        captured = []
+        self._patch(monkeypatch, cur, captured)
+        recs = _records(2) + _records(2)   # same four conflict keys twice
+        imported, skipped = rc.import_to_database(recs, "postgres://x")
+        assert len(captured[0][1]) == 2    # deduped before the statement
+        assert imported == 2
+        assert skipped == len(recs) - imported
+
+    def test_existing_rows_counted_as_skipped(self, monkeypatch):
+        cur = _BatchCursor(already_present=30)
+        self._patch(monkeypatch, cur, [])
+        imported, skipped = rc.import_to_database(_records(50), "postgres://x")
+        assert imported == 20 and skipped == 30
+
+    def test_empty_records_short_circuit(self):
+        assert rc.import_to_database([], "postgres://x") == (0, 0)
