@@ -74,7 +74,7 @@ token-based auth (second auth mode to implement); JSON `payLoad` envelope
 carries `statusCode`/`error` fields to check on every call; the legacy
 caret-delimited CSV service remains available as a fallback shape.
 
-## Phase B — 60-day backfill  *(in progress 2026-07-31)*
+## Phase B — 60-day backfill  *(DONE 2026-08-01, pf-verify run 30642646209)*
 
 - [x] [C] `server/python/pf_client.py`: thin client for the confirmed v2
       endpoints (envelope error-checking, retries, 0.4s pacing)
@@ -98,11 +98,38 @@ caret-delimited CSV service remains available as a fallback shape.
       **2026-06-08** — the "~60 days" window is ~53 days in practice, and it
       slides daily. 2026-06-01..07 are beyond the subscription's reach
       (recoverable only via the $1,100 archive, or already covered by the
-      old pipeline — the gap report will say).
-- [ ] [C] Verification pass (next session): per-day row counts vs meeting
-      calendar; NULL rates on distance_m / race_class / race_name; exact
-      old-pipeline death date and the definitive gap report
-- **Done when:** the verification numbers and gap report are recorded here.
+      old pipeline — the gap report will say). **(Superseded by the
+      verification below: the wall re-measured far tighter — ~31 days.)**
+- [x] [C] Verification pass (pf-verify run 30642646209, 2026-08-01):
+      `server/python/pf_verify_backfill.py` + the re-runnable read-only
+      `pf-verify` workflow. Recorded numbers:
+  - **Coverage:** 55 days checked (2026-06-08..08-01). DB ≥ PF expected on
+        every resulted day inside the window — **zero missing meetings or
+        races** vs the archived payloads. One flagged day: **2026-07-31**
+        (6 resulted meetings, 48 races / 495 runners, 0 DB rows — daily
+        ingestion isn't built yet; recoverable, owned by DM-K2/K4).
+        2026-07-09 imported 0 rows because the old pipeline already held all
+        348 — dedup matched exactly, a quiet parity signal.
+  - **NULL rates** (10,503 `pf%` rows): **0.0% NULL** on distance_m,
+        race_class, class_level, going, sp_odds, margin_lengths, race_name,
+        opponents_json.
+  - **Old-pipeline death date: 2026-07-13** (last non-`pf%` row). PF rows
+        span 2026-06-30..07-30, overlapping 06-30..07-13 — coverage is
+        continuous; the feared June/July gap does not exist.
+  - **Lost dates: NONE.** The only zero-row dates are 2026-07-31 and
+        2026-08-01, both at/after the runtime wall and recoverable by daily
+        ingestion. Nothing requires the $1,100 archive.
+  - **Bridge audit:** 9,925/10,503 rows bridged to existing horse_ids
+        (94.5%), 578 new-id rows; 7,546 distinct horses bridged, 536 new
+        `pf%` ids. 20-sample eyeball: PF name == that horse's prior
+        old-pipeline name on all 20.
+  - **Wall correction:** runtime binary search (8 calls) measured the
+        meetingslist wall at **2026-07-01 on 2026-08-01**, and backfill run
+        #2 fetched nothing before 2026-06-30 (2026-07-31 23:36 AEST) — the
+        practical window is **~31 days, not ~53**; the 2026-06-08 probe
+        figure did not hold. A missed day becomes unrecoverable after ~31
+        days, which makes daily ingestion (Phase C) the critical path.
+- **Done when:** the verification numbers and gap report are recorded here. **(DONE 2026-08-01.)**
 
 ## Phase C — daily ingestion (replace the six dead modules)
 
@@ -110,13 +137,40 @@ caret-delimited CSV service remains available as a fallback shape.
       `TARGET_TRACKS` filtering so downstream code is untouched)
 - [ ] [C] `fetch_and_import_date.py` + `auto_results_collector.py` → PF
       results (existing racing.com fallback retained)
-- [ ] [C] `download_historical.py` + `backfill_barrier_trials.py` → PF within
-      the 60-day window; document the pre-window limitation
+- [x] [C] `download_historical.py` + `backfill_barrier_trials.py` → PF within
+      the window (2026-08-01, branch pf/historical-trials): bulk results go
+      through `pf_results_mapper` into `race_results_history` (target-track
+      filter kept); trials come ONLY from `isBarrierTrial` meetings and keep
+      the exact `trials_<date>.json` contract `import_barrier_trials_to_db.py`
+      loads into `barrier_trial_results` (19 columns, unchanged — verified by
+      feeding PF output through the real importer in tests). The
+      results/trials partition is asserted on every fetched date.
+      **Pre-window limitation:** the Starter wall measured **~31 days** on
+      2026-08-01 (meetingslist 400s before 2026-07-01 — tighter than the
+      ~53 first assumed; pf-verify run 30642646209). Both scripts probe the
+      wall at runtime before fetching, print each skipped date with the
+      reason, and exit `3` (partial-due-to-wall) vs `1` (fetch failure) vs
+      `0` — pre-window dates are unrecoverable without the $1,100 archive.
 - [ ] [C] `odds_movement.py` → Betfair prices (delayed key now; live key when
       activated). Note: Betfair calls cannot run on GitHub-hosted runners —
       Mac/self-hosted runner only
-- [ ] [C] Scheduled workflows: morning racecards pull, evening results pull,
-      raw archive push; failure = red run (no silent passes)
+- [x] [C] Scheduled workflows (2026-08-01, branch pf/scheduled-ingestion):
+      `pf-evening-results.yml` (10:30 UTC = 20:30 AEST intent; today AND
+      yesterday — late/abandoned meetings resolve next day) and
+      `pf-morning-racecards.yml` (19:30 UTC = 05:30 AEST intent). Both:
+      secrets from the repo, concurrency group, 30-min timeout, no
+      continue-on-error, per-meeting counts to the step summary. Proof runs:
+      evening push run **30647305549** green (2026-07-31 imported 48
+      races/495 runners — the DM-K1 flagged gap; 2026-08-01 cards fetched,
+      0 resulted yet), dispatch **30647658519** green (dedup held: 48/48
+      already existed, 0 inserted), sabotaged-input dispatch **30647949139**
+      red on exit 1 as required (input-only sabotage, nothing reverted).
+      The evening import also writes the raw archive (archive-first per
+      meeting). The morning workflow is **gated on DM-2** (pf/racecards
+      unmerged): its entrypoint there is stable (verified @ 0fdf879) and a
+      gate step fails loudly until it merges — push run 30647304536 shows
+      the gate red by design. **Operator:** the done-criterion below (two
+      consecutive green scheduled days) is yours to check after merge.
 - **Done when:** two consecutive days ingest hands-free with row counts
   matching the meeting calendar.
 
