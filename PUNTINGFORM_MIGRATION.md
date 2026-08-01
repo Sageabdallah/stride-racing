@@ -129,6 +129,35 @@ caret-delimited CSV service remains available as a fallback shape.
         practical window is **~31 days, not ~53**; the 2026-06-08 probe
         figure did not hold. A missed day becomes unrecoverable after ~31
         days, which makes daily ingestion (Phase C) the critical path.
+- [x] [C] Country-suffix fork repair (the known-bad 2026-07-31 writes —
+      backfill + evening proof run; the verification-pass step-6 gap),
+      reported 2026-08-01 by `server/python/pf_fork_repair.py` (branch
+      `pf/fork-repair`, prod-read approved): 589 distinct `pf%` horse ids
+      scanned against a corrected reference bridge over the 25,815 non-`pf%`
+      normalised keys (the mapper's original-case projection restricted to
+      `race_id NOT LIKE 'pf%'` — never the old `LOWER(horse_name)`
+      projection). **0 spurious forks found** (0 anomalies, 589 genuinely
+      new ids; by-suffix: (NZ) 0 / (GB) 0 / (IRE) 0 / other 0 / none 0),
+      confirmed two independent ways (Python `norm_name` bridge and a
+      SQL-side normalisation agree). The fork *conditions* exist — 649
+      non-`pf%` rows store suffixed names like `Abrafo (NZ)` — but PF
+      runner names carry no country suffix (0 suffixed names among the 589
+      ids) and no new-id name resolves to any previously-known horse:
+      no suffix-stored horse ran in the 2026-06-30..2026-07-31 PF-written
+      window under a fresh id. Mechanical blast radius
+      (`information_schema`, cross-checked with `git grep`): 6 tables
+      carry horse_id — `race_results_history` (645 `pf%`-id rows; the only
+      table holding any) plus `barrier_trial_results`,
+      `blackbook_entries`, `franking_scores`, `horse_prep_profiles`,
+      `tab_odds_raw` (all zero; those five have no race_id column).
+      Current PF rows: 10,353 bridged vs 645 new-id of 10,998
+      (94.14% bridged). Full remap list: `pf_fork_remap.json` (empty).
+      `--apply` is built (single transaction, `pf_fork_repair_backup`
+      pre-image before any UPDATE, updates restricted to `pf%`-race_id
+      rows, idempotent, in-run re-detect verification) but was NOT run —
+      it awaits the operator's separate prod WRITE approval and must run
+      AFTER `pf_track_dedup --apply` (DM-G2 before DM-G1); with zero
+      forks it is currently a no-op.
 - **Done when:** the verification numbers and gap report are recorded here. **(DONE 2026-08-01.)**
 
 ## Phase C — daily ingestion (replace the six dead modules)
