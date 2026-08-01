@@ -15,7 +15,12 @@ on:
     paths:
       - "scripts/puntingform_probe.py"
       - ".github/workflows/puntingform-probe.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      meeting_ids:
+        description: "DM-H2: comma-separated PF meetingIds for the last10 as-of fetch (empty = original Phase A probe only)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -34,3 +39,24 @@ jobs:
         env:
           PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
         run: python3 scripts/puntingform_probe.py
+
+  last10-asof-fetch:
+    # DM-H2: raw meeting_detail payloads for the last10 as-of-semantics
+    # probe. PF fetches ONLY — every DB-side step (meeting selection,
+    # recorded finishes, pf_raw_payloads archive diff) runs off-CI where
+    # DATABASE_URL lives. The key is injected as env and never printed.
+    if: github.event.inputs.meeting_ids != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch meeting_detail payloads
+        env:
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
+          MEETING_IDS: ${{ github.event.inputs.meeting_ids }}
+        run: python3 scripts/pf_last10_asof_probe.py fetch $MEETING_IDS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pf-last10-asof-${{ github.run_number }}
+          path: pf_last10_asof_artifacts/
+          retention-days: 14
