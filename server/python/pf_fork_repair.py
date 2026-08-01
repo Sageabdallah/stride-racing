@@ -84,7 +84,7 @@ PF_ID_NAMES_SQL = """
 RECENT_NONPF_NAME_SQL = """
     SELECT horse_name, race_date::text
     FROM race_results_history
-    WHERE horse_id = %s AND race_id NOT LIKE 'pf%'
+    WHERE horse_id = %s AND race_id NOT LIKE 'pf%%'
     ORDER BY race_date DESC
     LIMIT 1
 """
@@ -219,7 +219,8 @@ def per_table_counts(cur, tables, remap_ids):
         if remap_ids and pf_rows:
             sql = f'SELECT COUNT(*) FROM "{name}" WHERE horse_id = ANY(%s)'
             if t["has_race_id"]:
-                sql += " AND race_id LIKE 'pf%'"
+                # parametrized below: the literal % must be escaped for psycopg2
+                sql += " AND race_id LIKE 'pf%%'"
             cur.execute(sql, (list(remap_ids),))
             fork_rows = cur.fetchall()[0][0]
         out[name] = {"pf_rows": pf_rows, "fork_rows": fork_rows,
@@ -347,7 +348,8 @@ def apply_remap(cur, conn, tables, remap, include_tables=(), out=print):
         name = t["table"]
         if not t["has_race_id"] and name not in include_tables:
             continue
-        race_filter = " AND race_id LIKE 'pf%'" if t["has_race_id"] else ""
+        # parametrized below: the literal % must be escaped for psycopg2
+        race_filter = " AND race_id LIKE 'pf%%'" if t["has_race_id"] else ""
         # pre-image every row to be touched BEFORE the UPDATE
         cur.execute(
             f'INSERT INTO {BACKUP_TABLE} (table_name, row_data) '

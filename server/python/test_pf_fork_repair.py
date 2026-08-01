@@ -25,6 +25,8 @@ import os
 import re
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pf_fork_repair as pfr
 
@@ -86,6 +88,10 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         text = " ".join(str(sql).split())
+        if params is not None:
+            # psycopg2 interpolates client-side and delivers a literal %%
+            # to the server as one % — match on the server-visible form
+            text = text.replace("%%", "%")
         low = text.lower()
         self.log.append((text, params))
         self.rowcount = 0
@@ -171,6 +177,23 @@ class FakeCursor:
 
     def fetchall(self):
         return self._result
+
+
+class InterpolatingFakeCursor(FakeCursor):
+    """Adds psycopg2-style client-side interpolation checking.
+
+    psycopg2 interpolates %-placeholders whenever params is passed; a
+    literal % in such a statement must be escaped as %%. This fake raises
+    on any unescaped literal % in a parametrized statement, mimicking the
+    driver: escaped pairs are stripped first, then any remaining % not
+    starting a %s or %(name)s placeholder is a defect.
+    """
+
+    def execute(self, sql, params=None):
+        if params is not None and re.search(
+                r"%(?![s(])", str(sql).replace("%%", "")):
+            raise ValueError("unescaped literal %")
+        return super().execute(sql, params)
 
 
 class FakeConn:
@@ -361,3 +384,76 @@ def test_apply_is_idempotent_and_post_verification_finds_zero(monkeypatch):
     assert not any(t.lower().startswith(("update", "insert", "create"))
                    for t in new_sql)
     assert len(cur.backup) == backup_len
+
+
+# --------------------------------------- DM-H1: literal-% interpolation blind spot
+
+ONE_FORK_SCHEMA = [
+    ("race_results_history", True),
+    ("tips", True),
+]
+
+ONE_FORK_RRH = [
+    # stored suffixed name on the REAL id ...
+    {"horse_id": "hrs_aus_7", "horse_name": "Ocean Deep (NZ)",
+     "race_id": "rr_100_1", "race_date": "2026-05-10"},
+    # ... whose PF row created the fork id pf111
+    {"horse_id": "pf111", "horse_name": "Ocean Deep (NZ)",
+     "race_id": "pf500_3", "race_date": "2026-07-20"},
+]
+
+ONE_FORK_TIPS = [
+    {"horse_id": "pf111", "race_id": "pf500_3", "note": "pf race row"},
+]
+
+
+def one_fork_cursor():
+    return InterpolatingFakeCursor(
+        ONE_FORK_SCHEMA,
+        {"race_results_history": [dict(r) for r in ONE_FORK_RRH],
+         "tips": [dict(r) for r in ONE_FORK_TIPS]})
+
+
+class TestLiteralPercentInterpolation:
+    """Drive every parametrized statement the tool issues through a cursor
+    that interpolates like psycopg2. Any literal % left single-escaped in a
+    parametrized statement raises here instead of mid-crash in prod — the
+    blind spot the G2 audit found (four sites with LIKE 'pf%' + params)."""
+
+    def test_full_report_path_interpolates_cleanly(self, monkeypatch):
+        monkeypatch.setattr(pfr, "git_grep_horse_id_files", lambda: [])
+        cur = one_fork_cursor()
+        report = pfr.run(cur, FakeConn(), apply=False, out=silent)
+        # the one fork was found and every report statement executed:
+        # per_table_counts fork-rows branch (params + race_id LIKE) ...
+        assert report["forks"] == 1
+        assert report["per_table"]["race_results_history"]["fork_rows"] == 1
+        assert report["per_table"]["tips"]["fork_rows"] == 1
+        # ... and eyeball_sample -> RECENT_NONPF_NAME_SQL (params + NOT LIKE)
+        assert report["eyeball_sample"] == [
+            {"pf_id": "pf111", "pf_name": "Ocean Deep (NZ)",
+             "real_id": "hrs_aus_7", "recent_nonpf_name": "Ocean Deep (NZ)",
+             "recent_nonpf_date": "2026-05-10"}]
+
+    def test_dry_apply_remap_interpolates_cleanly(self):
+        cur = one_fork_cursor()
+        tables = [{"table": t, "has_race_id": h} for t, h in ONE_FORK_SCHEMA]
+        remap = {"pf111": {"real_id": "hrs_aus_7",
+                           "name": "Ocean Deep (NZ)", "suffix": "(NZ)"}}
+        updated = pfr.apply_remap(cur, FakeConn(), tables, remap, out=silent)
+        # backup INSERT then UPDATE, both with {race_filter} + params
+        assert updated == {"race_results_history": 1, "tips": 1}
+        backed = {(t, r["horse_id"]) for t, r in cur.backup}
+        assert backed == {("race_results_history", "pf111"),
+                          ("tips", "pf111")}
+        assert cur.tables["race_results_history"][1]["horse_id"] == "hrs_aus_7"
+        assert cur.tables["tips"][0]["horse_id"] == "hrs_aus_7"
+
+    def test_escaped_pairs_pass_and_lone_percent_raises(self):
+        cur = one_fork_cursor()
+        sql_ok = ("SELECT horse_name, race_date::text FROM race_results_history "
+                  "WHERE horse_id = %s AND race_id NOT LIKE 'pf%%'")
+        # %% and %s are both legal in a parametrized statement
+        cur.execute(sql_ok, ("hrs_aus_7",))
+        with pytest.raises(ValueError, match="unescaped literal %"):
+            cur.execute(sql_ok.replace("'pf%%'", "'pf%'"), ("hrs_aus_7",))
