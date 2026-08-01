@@ -201,6 +201,11 @@ DDL_TRAINING_VIEW = dedent(
     -- ROI task 04 (additive): tip_time odds snapshots, one aggregate row per
     -- runner. tip_time_odds is the cross-bookmaker median at capture time.
     -- Requires migrations/runner_odds_snapshots.sql to have been applied.
+    -- Only provably pre-jump captures qualify: the table is append-only and
+    -- capture fires on every run_tips invocation, so a post-race rerun of a
+    -- past date would otherwise median post-jump prices into training odds.
+    -- NULL seconds_to_jump (no advertised jump on the card) is excluded for
+    -- the same reason — unknowable timing cannot be trusted as-of tip time.
     odds_snap AS (
         SELECT
             s.race_date,
@@ -213,6 +218,8 @@ DDL_TRAINING_VIEW = dedent(
         WHERE s.snapshot_kind = 'tip_time'
           AND s.race_date IS NOT NULL
           AND s.horse_name_norm IS NOT NULL
+          AND s.seconds_to_jump IS NOT NULL
+          AND s.seconds_to_jump <= 0
         GROUP BY 1, 2, 3, 4
     )
     SELECT
