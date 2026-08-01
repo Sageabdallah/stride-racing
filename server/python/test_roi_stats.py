@@ -255,6 +255,13 @@ class TestReportable:
         assert roi_stats.ci_lower_bound(None) is None
         assert roi_stats.ci_spans_zero({}) is None
 
+    def test_reportability_floor_is_single_sourced(self):
+        """selection_ledger + shadow_pl_tracker consume the roi_stats floor, never a
+        private copy (roi-roadmap task 02). Also proves no import cycle."""
+        import shadow_pl_tracker
+        import selection_ledger  # noqa: F401  (import-smoke: must not raise / cycle)
+        assert shadow_pl_tracker.MIN_BETS_REPORTABLE == roi_stats.MIN_BETS_REPORTABLE == 200
+
 
 # --------------------------------------------------------- full block ------
 

@@ -43,6 +43,7 @@ from tips_day_aggregates import (
     select_value_plays,
 )
 from validate_tips import validate_file as validate_tips_file
+from market_prob import renormalise_probs, true_market_prob_pct
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
@@ -429,6 +430,11 @@ def run_mc_simulation(race_input):
         return None
 
 
+def _flag_enabled(name):
+    """Env-flag convention: default OFF unless explicitly true/1/yes."""
+    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
+
+
 def calculate_overround(runners):
     total_implied = 0
     valid = 0
@@ -670,8 +676,9 @@ def calibrate_and_score(horses, overround, race_class=""):
         h["rawModelProb"] = raw
 
         if odds and odds > 1:
-            raw_implied = 100 / odds
-            true_market = raw_implied / overround
+            # Shared overround-corrected market probability (task 05) —
+            # identical to the legacy (100 / odds) / overround formula.
+            true_market = true_market_prob_pct(odds, overround)
 
             # Model weight by odds band — trust model MORE at short prices
             # Kelly audit: $1-3 horses win 41%, model predicts 17% after blend.
@@ -699,6 +706,15 @@ def calibrate_and_score(horses, overround, race_class=""):
             h["trueMarketProb"] = 0
             h["fairOdds"] = None
             h["modelEdge"] = 0
+
+    # Task 05: per-race renormalisation after the mw market anchor
+    # (STRIDE_RENORMALISE_FIELD, default OFF — legacy byte-identical when
+    # off). The anchor leaves published winPercentage values that do not sum
+    # to 100 within a race, so edge/EV are compared on inconsistent scales.
+    # When on, edge and EV consume the renormalised probability and tier
+    # transitions are logged, never silently dropped.
+    if _flag_enabled("STRIDE_RENORMALISE_FIELD"):
+        _renormalise_field(horses)
 
     raw_probs = [h.get("rawModelProb", 0) for h in horses]
     mc_spread = (max(raw_probs) - min(raw_probs)) if len(raw_probs) > 1 else 0
@@ -797,6 +813,45 @@ def calibrate_and_score(horses, overround, race_class=""):
         print(f"    [MC_FLAT] gap={confidence_gap:.1f}pp, penalty={penalty_mult:.2f}", file=sys.stderr)
 
     return horses
+
+
+def _renormalise_field(horses):
+    """Per-race normalisation: winPercentage_i /= sum(field) (task 05).
+
+    Runs after the mw market anchor, behind STRIDE_RENORMALISE_FIELD. Edge
+    (modelEdge) and EV (compute_confidence, downstream) consume the
+    renormalised probability; trueMarketProb is unchanged. Runners whose
+    confidence tier would change are logged via a structured
+    [RENORM_TIER_TRANSITION] line — never silently dropped (guardrail).
+    """
+    new_probs = renormalise_probs([h.get("winPercentage", 0) for h in horses])
+    if sum(new_probs) <= 0:
+        return
+    transitions = 0
+    for h, new_win in zip(horses, new_probs):
+        pre_win = h.get("winPercentage", 0)
+        pre_edge = h.get("modelEdge", 0)
+        true_market = h.get("trueMarketProb", 0) or 0
+        new_edge = round(new_win - true_market, 2) if true_market > 0 else pre_edge
+        pre_tier = compute_confidence({**h, "winPercentage": pre_win, "modelEdge": pre_edge})
+        post_tier = compute_confidence({**h, "winPercentage": new_win, "modelEdge": new_edge})
+        h["_winPctBeforeRenorm"] = pre_win
+        h["winPercentage"] = new_win
+        h["modelEdge"] = new_edge
+        if pre_tier != post_tier:
+            transitions += 1
+            print("    [RENORM_TIER_TRANSITION] " + json.dumps({
+                "horse": h.get("horse", "?"),
+                "tier_before": pre_tier,
+                "tier_after": post_tier,
+                "win_pct_before": pre_win,
+                "win_pct_after": new_win,
+                "edge_before": pre_edge,
+                "edge_after": new_edge,
+            }), file=sys.stderr)
+    field_sum = sum(h.get("winPercentage", 0) for h in horses)
+    print(f"    [RENORM] field sum -> {field_sum:.6f} "
+          f"({transitions} tier transition(s))", file=sys.stderr)
 
 
 def apply_safety_filters(scored_horses, race_class=""):
