@@ -1279,6 +1279,62 @@ def launch_late_odds_watcher(date_str):
         print(f"  [LATE_ODDS] watcher launch failed (non-fatal): {e}", file=sys.stderr)
 
 
+def persist_selection_ledger(race_tips, date_str):
+    """Write one selection-ledger row per race — bet or refused (roi-roadmap 01).
+
+    Measurement only: a no-op unless STRIDE_LEDGER_WRITE=true (default off),
+    and every failure is logged and swallowed — this must never delay or break
+    the tips pipeline. Refused rows carry the would-be price so EV-gate
+    quality becomes measurable; they are staked 0u and can never book P&L.
+    """
+    try:
+        from selection_ledger import _stride_flag, build_ledger_row, persist_rows
+    except Exception as _imp_err:
+        print(f"  [LEDGER] selection_ledger unavailable: {_imp_err}", file=sys.stderr)
+        return
+    if not _stride_flag("STRIDE_LEDGER_WRITE"):
+        return
+
+    rows = []
+    for race in race_tips:
+        if race.get("error"):
+            continue
+        race_key = {"race_date": date_str, "track": race.get("track"),
+                    "race_number": race.get("race_number")}
+        bet_pick = race.get("bet_pick")
+        if isinstance(bet_pick, dict) and bet_pick.get("should_bet"):
+            rows.append(build_ledger_row(bet_pick, race_key, refused=False))
+            continue
+        leader = race.get("raw_model_leader")
+        if not isinstance(leader, dict) or not leader.get("horse"):
+            continue
+        refused_pick = dict(leader)
+        refused_pick["should_bet"] = False
+        refused_pick["staking"] = "0u"  # a refused row must never book P&L
+        refused_pick["selection_origin"] = (
+            leader.get("selection_origin") or "ev_gate_refused")
+        rows.append(build_ledger_row(refused_pick, race_key, refused=True))
+
+    if not rows:
+        return
+    try:
+        conn = db_connect()
+    except Exception as _db_err:
+        print(f"  [LEDGER] DB unavailable — {len(rows)} row(s) not written: {_db_err}",
+              file=sys.stderr)
+        return
+    try:
+        persist_rows(conn, rows)
+    except Exception as _write_err:
+        print(f"  [LEDGER] write failed (pipeline unaffected): {_write_err}",
+              file=sys.stderr)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def store_selections_in_db(race_tips, date_str):
     """Insert top picks into the selections table with full enrichment data."""
     try:
@@ -2937,6 +2993,10 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 _store_convergence(date_str, all_convergence_rows, _pillars_available)
             except Exception as _conv_db_err:
                 print(f"  [BLENDER] Convergence DB write failed: {_conv_db_err}", file=sys.stderr)
+
+    # roi-roadmap 01: ledger capture is measurement-only and must never block
+    # the pipeline; it no-ops unless STRIDE_LEDGER_WRITE=true.
+    persist_selection_ledger(all_race_tips, date_str)
 
     if store_in_db:
         store_selections_in_db(all_race_tips, date_str)

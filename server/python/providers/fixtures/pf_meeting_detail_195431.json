@@ -1,0 +1,124 @@
+{
+  "meetingId": 195431,
+  "meetingDate": "2026-08-01T00:00:00",
+  "track": {
+    "name": "Randwick",
+    "trackId": 52,
+    "location": "Sydney",
+    "state": "NSW",
+    "country": "AUS",
+    "surface": "Turf"
+  },
+  "races": [
+    {
+      "raceNumber": 1,
+      "name": "Winter Sprint Handicap",
+      "raceClass": "BM78",
+      "distance": 1200,
+      "startTime": "2026-08-01T12:45:00",
+      "prizeMoney": 160000,
+      "restrictions": "3YO+",
+      "runners": [
+        {
+          "runnerId": 620014,
+          "name": "Fast Horse",
+          "tabNo": 1,
+          "barrier": 4,
+          "weight": 59.5,
+          "last10": "1x213",
+          "age": 5,
+          "sex": "Gelding",
+          "jockey": {
+            "id": 9101,
+            "fullName": "J Smith"
+          },
+          "trainer": {
+            "id": 8101,
+            "fullName": "T Jones"
+          },
+          "careerStarts": 14,
+          "careerWins": 5,
+          "winPct": 35.7,
+          "placePct": 64.3
+        },
+        {
+          "runnerId": 620015,
+          "name": "Ocean Deep (NZ)",
+          "tabNo": 2,
+          "barrier": 7,
+          "weight": 57.0,
+          "last10": "42x115",
+          "age": 6,
+          "sex": "Mare",
+          "jockey": {
+            "id": 9102,
+            "fullName": "A Chan"
+          },
+          "trainer": {
+            "id": 8102,
+            "fullName": "C Waller"
+          },
+          "careerStarts": 22,
+          "careerWins": 6,
+          "winPct": 27.3,
+          "placePct": 59.1
+        }
+      ]
+    },
+    {
+      "raceNumber": 2,
+      "name": "Midway Plate",
+      "raceClass": "MDN-SW",
+      "distance": 1400,
+      "startTime": "2026-08-01T13:20:00",
+      "prizeMoney": 100000,
+      "restrictions": null,
+      "runners": [
+        {
+          "runnerId": 620021,
+          "name": "Midnight Glory",
+          "tabNo": 1,
+          "barrier": 2,
+          "weight": 58.0,
+          "last10": "23x4",
+          "age": 4,
+          "sex": "Gelding",
+          "jockey": {
+            "id": 9103,
+            "fullName": "K McEvoy"
+          },
+          "trainer": {
+            "id": 8103,
+            "fullName": "G Waterhouse"
+          },
+          "careerStarts": 6,
+          "careerWins": 0,
+          "winPct": 0.0,
+          "placePct": 50.0
+        },
+        {
+          "runnerId": 620022,
+          "name": "Silver Comet",
+          "tabNo": 2,
+          "barrier": 5,
+          "weight": 58.0,
+          "last10": "2",
+          "age": 3,
+          "sex": "Colt",
+          "jockey": {
+            "id": 9104,
+            "fullName": "T Berry"
+          },
+          "trainer": {
+            "id": 8104,
+            "fullName": "B Baker"
+          },
+          "careerStarts": 1,
+          "careerWins": 0,
+          "winPct": 0.0,
+          "placePct": 100.0
+        }
+      ]
+    }
+  ]
+}
