@@ -150,6 +150,82 @@ def test_consensus_passes_with_consensus_file(handler, monkeypatch, tmp_path):
     handler.job_consensus_agent()   # must not raise
 
 
+def test_morning_odds_fails_when_no_snapshot_rows_committed(handler,
+                                                            monkeypatch):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    monkeypatch.setattr(handler, "_db_query", lambda sql, p: (0,))
+    with pytest.raises(RuntimeError) as e:
+        handler.job_morning_odds()
+    assert "no MORNING_CHECK rows" in str(e.value)
+
+
+def test_morning_odds_fails_on_baseline_present_but_zero_signals(handler,
+                                                                 monkeypatch):
+    """The 2026-04-06 shape: prices stored, signals silently absent.
+
+    272 morning rows landed against a 230-row baseline and produced zero
+    market_signal_scores, because the baseline join matched nothing and
+    every runner fell back to neutral. It passed green at the time.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    counts = iter([(272,), (230,), (0,)])   # morning, baseline, signals
+    monkeypatch.setattr(handler, "_db_query", lambda sql, p: next(counts))
+    with pytest.raises(RuntimeError) as e:
+        handler.job_morning_odds()
+    assert "ZERO market_signal_scores" in str(e.value)
+
+
+def test_morning_odds_allows_zero_signals_when_no_baseline(handler,
+                                                           monkeypatch):
+    """Day one has no baseline, so zero signals is correct, not a failure.
+
+    This is the assertion that keeps the check from becoming a daily false
+    alarm — the failure mode that trains an operator to ignore alarms.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    counts = iter([(272,), (0,), (0,)])     # morning, no baseline, no signals
+    monkeypatch.setattr(handler, "_db_query", lambda sql, p: next(counts))
+    out = handler.job_morning_odds()
+    assert out["morning_rows"] == 272
+    assert out["signal_rows"] == 0
+
+
+def test_results_collect_treats_a_timeout_on_today_as_non_fatal(handler,
+                                                                monkeypatch):
+    """_run's 840s cap raises TimeoutExpired, a SubprocessError.
+
+    Catching only RuntimeError let it walk past both handlers and hard-fail
+    the nightly job — the opposite of the documented today/yesterday
+    asymmetry, and an SNS alarm every time a collection ran long.
+    """
+    import subprocess
+    monkeypatch.setattr(handler, "_missed_days", lambda j, n: [])
+
+    def slow(script, *a, **k):
+        if a and a[-1] == handler._today():
+            raise subprocess.TimeoutExpired(cmd=script, timeout=840)
+        return ""
+    monkeypatch.setattr(handler, "_run_ok", slow)
+    out = handler.job_results_collect()      # must not raise
+    assert out["last_success_date"] == handler._today()
+
+
+def test_results_collect_still_raises_when_yesterday_times_out(handler,
+                                                               monkeypatch):
+    # The asymmetry must survive the fix: yesterday is still fatal.
+    import subprocess
+    monkeypatch.setattr(handler, "_missed_days", lambda j, n: [])
+
+    def slow(script, *a, **k):
+        raise subprocess.TimeoutExpired(cmd=script, timeout=840)
+    monkeypatch.setattr(handler, "_run_ok", slow)
+    with pytest.raises(subprocess.TimeoutExpired):
+        handler.job_results_collect()
+
+
 def test_every_card_dependent_job_requires_the_card(handler, monkeypatch):
     """The guard must be wired into each card-dependent job, not just exist.
 

@@ -199,12 +199,82 @@ def job_racecard_collect() -> dict:
             "detail": out[-500:]}
 
 
+def _db_query(sql: str, params: tuple):
+    """One-shot read for the job-contract layer.
+
+    The handler owns no schema and holds no connection; it asks the
+    database what the script it just ran actually left behind. URL checked
+    before the driver import, or an environment missing psycopg2 masks the
+    honest message with ModuleNotFoundError.
+    """
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        raise RuntimeError("DATABASE_URL unset — the post-condition cannot "
+                           "tell a quiet day from a dead write")
+    import psycopg2
+    conn = psycopg2.connect(url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def _db_now():
+    """The clock the rows are stamped with.
+
+    snapshot_time defaults to NOW() and the upsert re-stamps it on
+    conflict, so freshness must be measured DB-side. Timing a Neon-stamped
+    row against this task's time.time() lets NTP drift decide whether the
+    morning alarms.
+    """
+    return _db_query("SELECT NOW()", ())[0]
+
+
 def job_morning_odds() -> dict:
     _sync_down("server/python/intelligence")
-    _prepare_racecard()   # odds_movement reads the card for its fallback odds
+    _require_racecard("morning-odds")   # odds_movement reads it for fallback odds
+    t0 = _db_now()
     _run_ok("odds_movement.py", _today(), "--snapshot", "morning")
+
+    # 1. The snapshot actually committed. odds_movement.py has no non-zero
+    #    exit path, so without this the market pillar can go dark silently
+    #    and every pick quietly degrades toward NO_BET.
+    rows = _db_query(
+        "SELECT COUNT(*) FROM betfair_odds_snapshots WHERE race_date = %s "
+        "AND snapshot_type = 'MORNING_CHECK' AND snapshot_time >= %s",
+        (_today(), t0))[0]
+    if not rows:
+        raise RuntimeError(
+            "morning-odds: odds_movement.py exited 0 but committed no "
+            "MORNING_CHECK rows — the market pillar has no data today.")
+
+    # 2. Signals were derived, not just prices stored. On 2026-04-06 this
+    #    job wrote 272 MORNING_CHECK rows against a 230-row baseline and
+    #    produced ZERO market_signal_scores: compute_market_signals keys the
+    #    baseline on the raw horse name (odds_movement.py:204-212, :231), so
+    #    any name-format drift between the two snapshots misses every lookup
+    #    and every runner silently falls back to neutral 50. Three of the
+    #    five MORNING_CHECK days on record wrote no signals at all.
+    #    Conditional on a baseline existing: with no baseline, zero signals
+    #    is the documented and correct day-one behaviour, not a failure.
+    baseline = _db_query(
+        "SELECT COUNT(*) FROM betfair_odds_snapshots WHERE race_date = %s "
+        "AND snapshot_type = 'BASELINE_NIGHT'", (_today(),))[0]
+    signals = _db_query(
+        "SELECT COUNT(*) FROM market_signal_scores WHERE race_date = %s",
+        (_today(),))[0]
+    if baseline and not signals:
+        raise RuntimeError(
+            f"morning-odds: {baseline} baseline rows and {rows} morning rows, "
+            f"but ZERO market_signal_scores — the baseline join matched "
+            f"nothing, so every runner defaulted to neutral. This is the "
+            f"2026-04-06 failure, which passed green at the time.")
+
     _sync_up("server/python/intelligence")
-    return {"last_success_date": _today()}
+    return {"last_success_date": _today(), "morning_rows": rows,
+            "signal_rows": signals}
 
 
 def job_tip_time_snapshot() -> dict:
@@ -234,12 +304,17 @@ def job_results_collect() -> dict:
     today = _today()
     yesterday = (datetime.now(SYD).date() - timedelta(days=1)).strftime("%Y-%m-%d")
     healed = []
+    # _run's 840s cap raises subprocess.TimeoutExpired, which is a
+    # SubprocessError and NOT a RuntimeError: catching only RuntimeError let
+    # a slow run walk straight past both handlers below and hard-fail the
+    # whole job, which is the exact opposite of what they promise.
+    SOFT = (RuntimeError, subprocess.TimeoutExpired)
     for day in _missed_days("results-collect", PF_WALL_DAYS):
         try:
             _run_ok("auto_results_collector.py", "--date", day)
             _run_ok("fetch_and_import_date.py", "--date", day)
             healed.append(day)
-        except RuntimeError as e:
+        except SOFT as e:
             print(f"backfill {day} failed: {e}", file=sys.stderr)
     for day in (yesterday, today):
         # Today's late meetings may not have resulted yet at 22:30; the
@@ -248,7 +323,7 @@ def job_results_collect() -> dict:
             _run_ok("auto_results_collector.py", "--date", day)
             _run_ok("fetch_and_import_date.py", "--date", day)
             _run_ok("stride_results_collector.py", day)
-        except RuntimeError as e:
+        except SOFT as e:
             if day == yesterday:
                 raise
             print(f"today ({day}) not fully resulted yet: {e}", file=sys.stderr)
