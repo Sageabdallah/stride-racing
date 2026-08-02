@@ -52,17 +52,12 @@ jobs:
                 --cli-read-timeout 900 /tmp/out.json > /tmp/meta.json 2>&1 || OK=1
               cat /tmp/meta.json; echo; head -c 2000 /tmp/out.json; echo
               grep -q FunctionError /tmp/meta.json && OK=1
-              # The handler prints the failed script's stdout/stderr; without
-              # this the only signal is the exception type, which is never
-              # enough to fix anything.
-              LS=$(aws logs describe-log-streams --log-group-name "/aws/lambda/stride-$JOB" \
-                --order-by LastEventTime --descending --max-items 1 \
-                --query 'logStreams[0].logStreamName' --output text 2>/dev/null || echo "")
-              if [ -n "$LS" ] && [ "$LS" != "None" ]; then
-                aws logs get-log-events --log-group-name "/aws/lambda/stride-$JOB" \
-                  --log-stream-name "$LS" --limit 80 \
-                  --query 'events[].message' --output text | tail -60
-              fi
+              # `logs tail`, not describe+get: Lambda stream names contain
+              # [$LATEST], and $LATEST expands to empty inside double quotes,
+              # so the stream name never resolved and the real error stayed
+              # hidden behind "log stream does not exist".
+              aws logs tail "/aws/lambda/stride-$JOB" --since 15m \
+                --format short 2>/dev/null | tail -60 || true
             else
               TASK=$(aws ecs run-task --cluster stride \
                 --task-definition "stride-$JOB" --launch-type FARGATE \
@@ -81,14 +76,9 @@ jobs:
                 --query 'tasks[0].stoppedReason' --output text)
               echo "exit=$EXIT reason=$REASON"
               [ "$EXIT" = "0" ] || OK=1
-              # Last 60 log lines: the actual failure text, not just a code.
-              STREAM=$(aws logs describe-log-streams --log-group-name "/ecs/stride-$JOB" \
-                --order-by LastEventTime --descending --max-items 1 \
-                --query 'logStreams[0].logStreamName' --output text 2>/dev/null || echo "")
-              [ -n "$STREAM" ] && [ "$STREAM" != "None" ] && \
-                aws logs get-log-events --log-group-name "/ecs/stride-$JOB" \
-                  --log-stream-name "$STREAM" --limit 60 \
-                  --query 'events[].message' --output text | tail -60
+              # Last log lines: the actual failure text, not just a code.
+              aws logs tail "/ecs/stride-$JOB" --since 20m \
+                --format short 2>/dev/null | tail -60 || true
             fi
             if [ "$OK" = "0" ]; then PASS="$PASS $JOB"; else FAIL="$FAIL $JOB"; fi
             echo "::endgroup::"
