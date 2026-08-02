@@ -28,8 +28,13 @@ jobs:
     runs-on: [self-hosted]
     timeout-minutes: 10
     steps:
-      - name: Sudo capability
+      - name: Boot time and sudo capability
         run: |
+          # Boot time is the drill's actual evidence: a job that merely runs
+          # proves nothing unless the box booted since the reboot was issued.
+          echo "now:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "booted at:  $(uptime -s) UTC-local"
+          echo "uptime:     $(uptime -p)"
           sudo -n true && echo "passwordless sudo: YES" || echo "passwordless sudo: NO — drill needs the operator"
       - name: Service configuration
         run: |
