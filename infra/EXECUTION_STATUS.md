@@ -98,6 +98,50 @@ Still unguarded by choice: `odds_movement.py` and
 GitHub crons and neither gates evidence accrual, but they remain the two
 places a silent no-op could still hide.
 
+## Not implemented, and why: the results-collector post-condition
+
+`stride_results_collector.py` has no non-zero exit path, so in principle
+it belongs with the morning-jobs post-conditions. It was designed, then
+adversarially reviewed, and **the design was refuted on its load-bearing
+assumption** — so it has not been implemented.
+
+The proposed guard was "tips exist but nothing was scored → fatal", made
+safe by the claim that an all-NO_BET day owes zero rows. Replaying
+`find_tipped_races`' own rule over all 40 `racecards/tips_*.json` shows
+`coverage_pick` present on **100%** of races in every file, and
+`stride_results_collector.py:216-218` reads it *outside* the
+`bet_status == "BET"` branch. So an all-NO_BET day owes the full race
+count, not zero — the guard would fire hardest on precisely the day it
+promised to exempt.
+
+The corrected invariant (tips present AND results for the tipped tracks
+landed AND still zero scored) is sound but needs tips-file parsing, track
+normalisation and DynamoDB state, and by its author's own account fails
+silent when normalisation misses. That is materially more machinery than
+the defect it closes, aimed at the nightly job that currently settles
+day-zero gate evidence.
+
+Deferred deliberately. The higher-value defect in the same job — the
+collector reporting `success: true` with 8 of 8 races failed — is fixed
+and shipped, as is the `TimeoutExpired` bypass that made the
+today/yesterday asymmetry a fiction.
+
+## Betfair cert: blocked on one human step
+
+The pair at `certs/betfair-client.crt` / `.key` is **verified good**:
+`CN=stride-betfair-bot`, valid 31 Jul 2026 → 31 Jul 2027, and the key and
+certificate moduli match. `scripts/betfair_cert_check.py` currently exits
+3 with `CERT_AUTH_REQUIRED` — the pre-upload state.
+
+Nothing cert-related is deployed to AWS, deliberately.
+`stride-late-odds-watch` is a Lambda firing every 5 minutes across the
+racing window, and its read-only `/var/task` means the session token
+never persists, so every invocation logs in fresh. Shipping cert files to
+AWS before the upload is registered would turn each of those into a
+rejected cert login plus an interactive fallback — roughly 190 credential
+submissions a day against an account with a lockout history. Prove it
+locally first, then deploy the materialisation.
+
 ## Recorded decision: stay on the DELAYED Betfair app key (2026-08-02)
 
 Measured, not assumed. The delayed key reports `isMarketDataDelayed=True`,
