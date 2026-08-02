@@ -97,3 +97,18 @@ Still unguarded by choice: `odds_movement.py` and
 `stride_results_collector.py` have no post-condition. Both are covered by
 GitHub crons and neither gates evidence accrual, but they remain the two
 places a silent no-op could still hide.
+
+## Known, not fixed: a hand-disabled schedule does not survive a deploy
+
+`infra/06_schedules.sh:36` and `infra/07b_fargate_schedules.sh:34` both
+call `aws scheduler update-schedule` without `--state`. That API is
+full-replacement, so an omitted `State` reverts to its default of
+`ENABLED`. "Disable X while we investigate" is therefore silently undone
+by the next `deploy-infra`.
+
+Verified 2026-08-02: all 16 schedules read `ENABLED`, which is the state
+tomorrow wants, so nothing is currently wrong. Left unfixed deliberately
+— editing the deploy path is the riskiest change available the night
+before first live run, and the defect makes schedules more enabled, never
+less. Fix is to read current state and pass `--state` explicitly, logging
+loudly when preserving a `DISABLED` so a forgotten disable cannot hide.
