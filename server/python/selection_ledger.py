@@ -178,6 +178,7 @@ def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
 
         # both prices — never one
         "price_taken": price_taken,
+        "price_source": pick.get("price_source") or ("betfair" if pick.get("has_real_market_odds") else "none"),
         "price_close": price_close,
         "has_real_market_odds": pick.get("has_real_market_odds"),
 
@@ -339,6 +340,7 @@ LEDGER_COLUMNS = (
     "has_real_market_odds", "stake_rule", "stake_units", "stake",
     "commission_rate", "settled", "won", "pnl", "shadow_kelly_json",
     "refused", "settled_at_sp_fallback", "sp", "settled_pnl",
+    "price_source",
 )
 
 # The upsert names uq_selection_ledger_race_horse, which the migration creates

@@ -3,23 +3,20 @@
 STRIDE Odds Movement — Smart Money / Steam / Drift Detection.
 
 Captures multi-timepoint odds snapshots and detects price movements.
-Phase 1 uses Racing API odds (not Betfair Exchange).
+Prices come from betfair_prices (direct Exchange when credentials work on
+this machine, freshest runner_odds_snapshots rows otherwise). The Racing
+API client that served Phase 1 is gone with the provider migration.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
-
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
@@ -47,40 +44,6 @@ if _env_path.exists():
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-API_USERNAME = os.environ.get("RACING_API_USERNAME", "")
-API_PASSWORD = os.environ.get("RACING_API_PASSWORD", "")
-BASE_URL = os.environ.get("RACING_API_BASE", "https://api.theracingapi.com")
-
-_SESSION = None
-
-
-def _get_session():
-    global _SESSION
-    if _SESSION is None:
-        _SESSION = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-        _SESSION.mount("https://", HTTPAdapter(max_retries=retries))
-        creds = base64.b64encode(f"{API_USERNAME}:{API_PASSWORD}".encode()).decode()
-        _SESSION.headers.update({
-            "Authorization": f"Basic {creds}",
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0",
-        })
-        _SESSION.verify = False
-    return _SESSION
-
-
-def api_get(endpoint, params=None):
-    url = f"{BASE_URL}{endpoint}"
-    try:
-        resp = _get_session().get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except (requests.RequestException, ValueError) as e:
-        print(f"  [ODDS] API request failed {endpoint}: {e}", file=sys.stderr)
-        return None
-
-
 TARGET_TRACKS = [
     "flemington", "caulfield", "caulfield heath", "moonee valley", "sandown",
     "randwick", "royal randwick", "rosehill", "warwick farm", "canterbury",
@@ -99,75 +62,25 @@ def _is_target_track(course: str) -> bool:
 
 
 def fetch_fresh_odds(date_str: str) -> dict[str, dict[str, float]]:
-    """Make a fresh Racing API call to get current odds for all runners on date. Returns nested dict: {"{track_key}_R{N}": {"horse_name": median_odds, ...}}"""
-    meets = api_get("/v1/australia/meets", {"date": date_str})
-    if not meets:
-        print(f"[ODDS] No meets data for {date_str}", file=sys.stderr)
-        return {}
-
-    meets_list = meets.get("meets", meets) if isinstance(meets, dict) else meets
-    if not isinstance(meets_list, list):
-        return {}
-
+    """Current Betfair prices for every runner on date. Same contract the
+    Racing API version served: {"{track_key}_R{N}": {"horse_name": odds}}.
+    Fed by betfair_prices: direct Exchange when credentials work, otherwise
+    the freshest runner_odds_snapshots rows the AU runner captured."""
+    import betfair_prices
+    price_map = betfair_prices.fetch_price_map(date_str)
     odds_map: dict[str, dict[str, float]] = {}
-
-    for meet in meets_list:
-        meet_id = meet.get("meet_id") or meet.get("id")
-        course = meet.get("course") or meet.get("track") or ""
-        if not meet_id or not course or not _is_target_track(course):
+    for (_key, race_number), race in price_map["races"].items():
+        course = race["track"] or ""
+        if not _is_target_track(course):
             continue
-
-        track_key = normalize_track(course)
-        races_resp = api_get(f"/v1/australia/meets/{meet_id}/races")
-        if not races_resp:
-            continue
-
-        races_list = races_resp.get("races", races_resp) if isinstance(races_resp, dict) else races_resp
-        if not isinstance(races_list, list):
-            continue
-
-        for race in races_list:
-            race_num = race.get("race_number") or race.get("number")
-            if race_num is None:
-                continue
-
-            details = api_get(f"/v1/australia/meets/{meet_id}/races/{int(race_num)}")
-            if not details:
-                continue
-
-            race_key = f"{track_key}_R{int(race_num)}"
-            runners = details.get("runners", [])
-            race_odds: dict[str, float] = {}
-
-            for runner in runners:
-                if runner.get("scratched"):
-                    continue
-                horse = runner.get("horse") or ""
-                if not horse:
-                    continue
-
-                odds_list = runner.get("odds", [])
-                if isinstance(odds_list, list):
-                    win_odds = []
-                    for item in odds_list:
-                        if isinstance(item, dict):
-                            val = safe_float(item.get("win_odds"))
-                            if val and val > 1.0:
-                                win_odds.append(val)
-                    if win_odds:
-                        win_odds.sort()
-                        mid = len(win_odds) // 2
-                        median_odds = win_odds[mid] if len(win_odds) % 2 else (win_odds[mid - 1] + win_odds[mid]) / 2
-                        race_odds[horse] = round(median_odds, 2)
-
-                if horse not in race_odds:
-                    sp = safe_float(runner.get("sp"))
-                    if sp and sp > 1.0:
-                        race_odds[horse] = round(sp, 2)
-
-            if race_odds:
-                odds_map[race_key] = race_odds
-
+        race_key = f"{normalize_track(course)}_R{int(race_number)}"
+        race_odds = {q["horse"]: round(float(q["price"]), 2)
+                     for q in race["runners"].values() if q.get("price")}
+        if race_odds:
+            odds_map[race_key] = race_odds
+    if not odds_map:
+        print(f"[ODDS] No Betfair prices for {date_str} from any source",
+              file=sys.stderr)
     return odds_map
 
 

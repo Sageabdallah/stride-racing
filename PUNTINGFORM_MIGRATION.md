@@ -180,9 +180,14 @@ caret-delimited CSV service remains available as a fallback shape.
       wall at runtime before fetching, print each skipped date with the
       reason, and exit `3` (partial-due-to-wall) vs `1` (fetch failure) vs
       `0` — pre-window dates are unrecoverable without the $1,100 archive.
-- [ ] [C] `odds_movement.py` → Betfair prices (delayed key now; live key when
-      activated). Note: Betfair calls cannot run on GitHub-hosted runners —
-      Mac/self-hosted runner only
+- [x] [C] `odds_movement.py` → Betfair prices (2026-08-02, WP-1): serve side
+      now priced by `betfair_prices.py` (direct Exchange when credentials
+      work, freshest `runner_odds_snapshots` rows otherwise). Also ported:
+      `capture_late_odds.py` (schedule from race_schedule, market from
+      Betfair) and racecard enrichment (`betfair_enrich_racecard.py`, called
+      by `run_tips_pipeline`). Ledger rows carry `price_source`. Note:
+      direct Betfair calls cannot run on GitHub-hosted runners; the AU
+      runner or the Mac only
 - [x] [C] Scheduled workflows (2026-08-01, branch pf/scheduled-ingestion):
       `pf-evening-results.yml` (10:30 UTC = 20:30 AEST intent; today AND
       yesterday — late/abandoned meetings resolve next day) and

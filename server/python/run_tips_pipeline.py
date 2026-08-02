@@ -1906,6 +1906,8 @@ def build_export_pick(horse, rank=None):
         "trainer": horse.get("trainer", ""),
         "odds": horse.get("marketOdds", 0),
         "has_real_market_odds": horse.get("hasRealMarketOdds", False),
+        "price_source": horse.get("priceSource")
+                        or ("betfair" if horse.get("hasRealMarketOdds") else "none"),
         "inferred_market_odds": horse.get("inferredMarketOdds"),
         "fair_odds": horse.get("fairOdds"),
         "win_pct": round(horse.get("winPercentage", 0), 1),
@@ -2259,6 +2261,13 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
     print(f"\n{'='*60}", file=sys.stderr)
     print(f"  TIPS PIPELINE — {date_str}", file=sys.stderr)
     print(f"{'='*60}\n", file=sys.stderr)
+
+    try:
+        from betfair_enrich_racecard import enrich as _betfair_enrich
+        _betfair_enrich(date_str)
+    except Exception as e:
+        print(f"[ODDS] Betfair enrichment unavailable ({e}) - "
+              "scoring without live market prices", file=sys.stderr)
 
     racecard = load_racecard(date_str)
     if not racecard:
@@ -2786,6 +2795,8 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     "trainer": h.get("trainer", ""),
                     "odds": h.get("marketOdds", 0),
                     "has_real_market_odds": h.get("hasRealMarketOdds", False),
+                    "price_source": h.get("priceSource")
+                                    or ("betfair" if h.get("hasRealMarketOdds") else "none"),
                     "inferred_market_odds": h.get("inferredMarketOdds"),
                     "fair_odds": h.get("fairOdds"),
                     "win_pct": round(h.get("winPercentage", 0), 1),

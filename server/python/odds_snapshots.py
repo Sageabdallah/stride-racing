@@ -31,7 +31,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 SNAPSHOT_KINDS = ("tip_time", "late_t5", "morning", "baseline")
-SOURCE_API = "theracingapi"
+# Default tag for quotes that carry no source_api stamp of their own.
+# Historical rows written before 2026-08-02 carry "theracingapi"; from the
+# provider migration onward an un-stamped bookmaker array can only have come
+# from the racecard itself.
+SOURCE_API = "racecard_legacy"
 
 # Table/column contract — migrations/runner_odds_snapshots.sql
 SNAPSHOT_COLUMNS = (
@@ -355,6 +359,18 @@ def capture_snapshots(*, snapshot_kind: str, race_date: Any, track: Any,
         return {"written": 0, "skipped": len(runners), "reason": str(e)}
 
 
+def derive_source_api(runners) -> str:
+    """The API the quotes actually came through. Enriched racecards stamp
+    each odds entry with source_api (betfair_delayed / betfair_snapshot_db);
+    legacy bookmaker arrays carry no stamp and keep the historical tag."""
+    for runner in runners or []:
+        odds = runner.get("odds") if isinstance(runner, dict) else None
+        for entry in odds or []:
+            if isinstance(entry, dict) and entry.get("source_api"):
+                return str(entry["source_api"])
+    return SOURCE_API
+
+
 def capture_tip_time_snapshots(*, track: Any, race_number: Any, date_str: Any,
                                runners: Sequence[Dict[str, Any]],
                                race: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -379,4 +395,5 @@ def capture_tip_time_snapshots(*, track: Any, race_number: Any, date_str: Any,
         runners=runners,
         meet_id=race.get("meet_id"),
         jump_time=jump_time,
+        source_api=derive_source_api(runners),
     )

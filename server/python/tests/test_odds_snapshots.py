@@ -74,7 +74,7 @@ class TestBuildSnapshotRows:
         assert row["race_number"] == 5
         assert row["horse_name_norm"] == "popaward"
         assert row["snapshot_kind"] == "tip_time"
-        assert row["source_api"] == "theracingapi"
+        assert row["source_api"] == "racecard_legacy"
 
     def test_meet_id_prefixed_into_race_id(self):
         rows = self._rows(meet_id="mt_abc")
@@ -531,3 +531,19 @@ class TestWiring:
         late.release_watch_lock("2026-07-28")
         assert (tmp_path / "2026-07-28.pid").exists(), \
             "must never remove another watcher's lock"
+
+
+class TestDeriveSourceApi:
+    def test_enriched_quotes_carry_their_own_source(self):
+        runners = [{"horse": "A", "odds": [
+            {"bookmaker": "betfair", "win_odds": 4.2,
+             "source_api": "betfair_snapshot_db"}]}]
+        assert osn.derive_source_api(runners) == "betfair_snapshot_db"
+
+    def test_legacy_quotes_keep_the_historical_tag(self):
+        runners = [{"horse": "A", "odds": [
+            {"bookmaker": "sportsbet", "win_odds": 4.2}]}]
+        assert osn.derive_source_api(runners) == osn.SOURCE_API
+
+    def test_empty_field_keeps_the_default(self):
+        assert osn.derive_source_api([]) == osn.SOURCE_API

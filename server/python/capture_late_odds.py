@@ -46,27 +46,13 @@ from odds_snapshots import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RACECARDS_DIR = PROJECT_ROOT / "racecards"
 
-SOURCE_API = "theracingapi"
+SOURCE_API = "betfair_delayed"  # refined per pull by betfair_prices
 # Capture as soon as the race is inside TARGET+EARLY_TOLERANCE of the jump;
 # keep capturing (retry / late first sight) until POST_JUMP_GRACE after it.
 TARGET_SECONDS = 300          # aim: T-5min
 EARLY_TOLERANCE_SECONDS = 60  # first opportunity: T-6min
 POST_JUMP_GRACE_SECONDS = 120 # give up 2min after the jump
 API_SLEEP_SECONDS = 0.5       # rate-limit courtesy between market pulls
-
-
-def _api_get(endpoint, params=None):
-    """Reuse the existing Racing API client (session, retries, auth).
-
-    Returns None when the client stack can't even be imported (e.g. no DB
-    driver in a stripped-down environment) — the caller treats that as a
-    failed pull and simply retries next run."""
-    try:
-        from odds_movement import api_get
-    except Exception as e:
-        print(f"  [LATE_ODDS] API client unavailable: {e}", file=sys.stderr)
-        return None
-    return api_get(endpoint, params=params)
 
 
 def _is_trial(race: Dict[str, Any]) -> bool:
@@ -107,42 +93,36 @@ def load_schedule_from_racecard(date_str: str) -> List[Dict[str, Any]]:
     return schedule
 
 
-def load_schedule_from_api(date_str: str) -> List[Dict[str, Any]]:
-    """Fallback: schedule straight from the Racing API (no cached racecard)."""
-    meets = _api_get("/v1/australia/meets", {"date": date_str})
-    if not meets:
+def load_schedule_from_db(date_str: str) -> List[Dict[str, Any]]:
+    """Fallback: schedule from race_schedule (seeded by the tips pipeline)."""
+    try:
+        conn = _connect()
+    except Exception as e:
+        print(f"  [LATE_ODDS] DB connect failed for schedule: {e}", file=sys.stderr)
         return []
-    meets_list = meets.get("meets", meets) if isinstance(meets, dict) else meets
-    if not isinstance(meets_list, list):
+    if conn is None:
         return []
     schedule = []
-    for meet in meets_list:
-        meet_id = meet.get("meet_id") or meet.get("id")
-        course = meet.get("course") or meet.get("track") or ""
-        if not meet_id:
-            continue
-        races_resp = _api_get(f"/v1/australia/meets/{meet_id}/races")
-        races_list = (races_resp.get("races", races_resp)
-                      if isinstance(races_resp, dict) else races_resp)
-        if not isinstance(races_list, list):
-            continue
-        for race in races_list:
-            if _is_trial(race):
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT track, race_number, off_time FROM race_schedule "
+            "WHERE race_date = %s ORDER BY track, race_number", (date_str,))
+        for track, race_number, off_time in cur.fetchall():
+            jump = parse_timestamp(off_time)
+            if jump is None or race_number is None:
                 continue
-            jump = parse_timestamp(race.get("off_time") or race.get("offTime"))
-            try:
-                race_number = int(race.get("race_number") or race.get("number"))
-            except (TypeError, ValueError):
-                continue
-            if jump is None:
-                continue
-            schedule.append({
-                "track": course,
-                "meet_id": meet_id,
-                "race_number": race_number,
-                "jump_time": jump,
-            })
-        time.sleep(API_SLEEP_SECONDS)
+            schedule.append({"track": track, "meet_id": None,
+                             "race_number": int(race_number),
+                             "jump_time": jump})
+        cur.close()
+    except Exception as e:
+        print(f"  [LATE_ODDS] race_schedule read failed: {e}", file=sys.stderr)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
     return schedule
 
 
@@ -150,7 +130,7 @@ def load_schedule(date_str: str) -> List[Dict[str, Any]]:
     schedule = load_schedule_from_racecard(date_str)
     if schedule:
         return schedule
-    return load_schedule_from_api(date_str)
+    return load_schedule_from_db(date_str)
 
 
 def find_due_races(schedule: List[Dict[str, Any]], now: datetime,
@@ -175,15 +155,30 @@ def find_due_races(schedule: List[Dict[str, Any]], now: datetime,
     return due
 
 
-def fetch_race_market(meet_id: Any, race_number: int) -> List[Dict[str, Any]]:
-    """Current per-bookmaker market for one race from the Racing API."""
-    if not meet_id:
-        return []
-    details = _api_get(f"/v1/australia/meets/{meet_id}/races/{int(race_number)}")
-    if not details:
-        return []
-    runners = details.get("runners", [])
-    return runners if isinstance(runners, list) else []
+def fetch_race_market(date_str: str, race: Dict[str, Any]):
+    """(runners, source_api) for one race, priced from Betfair.
+
+    Runners come back in the racecard odds shape build_snapshot_rows already
+    consumes: {"horse": name, "odds": [{"bookmaker": "betfair",
+    "win_odds": price}]}. Direct Exchange when credentials work on this
+    machine, freshest runner_odds_snapshots rows otherwise.
+    """
+    import betfair_prices
+    try:
+        price_map = betfair_prices.fetch_price_map(date_str)
+    except Exception as e:
+        print(f"  [LATE_ODDS] price fetch failed: {e}", file=sys.stderr)
+        return [], SOURCE_API
+    import betfair_markets
+    key = (betfair_markets.norm_track(race.get("track")),
+           int(race.get("race_number") or 0))
+    market = price_map["races"].get(key)
+    if not market:
+        return [], price_map["source"]
+    runners = [{"horse": q["horse"],
+                "odds": [{"bookmaker": "betfair", "win_odds": q["price"]}]}
+               for q in market["runners"].values() if q.get("price")]
+    return runners, price_map["source"]
 
 
 def already_captured_race_ids(conn, date_str: str) -> set:
@@ -249,8 +244,7 @@ def run(date_str: str, dry_run: bool = False, now: Optional[datetime] = None,
 
         captured_at = datetime.now(timezone.utc)
         stj = compute_seconds_to_jump(race["jump_time"], captured_at)
-        runners = fetch_race_market(race["meet_id"], race["race_number"])
-        time.sleep(API_SLEEP_SECONDS)
+        runners, pull_source = fetch_race_market(date_str, race)
         if not runners:
             print(f"  [LATE_ODDS] {label}: market pull failed — will retry "
                   f"next run (T{stj:+d}s)", file=sys.stderr)
@@ -260,7 +254,7 @@ def run(date_str: str, dry_run: bool = False, now: Optional[datetime] = None,
             race_date=date_str, track=race["track"],
             race_number=race["race_number"], runners=runners,
             snapshot_kind="late_t5", captured_at=captured_at,
-            source_api=SOURCE_API, meet_id=race.get("meet_id"),
+            source_api=pull_source, meet_id=race.get("meet_id"),
             jump_time=race["jump_time"])
         if not rows:
             print(f"  [LATE_ODDS] {label}: no priced runners at T{stj:+d}s",
