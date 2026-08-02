@@ -61,5 +61,18 @@ jobs:
 
           # Turn cap is the cost ceiling for an unattended run. 25 is enough for
           # a real fix and small enough that a confused agent gives up cheaply.
+          #
+          # --settings blanks the commit and PR attribution. There is no
+          # --no-co-author flag; `attribution` is the documented mechanism, and it
+          # has to be passed inline because .claude/ is gitignored, so a settings
+          # file would never reach this checkout. The JSON deliberately contains no
+          # spaces: it then survives shell-words and naive whitespace splitting
+          # identically, so it does not depend on how claude_args is parsed.
+          #
+          # This kills the trailer naming Claude. It does NOT stop the action's own
+          # prompt from asking for a Co-authored-by trailer naming the trigger user
+          # — that one is countered by the standing rule in CLAUDE.md, and it is
+          # worth checking on the first agent PR rather than trusting either.
           claude_args: |
             --max-turns 25
+            --settings {"attribution":{"commit":"","pr":""}}
