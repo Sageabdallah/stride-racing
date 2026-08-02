@@ -50,7 +50,9 @@ jobs:
           BETFAIR_APP_KEY: ${{ secrets.BETFAIR_APP_KEY }}
           BETFAIR_USERNAME: ${{ secrets.BETFAIR_USERNAME }}
           BETFAIR_PASSWORD: ${{ secrets.BETFAIR_PASSWORD }}
-          BETFAIR_SESSION_TOKEN: ${{ secrets.BETFAIR_SESSION_TOKEN }}
+          # BETFAIR_SESSION_TOKEN deliberately not passed: the stored secret is a
+          # dead ssoid (ACTION_THIS item) and betfair_auth prefers a token over a
+          # fresh login, so passing it fails with INVALID_SESSION_INFORMATION.
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATE_INPUT: ${{ inputs.date }}
           KIND_INPUT: ${{ inputs.kind }}
