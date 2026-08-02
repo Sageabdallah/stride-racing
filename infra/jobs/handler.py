@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import boto3
@@ -314,34 +315,69 @@ def job_bsp_settle() -> dict:
     return {"last_success_date": _today(), "rows_written": filled}
 
 
+def _require_racecard(job: str) -> None:
+    """Every card-dependent job must FAIL when the card is missing.
+
+    stride_build.py, odds_movement.py and run_tips_pipeline.py have no
+    non-zero exit path, so without this a failed 05:30 collect would let
+    06:00, 07:00 and 10:00 each run on nothing and report success — the
+    whole morning silently producing no tips.
+    """
+    if not _prepare_racecard():
+        raise RuntimeError(
+            f"{job}: no racecard for {_today()} after relay. The 05:30 "
+            f"racecard-collect either did not run or wrote nothing; every "
+            f"downstream job today would otherwise no-op and report success.")
+
+
+def _fresh_files(dirpath: str, suffix: str, since: float) -> list:
+    """Files written after `since` — proof a step did work, not just exited."""
+    if not os.path.isdir(dirpath):
+        return []
+    return [f for f in os.listdir(dirpath) if f.endswith(suffix)
+            and os.path.getmtime(os.path.join(dirpath, f)) >= since]
+
+
 def job_intelligence_build() -> dict:
-    _prepare_racecard()
+    _require_racecard("intelligence-build")
+    # Timed from just before the build, so a file relayed down earlier in
+    # this same task can never be mistaken for one the build produced.
+    t0 = time.time()
     _run_ok("stride_build.py", _today(), "--parallel")
+    built = _fresh_files(f"{_root()}/server/python/intelligence", ".json", t0)
+    if not built:
+        raise RuntimeError(
+            "intelligence-build: stride_build.py exited 0 but wrote no "
+            "intelligence file; consensus and tips would run on stale data.")
     _sync_up("server/python/intelligence")
-    return {"last_success_date": _today()}
+    return {"last_success_date": _today(), "files_built": len(built)}
 
 
 def job_consensus_agent() -> dict:
     _sync_down("server/python/intelligence")
-    _prepare_racecard()
+    _require_racecard("consensus-agent")
     _run_ok("consensus_agent.py", _today())
+    path = f"{_root()}/server/python/intelligence/consensus_{_today()}.json"
+    if not os.path.exists(path):
+        raise RuntimeError(
+            f"consensus-agent: {path} absent after a clean exit. Without "
+            f"fresh consensus every pick degrades to NO_BET.")
     _sync_up("server/python/intelligence")
     return {"last_success_date": _today()}
 
 
 def job_tips_pipeline() -> dict:
     _sync_down("server/python/intelligence")
-    _sync_down("server/python/racecards")
-    # The pipeline copy path (CLAUDE.md "recurring bug"): the card must
-    # exist in BOTH locations before tips run.
-    import shutil
-    src = f"{_root()}/server/python/racecards/racecard_{_today()}.json"
-    dst_dir = f"{_root()}/racecards"
-    os.makedirs(dst_dir, exist_ok=True)
-    if os.path.exists(src):
-        shutil.copy(src, f"{dst_dir}/racecard_{_today()}.json")
+    _require_racecard("tips-pipeline")
     out = _run_ok("run_tips_pipeline.py", _today())
     _run_ok("backfill_tips_contract.py", _today())
+    tips = f"{_root()}/racecards/tips_{_today()}.json"
+    if not os.path.exists(tips):
+        raise RuntimeError(
+            f"tips-pipeline: {tips} absent after a clean exit — the "
+            f"pipeline produced nothing and the frontend has no tips.")
+    # Deliberately NOT asserting a bet count: a day on which every runner
+    # gates to NO_BET is a legitimate outcome, not a failure.
     _sync_up("racecards", "tips_*.json")
     return {"last_success_date": _today(), "detail": out[-300:]}
 
