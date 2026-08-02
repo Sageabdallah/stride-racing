@@ -195,8 +195,22 @@ def job_racecard_collect() -> dict:
     out = _run_ok("download_racecards.py", "--date", _today(), ok_codes=(0,))
     _run_ok("seed_race_schedule.py", _today())
     _sync_up("server/python/racecards", "racecard_*.json")
+    # The quiet-day sentinel has to travel too. Without it every downstream
+    # task sees an absent card and cannot tell "no racing we bet on" from
+    # "the 05:30 collect died" — which is the whole distinction.
+    _sync_up("server/python/racecards", "quiet_*.json")
+    quiet = os.path.exists(
+        f"{_root()}/server/python/racecards/quiet_{_today()}.json")
+    # Known limitation: a quiet day still advances last_success_date, so
+    # _missed_days will never revisit it. That is correct while the target
+    # list is fixed and wrong the day it widens — days that were quiet under
+    # the old list would stay permanently uncollected. The sentinel records
+    # the target_count it ran under and is synced to S3, so the affected days
+    # are recoverable from the evidence rather than from memory; acting on
+    # that is a separate change, and this note is here so it is a decision
+    # rather than a discovery.
     return {"last_success_date": _today(), "gaps_healed": len(healed),
-            "detail": out[-500:]}
+            "quiet_day": quiet, "detail": out[-500:]}
 
 
 def _db_query(sql: str, params: tuple):
@@ -234,7 +248,13 @@ def _db_now():
 
 def job_morning_odds() -> dict:
     _sync_down("server/python/intelligence")
-    _require_racecard("morning-odds")   # odds_movement reads it for fallback odds
+    # odds_movement reads the card for fallback odds
+    if _require_racecard("morning-odds") == "quiet":
+        # No card means no markets to map, so the MORNING_CHECK row assertion
+        # below would fire. That assertion exists to catch the market pillar
+        # going dark silently and must keep firing on every day that has races.
+        return {"last_success_date": _today(), "morning_rows": 0,
+                "signal_rows": 0, "quiet_day": True}
     t0 = _db_now()
     _run_ok("odds_movement.py", _today(), "--snapshot", "morning")
 
@@ -390,19 +410,32 @@ def job_bsp_settle() -> dict:
     return {"last_success_date": _today(), "rows_written": filled}
 
 
-def _require_racecard(job: str) -> None:
+def _require_racecard(job: str) -> str:
     """Every card-dependent job must FAIL when the card is missing.
 
     stride_build.py, odds_movement.py and run_tips_pipeline.py have no
     non-zero exit path, so without this a failed 05:30 collect would let
     06:00, 07:00 and 10:00 each run on nothing and report success — the
     whole morning silently producing no tips.
+
+    A quiet day is the one case where no card is correct: the provider was
+    healthy and listed meetings, none on the target-track list. Returns
+    "card" or "quiet" and raises only on "missing", so the guard above keeps
+    its teeth on the failure it was written for while a calendar fact stops
+    taking four jobs red about three mornings a week.
     """
-    if not _prepare_racecard():
+    state = _prepare_racecard()
+    if state == "missing":
         raise RuntimeError(
             f"{job}: no racecard for {_today()} after relay. The 05:30 "
             f"racecard-collect either did not run or wrote nothing; every "
             f"downstream job today would otherwise no-op and report success.")
+    if state == "quiet":
+        print(f"[racecard] {job}: {_today()} is a QUIET DAY — the provider "
+              f"listed meetings but none are on the target-track list. There "
+              f"is no work to do and that is the correct outcome; see "
+              f"racecards/quiet_{_today()}.json for what did race.")
+    return state
 
 
 def _fresh_files(dirpath: str, suffix: str, since: float) -> list:
@@ -414,7 +447,13 @@ def _fresh_files(dirpath: str, suffix: str, since: float) -> list:
 
 
 def job_intelligence_build() -> dict:
-    _require_racecard("intelligence-build")
+    if _require_racecard("intelligence-build") == "quiet":
+        # Skipped rather than run-and-tolerated: stride_build.py has nothing
+        # to build from, and the fresh-files post-condition below would fire
+        # on the empty result. Weakening that assertion to accommodate a quiet
+        # day would blind it on every other day.
+        return {"last_success_date": _today(), "files_built": 0,
+                "quiet_day": True}
     # Timed from just before the build, so a file relayed down earlier in
     # this same task can never be mistaken for one the build produced.
     t0 = time.time()
@@ -430,7 +469,13 @@ def job_intelligence_build() -> dict:
 
 def job_consensus_agent() -> dict:
     _sync_down("server/python/intelligence")
-    _require_racecard("consensus-agent")
+    if _require_racecard("consensus-agent") == "quiet":
+        # consensus_agent.py exits 4 on zero yield by design — it treats an
+        # empty panel as a failed run rather than a quiet one, which is right
+        # when there are races to find mentions for. On a quiet day that would
+        # be a RuntimeError and an SNS alarm for a day with nothing to do.
+        # It also spends real LLM budget to reach that conclusion.
+        return {"last_success_date": _today(), "quiet_day": True}
     _run_ok("consensus_agent.py", _today())
     path = f"{_root()}/server/python/intelligence/consensus_{_today()}.json"
     if not os.path.exists(path):
@@ -443,7 +488,13 @@ def job_consensus_agent() -> dict:
 
 def job_tips_pipeline() -> dict:
     _sync_down("server/python/intelligence")
-    _require_racecard("tips-pipeline")
+    if _require_racecard("tips-pipeline") == "quiet":
+        # No card means no races to tip, so tips_<date>.json is never written
+        # and the existence check below would fail. Note this is a different
+        # claim from the NO_BET case already documented there: that is "we
+        # looked at every runner and bet none", this is "there was nothing to
+        # look at". Both are legitimate; only the second has no output file.
+        return {"last_success_date": _today(), "quiet_day": True}
     out = _run_ok("run_tips_pipeline.py", _today())
     _run_ok("backfill_tips_contract.py", _today())
     tips = f"{_root()}/racecards/tips_{_today()}.json"
@@ -457,7 +508,7 @@ def job_tips_pipeline() -> dict:
     return {"last_success_date": _today(), "detail": out[-300:]}
 
 
-def _prepare_racecard() -> bool:
+def _prepare_racecard() -> str:
     """Relay the day's racecard down and place it in BOTH locations.
 
     Not just a tips concern: the intelligence agents, the consensus agent
@@ -466,6 +517,12 @@ def _prepare_racecard() -> bool:
     it and both agents died with "Racecard not found" — CLAUDE.md's
     recurring copy-path bug, reappearing in the cloud because each Fargate
     task starts with an empty filesystem.
+
+    Returns "card", "quiet" or "missing". Three answers rather than two
+    because "no card" has two causes that need opposite handling: the 05:30
+    collect died (fail every downstream job, loudly), or the day is quiet and
+    there was never a card to write (do nothing, and say so). Roughly a third
+    of days are the second kind.
     """
     import shutil
     _sync_down("server/python/racecards")
@@ -473,12 +530,18 @@ def _prepare_racecard() -> bool:
     dst_dir = f"{_root()}/racecards"
     os.makedirs(dst_dir, exist_ok=True)
     if not os.path.exists(src):
+        quiet_src = f"{_root()}/server/python/racecards/quiet_{_today()}.json"
+        if os.path.exists(quiet_src):
+            # Relay it alongside the card so anything reading the repo-root
+            # directory sees the same evidence this handler did.
+            shutil.copy(quiet_src, f"{dst_dir}/quiet_{_today()}.json")
+            return "quiet"
         print(f"[racecard] {src} absent after relay — the 05:30 collect "
               f"either has not run or wrote nothing", file=sys.stderr)
-        return False
+        return "missing"
     shutil.copy(src, f"{dst_dir}/racecard_{_today()}.json")
     print(f"[racecard] staged into both locations for {_today()}")
-    return True
+    return "card"
 
 
 def _tips_prepare() -> None:
@@ -531,8 +594,12 @@ def job_weekly_digest() -> dict:
     rows = _state().scan().get("Items", [])
     lines = ["STRIDE weekly digest", "=" * 40]
     for r in sorted(rows, key=lambda x: x.get("job_name", "")):
+        # quiet_day is carried so a week of green rows is readable. Without it
+        # a quiet Monday and a working Monday look identical in the digest,
+        # and "everything is green" stops meaning "everything ran".
+        quiet = " QUIET" if r.get("quiet_day") else ""
         lines.append(f"{r.get('job_name')}: last_success="
-                     f"{r.get('last_success_date')} rows={r.get('rows_written', '-')} "
+                     f"{r.get('last_success_date')}{quiet} rows={r.get('rows_written', '-')} "
                      f"gaps_found={r.get('gaps_found', 0)} healed={r.get('gaps_healed', 0)} "
                      f"{('preflight=' + str(r.get('preflight'))) if r.get('preflight') else ''}")
     # Gate status comes from the run-state row the (Fargate) preflight job

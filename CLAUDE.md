@@ -107,10 +107,16 @@ wrote what; a bot-authored commit carrying a human co-author destroys that
 signal for both parties. Commit under your own identity and let the pull request
 carry the attribution.
 
-**Never touch `infra/`.** `06_schedules.sh` and `07b_fargate_schedules.sh` call
-`update-schedule`, which is full-replacement: any parameter omitted from the
-call silently reverts to its default. Editing these without a live console is
-how live schedule state gets changed by accident.
+**Never touch `infra/*.sh`.** `06_schedules.sh` and `07b_fargate_schedules.sh`
+call `update-schedule`, which is full-replacement: any parameter omitted from
+the call silently reverts to its default. Editing these without a live console
+is how live schedule state gets changed by accident.
+
+`infra/jobs/**` is the exception, and the distinction is the reason for the
+rule rather than the folder name: it is application code baked into the
+container image, not schedule state, and changing it takes effect through a
+reviewed image rebuild like any other code. It is editable under the normal
+rules. The shell scripts remain off limits.
 
 **Do not make a check pass by changing the check.** If a test asserts rows were
 written and no rows were written, the defect is upstream. Weakening the
