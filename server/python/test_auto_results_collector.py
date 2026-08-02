@@ -10,6 +10,8 @@ import inspect
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pf_client
 import auto_results_collector as arc
@@ -182,3 +184,85 @@ def test_process_pending_races_empty_shape(monkeypatch):
         "races_checked": 0,
         "results_collected": 0,
     }
+
+
+# ------------------------------------------- a broken fetch must be LOUD
+#
+# The collector settles prediction_audit.actual_position, which is what the
+# calibrator's shadow evidence and gate 4 are computed from. A fetch that
+# fails outright used to be indistinguishable from "nothing resulted yet":
+# both returned [], both incremented retry_count, and the process exited 0.
+# A missing PUNTINGFORM_API_KEY would therefore have settled nothing, every
+# night, reporting success. These pin the distinction.
+
+class _PendingConn(_FakeConn):
+    def cursor(self, cursor_factory=None):
+        return _FakeCursor([{"id": "s1", "track": "Flemington",
+                             "race_number": 4, "race_date": "2026-07-19"}])
+
+
+def _pending_env(monkeypatch):
+    monkeypatch.setattr(arc, "get_db_connection", lambda: _PendingConn())
+    monkeypatch.setattr(arc, "_ensure_sp_backfill_index", lambda conn: None)
+    monkeypatch.setattr(arc, "increment_retry_count", lambda conn, sid: None)
+
+
+def test_provider_failure_is_reported_as_failure(monkeypatch):
+    _pending_env(monkeypatch)
+    monkeypatch.setattr(arc, "fetch_results_for_date_checked",
+                        lambda d: ([], "provider error: no api key"))
+    result = arc.process_pending_races("2026-07-19")
+    assert result["success"] is False
+    assert result["fetch_errors"] == {"2026-07-19": "provider error: no api key"}
+
+
+def test_unresulted_races_are_not_a_failure(monkeypatch):
+    # Fetch worked, the day simply has nothing resulted yet: retry territory,
+    # not an alarm. Distinguishing this from the case above is the point.
+    _pending_env(monkeypatch)
+    monkeypatch.setattr(arc, "fetch_results_for_date_checked",
+                        lambda d: ([], None))
+    result = arc.process_pending_races("2026-07-19")
+    assert result["success"] is True
+    assert result["fetch_errors"] == {}
+    assert result["failed"] == 1
+
+
+def test_checked_fetch_reports_reason_on_provider_error(monkeypatch):
+    monkeypatch.delenv("RACING_DATA_PROVIDER", raising=False)
+
+    def boom(date):
+        raise pf_client.PFError("/form/meetingslist: 400 Bad Request")
+    monkeypatch.setattr(pf_client, "meetings_for_date", boom)
+    results, reason = arc.fetch_results_for_date_checked("2026-07-19")
+    assert results == []
+    assert reason and "400 Bad Request" in reason
+
+
+def test_checked_fetch_reports_no_reason_on_success(monkeypatch):
+    _stub_pf(monkeypatch)
+    results, reason = arc.fetch_results_for_date_checked("2026-07-19")
+    assert len(results) == 1
+    assert reason is None
+
+
+def test_main_exits_nonzero_when_fetch_failed(monkeypatch):
+    # The scheduled job reads the exit code and nothing else.
+    monkeypatch.setattr(sys, "argv", ["auto_results_collector.py",
+                                      "--date", "2026-07-19"])
+    monkeypatch.setenv("DATABASE_URL", "postgresql://stub")
+    monkeypatch.setattr(arc, "process_pending_races",
+                        lambda d: {"success": False,
+                                   "fetch_errors": {"2026-07-19": "boom"}})
+    with pytest.raises(SystemExit) as excinfo:
+        arc.main()
+    assert excinfo.value.code == 1
+
+
+def test_main_exits_zero_on_success(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["auto_results_collector.py",
+                                      "--date", "2026-07-19"])
+    monkeypatch.setenv("DATABASE_URL", "postgresql://stub")
+    monkeypatch.setattr(arc, "process_pending_races",
+                        lambda d: {"success": True, "fetch_errors": {}})
+    arc.main()   # must not raise SystemExit

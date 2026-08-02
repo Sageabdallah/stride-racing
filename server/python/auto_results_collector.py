@@ -9,7 +9,7 @@ import argparse
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from results_projection import project_resulted_prediction_audit
 from providers import get_provider, validate_results
 # Single-sourced in pf_results_mapper (F-TRACK-ALIAS); imported back so the
@@ -72,13 +72,22 @@ def get_pending_races(conn, target_date: Optional[str] = None) -> List[Dict]:
         return [dict(row) for row in cur.fetchall()]
 
 
-def fetch_results_for_date(race_date: str) -> List[Dict]:
+def fetch_results_for_date_checked(race_date: str) -> Tuple[List[Dict], Optional[str]]:
+    """Fetch plus the reason it came back empty.
+
+    An empty list means two very different things: the provider is broken
+    (bad key, auth, outage, malformed feed) or nothing has resulted yet.
+    Only the first is a failure, and conflating them is what let a totally
+    dead fetch exit 0 every night while prediction_audit never settled —
+    and gate-3 evidence silently never accrued. Returns (results, reason),
+    reason None when the fetch itself succeeded.
+    """
     try:
         provider = get_provider()
         all_results = provider.fetch_results(race_date)
     except Exception as e:
         print(f"[AutoResults] Error fetching results: {e}", file=sys.stderr)
-        return []
+        return [], f"provider error: {e}"
 
     # Reject the whole date on contract violations — a malformed feed applied
     # to prediction_audit corrupts franking/learning, whereas an empty return
@@ -86,10 +95,14 @@ def fetch_results_for_date(race_date: str) -> List[Dict]:
     report = validate_results(all_results, race_date)
     report.print_report()
     if not report.ok:
-        return []
+        return [], "results failed contract validation"
 
     print(f"[AutoResults] Found {len(all_results)} completed races with results", file=sys.stderr)
-    return all_results
+    return all_results, None
+
+
+def fetch_results_for_date(race_date: str) -> List[Dict]:
+    return fetch_results_for_date_checked(race_date)[0]
 
 
 def find_race_in_results(track: str, race_number: int, results: List[Dict]) -> Optional[Dict]:
@@ -317,9 +330,12 @@ def process_pending_races(target_date: Optional[str] = None) -> Dict:
     dates_needed = set(r['race_date'] for r in pending)
     results_cache: Dict[str, List[Dict]] = {}
 
+    fetch_errors: Dict[str, str] = {}
     for race_date in dates_needed:
         print(f"[AutoResults] Fetching results for {race_date}...", file=sys.stderr)
-        results_cache[race_date] = fetch_results_for_date(race_date)
+        results_cache[race_date], reason = fetch_results_for_date_checked(race_date)
+        if reason:
+            fetch_errors[str(race_date)] = reason
 
     total_collected = 0
     total_audit_updated = 0
@@ -390,7 +406,11 @@ def process_pending_races(target_date: Optional[str] = None) -> Dict:
         racing_com_sectionals = collect_racing_com_sectionals(dates_needed)
 
     summary = {
-        'success': True,
+        # A broken fetch is a failure even though the loop below "handled" it
+        # by incrementing retry_count. Races that simply have not resulted yet
+        # are NOT a failure — the retry pass covers those.
+        'success': not fetch_errors,
+        'fetch_errors': fetch_errors,
         'races_checked': len(pending),
         'results_collected': total_collected,
         'audit_rows_updated': total_audit_updated,
@@ -479,6 +499,13 @@ def main():
         result = process_pending_races(target_date)
         import json
         print(json.dumps(result, indent=2))
+        # Exit code is the only thing the scheduled job reads. Printing
+        # success:false and exiting 0 is how a dead fetch stayed invisible.
+        if not result.get('success', False):
+            for date, reason in (result.get('fetch_errors') or {}).items():
+                print(f"[AutoResults] FETCH FAILED {date}: {reason}",
+                      file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == '__main__':
