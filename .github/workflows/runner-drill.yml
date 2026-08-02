@@ -1,0 +1,57 @@
+# Reboot drill for stride-syd-runner (work order item 5). Run AFTER the
+# deploy has landed and between snapshot windows, never before either.
+#
+# mode=audit      inventory only: service config, sudo capability, and
+#                 everything on the box that is outside version control.
+# mode=stopstart  stop the runner service, start it again, prove it returns.
+#                 (The job survives because systemd restarts the service
+#                 after the current job finishes; verification is the next
+#                 dispatched run.)
+# mode=reboot     schedule a reboot in one minute and exit; the box goes
+#                 down AFTER this job completes. Verification = runner shows
+#                 online again and a dispatched job runs post-restart.
+name: runner-drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        default: "audit"
+        options: ["audit", "stopstart", "reboot"]
+
+permissions:
+  contents: read
+
+jobs:
+  drill:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - name: Sudo capability
+        run: sudo -n true && echo "passwordless sudo: YES" || echo "passwordless sudo: NO — drill needs the operator"
+      - name: Service configuration
+        run: |
+          systemctl list-units --type=service --no-pager | grep -i actions.runner || true
+          SVC=$(systemctl list-units --type=service --no-pager | grep -io 'actions\.runner[^ ]*\.service' | head -1)
+          echo "service: ${SVC:-NOT FOUND}"
+          [ -n "$SVC" ] && systemctl is-enabled "$SVC" && systemctl show "$SVC" -p Restart -p WantedBy --no-pager
+      - name: Outside-version-control inventory
+        run: |
+          echo "== crontab:"; crontab -l 2>/dev/null || echo "(none)"
+          echo "== home:"; ls -la "$HOME" | head -20
+          echo "== docker images:"; docker images 2>/dev/null | head -10 || echo "(docker unavailable to this user)"
+          echo "== runner dir:"; ls "$HOME"/actions-runner 2>/dev/null | head -10
+          echo "== enabled custom units:"; systemctl list-unit-files --state=enabled --no-pager | grep -v "@\|systemd\|dbus\|network\|ssh\|cron\|getty\|cloud\|snap" | head -15
+      - name: Stop/start cycle
+        if: ${{ inputs.mode == 'stopstart' }}
+        run: |
+          SVC=$(systemctl list-units --type=service --no-pager | grep -io 'actions\.runner[^ ]*\.service' | head -1)
+          echo "cycling $SVC after this job completes (systemd queues it)"
+          sudo -n systemd-run --on-active=30 systemctl restart "$SVC"
+          echo "restart scheduled in 30s"
+      - name: Reboot
+        if: ${{ inputs.mode == 'reboot' }}
+        run: |
+          sudo -n shutdown -r +1 "runner drill: rebooting in 1 minute"
+          echo "reboot scheduled; verify with: gh api repos/{owner}/{repo}/actions/runners"
