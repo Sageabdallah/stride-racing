@@ -44,14 +44,15 @@ EVIDENCE_BUCKET="stride-evidence-$ACCOUNT_ID"
 
 # name timeout_s memory_mb
 # Only jobs that never write repo paths and never load the model live on
-# Lambda (read-only filesystem). Everything that writes racecards/,
+# Lambda (read-only filesystem). NOTE: 'writes repo paths' includes writes
+# at IMPORT time — walk_forward_backtest makedirs backtest_results on
+# import, which is what moved calibrator-coverage to Fargate. Everything that writes racecards/,
 # intelligence/, or reads models/ runs as a Fargate task (07): racecard,
 # morning-odds, results, gap-heal, preflight, intelligence, consensus,
 # tips, ETL.
 JOBS=(
   "tip-time-snapshot 300 512"
   "late-odds-watch 300 512"
-  "calibrator-coverage 300 512"
   "bsp-settle 300 512"
   "weekly-digest 300 512"
 )
@@ -61,7 +62,7 @@ for spec in "${JOBS[@]}"; do
   DLQ_URL=$(aws sqs create-queue --queue-name "$FN-dlq" --query QueueUrl --output text)
   DLQ_ARN=$(aws sqs get-queue-attributes --queue-url "$DLQ_URL" \
     --attribute-names QueueArn --query Attributes.QueueArn --output text)
-  ENV="Variables={STRIDE_JOB=$NAME,STRIDE_SECRET_ID=stride/prod,STRIDE_EVIDENCE_BUCKET=$EVIDENCE_BUCKET,STRIDE_MODELS_BUCKET=stride-models-$ACCOUNT_ID,STRIDE_ALERT_TOPIC_ARN=arn:aws:sns:$AWS_REGION:$ACCOUNT_ID:stride-alerts}"
+  ENV="Variables={STRIDE_JOB=$NAME,STRIDE_SECRET_ID=stride/prod,STRIDE_EVIDENCE_BUCKET=$EVIDENCE_BUCKET,STRIDE_MODELS_BUCKET=stride-models-$ACCOUNT_ID,STRIDE_ALERT_TOPIC_ARN=arn:aws:sns:$AWS_REGION:$ACCOUNT_ID:stride-alerts,MPLCONFIGDIR=/tmp/mpl}"
   if aws lambda get-function --function-name "$FN" >/dev/null 2>&1; then
     aws lambda update-function-code --function-name "$FN" \
       --image-uri "$IMAGE" >/dev/null

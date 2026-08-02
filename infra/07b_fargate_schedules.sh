@@ -53,3 +53,7 @@ sched_ecs stride-results-retry-0100 "0 1 * * ? *" stride-results-collect
 sched_ecs stride-etl-0045          "45 0 * * ? *" stride-nightly-etl
 sched_ecs stride-gapheal-0300      "0 3 * * ? *"  stride-gap-heal
 sched_ecs stride-preflight-0400    "0 4 * * ? *"  stride-preflight
+# Daily: the gate-3 calibrator evidence emitter. Data-driven day count,
+# so a missed run backfills itself; on Fargate because its import chain
+# writes to the repo tree.
+sched_ecs stride-calibrator-0200   "0 2 * * ? *"  stride-calibrator-coverage

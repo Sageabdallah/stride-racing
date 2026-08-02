@@ -54,10 +54,6 @@ schedule() {  # name cron function
 schedule stride-tiptime-1045       "45 10 * * ? *"   stride-tip-time-snapshot
 schedule stride-tiptime-retry-1100 "0 11 * * ? *"    stride-tip-time-snapshot
 schedule stride-lateodds-5min     "0/5 11-18 * * ? *" stride-late-odds-watch
-# Daily since the gate-3 fix: the calibrator evidence day-count is data-
-# driven (recomputed from settled audit rows), but the gate and digest read
-# should never be more than a day stale.
-schedule stride-calibrator-0200    "0 2 * * ? *"     stride-calibrator-coverage
 # The BSP file stamped D appears only after UK day D-1 closes: structurally
 # impossible before ~09:00 AEST on D, observed present by 15:46 AEST
 # (2026-08-02 probes). A 05:00 sweep would therefore ALWAYS miss by a day.
