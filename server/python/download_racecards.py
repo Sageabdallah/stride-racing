@@ -35,22 +35,20 @@ conservative reading, because the other mistake is the silent one.
 """
 
 import json
+import os
 import sys
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 import time
 
+import target_tracks as tt
 from providers import get_provider, validate_meet_cards
 
-TARGET_TRACKS = [
-    "flemington", "caulfield", "caulfield heath", "moonee valley", "sandown",
-    "randwick", "royal randwick", "rosehill", "warwick farm", "canterbury",
-    "eagle farm", "doomben", "ascot", "belmont", "pinjarra",
-    "kensington", "randwick kensington", "gold coast", "aquis park gold coast",
-    "geelong", "ladbrokes geelong", "ballarat", "cranbourne", "ipswich", "newcastle",
-    "morphettville",
-]
+# Resolved once per run in main(), from target_tracks.py — see that module for
+# why the list moved and why STRIDE_TARGET_TRACKS exists. Bound here at import
+# so the default holds for anything importing this module directly.
+TARGET_TRACKS = list(tt.DEFAULT_TARGET_TRACKS)
 
 OUTPUT_DIR = Path("./racecards")
 
@@ -116,7 +114,9 @@ def fetch_racecards(provider, date_str):
     for meet in meets:
         course = meet["course"]
         course_lower = course.lower()
-        if not any(t in course_lower or course_lower in t for t in TARGET_TRACKS):
+        if not (tt.collect_all()
+                or any(t in course_lower or course_lower in t
+                       for t in TARGET_TRACKS)):
             continue
         expected.append(course)
 
@@ -190,6 +190,7 @@ def write_quiet_sentinel(date_str, stats, provider_name):
         "meetings_after_country_filter": stats.get("country_kept"),
         "meetings_matched": 0,
         "target_count": len(TARGET_TRACKS),
+        "target_source": tt.target_source(),
         "listed": stats.get("listed") or [],
     }
     path = OUTPUT_DIR / f"quiet_{date_str}.json"
@@ -206,26 +207,38 @@ def write_quiet_sentinel(date_str, stats, provider_name):
 
 
 def main():
+    global TARGET_TRACKS
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str)
     parser.add_argument("--days", type=int, default=7)
     args = parser.parse_args()
 
+    # Resolved here rather than at import so an operator can widen coverage by
+    # editing the AWS secret alone — no code change, no deploy, no rebuild.
+    TARGET_TRACKS = tt.target_tracks()
+
     provider = get_provider()
 
     print("\n" + "=" * 55)
     print(f"  DOWNLOAD RACECARDS (proper races only, source: {provider.name})")
+    if tt.collect_all():
+        print(f"  TARGET TRACKS: ALL ({tt.ENV_VAR}) — no track filter")
+    else:
+        print(f"  TARGET TRACKS: {len(TARGET_TRACKS)} from {tt.target_source()}")
     print("=" * 55)
 
     if not provider.has_credentials():
         print("  ERROR: provider credentials missing from environment")
         sys.exit(1)
 
-    if not TARGET_TRACKS:
+    if not TARGET_TRACKS and not tt.collect_all():
         # An empty target list makes every single day look quiet, which would
         # take the whole morning green while producing nothing at all. Never a
-        # quiet day; always a config error.
-        print("  CONFIG ERROR: the target-track list is empty", file=sys.stderr)
+        # quiet day; always a config error. Only reachable via a malformed
+        # override, since the built-in list is never empty.
+        print(f"  CONFIG ERROR: {tt.ENV_VAR} is set but parsed to zero tracks "
+              f"({os.environ.get(tt.ENV_VAR)!r}). Every day would look quiet.",
+              file=sys.stderr)
         sys.exit(2)
 
     dates = [args.date] if args.date else [
