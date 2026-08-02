@@ -1,0 +1,53 @@
+# What gate evidence is actually in the durable store.
+#
+# gate_status counts distinct race days from S3, so "the job exited 0" and
+# "evidence exists" are different claims. This reads the bucket and prints
+# the day counts the gates are computed from, which is the only version of
+# that answer worth trusting.
+#
+# Reports, never gates. A low day count early in a window is the expected
+# state, not a failure; only an unreadable store is an error, because that
+# is what silently reads as zero.
+name: evidence-audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 04:25 Sydney, just after preflight, alongside the schedule audit.
+    - cron: "25 18 * * *"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: Evidence in the durable store
+        run: |
+          B="stride-evidence-${{ vars.AWS_ACCOUNT_ID }}"
+          # Identity first: this is the check that would have caught a write
+          # path silently falling back to some other principal.
+          aws sts get-caller-identity --query Arn --output text \
+            | sed -E 's#(assumed-role/[^/]+)/.*#\1/<session>#'
+          aws s3 ls "s3://$B/evidence/" | tee /tmp/ev.txt
+          SERVE=$(grep -c 'serve_liveness_shadow_[0-9]' /tmp/ev.txt || true)
+          CAL=$(grep -c 'calibrator_shadow_[0-9]' /tmp/ev.txt || true)
+          echo
+          echo "serve-liveness shadow days: $SERVE"
+          echo "calibrator shadow days:     $CAL"
+          {
+            echo "## Gate evidence in s3://$B/evidence/"
+            echo
+            echo "| stream | days |"
+            echo "| --- | --- |"
+            echo "| serve-liveness shadow | $SERVE |"
+            echo "| calibrator shadow | $CAL |"
+          } >> "$GITHUB_STEP_SUMMARY"
