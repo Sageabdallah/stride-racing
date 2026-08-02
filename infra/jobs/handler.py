@@ -226,6 +226,11 @@ def job_late_odds_watch() -> dict:
 
 
 def job_results_collect() -> dict:
+    """Collect TODAY and yesterday, matching the pf-evening-results workflow
+    this replaces. Yesterday alone would leave the day's own races waiting
+    for the 01:00 retry — and everything downstream (ledger settlement, the
+    calibrator's settled-row evidence) waiting with them."""
+    today = _today()
     yesterday = (datetime.now(SYD).date() - timedelta(days=1)).strftime("%Y-%m-%d")
     healed = []
     for day in _missed_days("results-collect", PF_WALL_DAYS):
@@ -235,10 +240,18 @@ def job_results_collect() -> dict:
             healed.append(day)
         except RuntimeError as e:
             print(f"backfill {day} failed: {e}", file=sys.stderr)
-    _run_ok("auto_results_collector.py", "--date", yesterday)
-    _run_ok("fetch_and_import_date.py", "--date", yesterday)
-    _run_ok("stride_results_collector.py", yesterday)
-    return {"last_success_date": yesterday, "gaps_healed": len(healed)}
+    for day in (yesterday, today):
+        # Today's late meetings may not have resulted yet at 22:30; the
+        # 01:00 retry covers them, so today is non-fatal here.
+        try:
+            _run_ok("auto_results_collector.py", "--date", day)
+            _run_ok("fetch_and_import_date.py", "--date", day)
+            _run_ok("stride_results_collector.py", day)
+        except RuntimeError as e:
+            if day == yesterday:
+                raise
+            print(f"today ({day}) not fully resulted yet: {e}", file=sys.stderr)
+    return {"last_success_date": today, "gaps_healed": len(healed)}
 
 
 def job_gap_heal() -> dict:
