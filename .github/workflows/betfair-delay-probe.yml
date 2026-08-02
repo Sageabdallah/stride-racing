@@ -1,0 +1,37 @@
+# Measures the observed data delay of the configured Betfair app key
+# (v1.0-DELAY) on the endpoints the pipeline uses — evidence for the
+# live-vs-delayed key decision. Read-only; one login per run. Self-hosted:
+# Betfair's edge geo-blocks GitHub-hosted runner IPs.
+name: betfair-delay-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      window_seconds:
+        description: "How long to poll for cadence"
+        default: "300"
+      poll_seconds:
+        description: "Poll interval"
+        default: "2.0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: betfair-delay-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe
+        env:
+          BETFAIR_APP_KEY: ${{ secrets.BETFAIR_APP_KEY }}
+          BETFAIR_USERNAME: ${{ secrets.BETFAIR_USERNAME }}
+          BETFAIR_PASSWORD: ${{ secrets.BETFAIR_PASSWORD }}
+          PROBE_WINDOW_SECONDS: ${{ inputs.window_seconds }}
+          PROBE_POLL_SECONDS: ${{ inputs.poll_seconds }}
+        run: python3 scripts/betfair_delay_probe.py
