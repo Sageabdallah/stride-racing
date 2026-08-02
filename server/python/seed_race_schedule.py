@@ -12,7 +12,16 @@ schedule from whichever source exists, in order of preference:
 
 Idempotent: the insert is ON CONFLICT DO NOTHING on the natural key, same
 as mc_api.log_race_schedule. Exit codes: 0 = schedule present after run
-(seeded now or already there), 1 = nothing to seed from, 2 = config error.
+(seeded now or already there, or the day is quiet), 1 = nothing to seed
+from, 2 = config error.
+
+On a quiet day download_racecards writes racecards/quiet_<date>.json instead
+of a card: the provider was healthy and listed meetings, none of them on the
+target-track list. There is then correctly nothing to seed, and exiting 1
+would take the morning red on roughly a third of days for a calendar fact.
+The check is deliberately narrow — only when the table is empty for the date
+AND that sentinel exists. A card that produced no schedule rows for any other
+reason still exits 1.
 """
 
 from __future__ import annotations
@@ -36,6 +45,16 @@ INSERT INTO race_schedule (track, race_number, race_date, off_time,
 VALUES (%s, %s, %s, %s, %s, 'pending')
 ON CONFLICT (track, race_number, race_date) DO NOTHING
 """
+
+
+def quiet_marker(date_str: str):
+    """The quiet-day sentinel for this date, or None. Same search order as the
+    card itself, so a sentinel is found wherever a card would have been."""
+    for d in CARD_DIRS:
+        p = d / f"quiet_{date_str}.json"
+        if p.exists():
+            return p
+    return None
 
 
 def seed_from_racecard(cur, date_str: str):
@@ -102,6 +121,12 @@ def main() -> int:
     print(f"[SCHEDULE] {args.date}: +{inserted} rows from {source}, "
           f"{total} total for the date")
     if total == 0:
+        marker = quiet_marker(args.date)
+        if marker is not None:
+            print(f"[SCHEDULE] {args.date}: quiet day per {marker.name} — the "
+                  "provider listed meetings but none are on the target-track "
+                  "list, so there is nothing to seed and that is correct")
+            return 0
         print(f"[SCHEDULE] nothing to seed {args.date} from: no racecard "
               "file and no prediction_audit rows", file=sys.stderr)
         return 1

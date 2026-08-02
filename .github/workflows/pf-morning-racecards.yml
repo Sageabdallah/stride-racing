@@ -49,6 +49,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve the card date once
+        # This was evaluated separately in three later steps. Each evaluation
+        # is its own call to `date`, so a run that starts at 23:59:59 Sydney
+        # could build one date and then seed and summarise another. Resolve
+        # once, and let every step read the same answer.
+        env:
+          DATE_INPUT: ${{ inputs.date }}
+        run: echo "DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}" >> "$GITHUB_ENV"
       - name: Install psycopg2
         run: pip install --quiet psycopg2-binary
       - name: Gate — DM-2 racecard serve path present?
@@ -60,45 +68,52 @@ jobs:
             exit 1
           fi
       - name: Build racecard
+        # Exit codes are the contract, not the log text. 0 = a card was written
+        # or the day was quiet; 1 = the provider gave us nothing usable; 2 =
+        # the target-track list is empty; 3 = partial or rejected. 3 stays
+        # fatal here on purpose — a card missing a meeting that was listed is
+        # exactly the kind of partial the scheduler must not treat as a day.
         env:
           PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RACING_DATA_PROVIDER: puntingform
-          DATE_INPUT: ${{ inputs.date }}
         run: |
-          DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
           echo "building racecard for $DATE"
           python3 server/python/download_racecards.py --date "$DATE"
       - name: Seed race_schedule from the card
         # The Betfair capture maps markets against race_schedule; seeding
         # here (05:30 AEST) decouples capture from the 10:00 tips run.
+        # No `if:` guard for the quiet day: the AWS handler calls this script
+        # directly, so the quiet-day case has to be understood by the script
+        # rather than by this workflow, or only half the callers are covered.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DATE_INPUT: ${{ inputs.date }}
-        run: |
-          DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
-          python3 server/python/seed_race_schedule.py "$DATE"
+        run: python3 server/python/seed_race_schedule.py "$DATE"
       - name: Upload racecard artifact
         # The Mac tips pipeline consumes racecards/racecard_<date>.json; the
         # runner workspace is ephemeral, so the card must leave as an artifact
         # (gh run download -n racecard) or the serve side never sees it.
+        #
+        # The quiet-day sentinel ships too. Without it, `if-no-files-found:
+        # ignore` makes a quiet day and a failed day produce the same empty
+        # artifact, and a consumer downloading it cannot tell "no racing we
+        # bet on" from "the build broke".
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: racecard
-          path: racecards/racecard_*.json
+          path: |
+            racecards/racecard_*.json
+            racecards/quiet_*.json
           if-no-files-found: ignore
           retention-days: 7
       - name: Per-meeting race counts -> run summary
         if: always()
-        env:
-          DATE_INPUT: ${{ inputs.date }}
         run: |
-          DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
           {
             echo "## PF morning racecard — $DATE"
-            echo '```'
             if [ -f "racecards/racecard_$DATE.json" ]; then
+              echo '```'
               python3 - "$DATE" <<'PY'
           import json, sys
           date = sys.argv[1]
@@ -110,8 +125,30 @@ jobs:
               print(f"{m.get('course', '?')}: {len(races)} races, {runners} runners")
           print(f"TOTAL: {len(meets)} meetings")
           PY
+              echo '```'
+            elif [ -f "racecards/quiet_$DATE.json" ]; then
+              # A quiet day is a real outcome with real content, so it gets a
+              # real readout. "no card produced — see the gate step" was a lie
+              # on these days: the gate passed and the provider answered.
+              python3 - "$DATE" <<'PY'
+          import json, sys
+          date = sys.argv[1]
+          with open(f"racecards/quiet_{date}.json") as fh:
+              q = json.load(fh)
+          listed = q.get("listed") or []
+          print(f"**QUIET DAY** — Punting Form listed {q.get('meetings_listed')} "
+                f"meeting(s), none on the {q.get('target_count')}-track target list. "
+                "Nothing to tip, and that is the correct outcome.\n")
+          print("| course | state | surface | TAB |")
+          print("|---|---|---|---|")
+          for m in listed:
+              tab = {True: "yes", False: "no"}.get(m.get("tab_meeting"), "?")
+              print(f"| {m.get('course','?')} | {m.get('state') or '?'} "
+                    f"| {m.get('surface') or '?'} | {tab} |")
+          PY
             else
-              echo "(no racecard_$DATE.json produced — see the gate step)"
+              echo '```'
+              echo "(no racecard_$DATE.json and no quiet_$DATE.json — the build did not complete)"
+              echo '```'
             fi
-            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
