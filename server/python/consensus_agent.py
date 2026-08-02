@@ -823,7 +823,7 @@ If no horses from the field are mentioned: {{"horses_found": [], "total_sources_
         _save_usage(date_str, usage)
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=2500,
             temperature=0,
             timeout=90,
@@ -926,7 +926,7 @@ TEXT TO ANALYSE:
         _save_usage(date_str, usage)
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=600,
             temperature=0,
             system="You are a data extraction assistant for horse racing. Return ONLY valid JSON.",
@@ -999,7 +999,7 @@ SOURCES:
         _save_usage(date_str, usage)
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=1200,
             temperature=0,
             system="You are a data extraction assistant for horse racing. Return ONLY valid JSON.",
