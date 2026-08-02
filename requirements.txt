@@ -16,7 +16,11 @@ category_encoders==2.10.0
 feature-engine==1.9.4
 optuna==4.9.0
 hyperopt==0.3.0
-pytorch-tabnet==4.1.0
+# pytorch-tabnet (and its ~2.5GB torch dependency) removed 2026-08-02:
+# nothing in the repo imports tabnet or torch, and neither model pickle
+# references them (the ensemble is CatBoost/LightGBM/XGBoost/sklearn).
+# Every Fargate task pulls this image on cold start, so the weight was
+# pure startup latency. Re-add here if a tabnet model is ever trained.
 tabulate
 colorama
 psycopg2-binary

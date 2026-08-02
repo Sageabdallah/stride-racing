@@ -62,11 +62,25 @@ for spec in "${JOBS[@]}"; do
       --environment "$ENV" >/dev/null
     aws lambda wait function-updated --function-name "$FN"
   else
-    aws lambda create-function --function-name "$FN" \
-      --package-type Image --code ImageUri="$IMAGE" \
-      --role "$ROLE_ARN" --timeout "$TIMEOUT" --memory-size "$MEMORY" \
-      --environment "$ENV" \
-      --dead-letter-config TargetArn="$DLQ_ARN" >/dev/null
+    # IAM is eventually consistent and CreateFunction validates the role's
+    # SQS/DLQ permission at call time: a freshly written inline policy is
+    # not visible yet and the call fails with InvalidParameterValue
+    # (run 30741287142). Retry until it propagates rather than sleeping a
+    # guessed interval.
+    for attempt in $(seq 1 12); do
+      if aws lambda create-function --function-name "$FN" \
+        --package-type Image --code ImageUri="$IMAGE" \
+        --role "$ROLE_ARN" --timeout "$TIMEOUT" --memory-size "$MEMORY" \
+        --environment "$ENV" \
+        --dead-letter-config TargetArn="$DLQ_ARN" >/dev/null 2>/tmp/lambda_err; then
+        break
+      fi
+      grep -q "does not have permissions\|InvalidParameterValue" /tmp/lambda_err || {
+        cat /tmp/lambda_err >&2; exit 1; }
+      echo "  $FN: waiting for IAM propagation (attempt $attempt)"
+      sleep 10
+      [ "$attempt" = "12" ] && { cat /tmp/lambda_err >&2; exit 1; }
+    done
   fi
   aws lambda put-function-event-invoke-config --function-name "$FN" \
     --maximum-retry-attempts 2 >/dev/null
