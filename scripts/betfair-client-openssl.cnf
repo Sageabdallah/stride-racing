@@ -1,0 +1,29 @@
+# Betfair non-interactive (certlogin) client certificate.
+#
+# The pair generated 2026-07-31 was rejected by Betfair with
+# CERT_AUTH_REQUIRED because it was built as a CA: basicConstraints was
+# critical CA:TRUE, nsCertType and keyUsage were absent, and only
+# extendedKeyUsage was right. Betfair validates that the presented
+# certificate is a CLIENT certificate, so a self-signed CA is refused at
+# the certlogin endpoint regardless of whether it was uploaded.
+#
+# CA:TRUE is what `openssl req -x509` produces by default, which is why
+# this has to be pinned in a config file rather than left to defaults.
+#
+# The four extensions below are the spec; do not relax them.
+
+[req]
+distinguished_name = dn
+x509_extensions    = client_cert
+prompt             = no
+
+[dn]
+C  = AU
+O  = Stride Racing
+CN = stride-betfair-bot
+
+[client_cert]
+basicConstraints = CA:FALSE
+nsCertType       = client
+keyUsage         = digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth

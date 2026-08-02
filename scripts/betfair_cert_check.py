@@ -41,6 +41,52 @@ if ENV.exists():
 os.environ.pop("BETFAIR_SESSION_TOKEN", None)
 
 
+# Betfair's certlogin requires a CLIENT certificate. `openssl req -x509`
+# defaults to basicConstraints CA:TRUE, which produces a CA certificate
+# that is refused at the endpoint — the 2026-07-31 pair failed exactly
+# this way and read as "not uploaded" for two days. scripts/betfair-client-openssl.cnf
+# pins these four; this is the same list, asserted at check time.
+REQUIRED_EXTENSIONS = (
+    ("CA:FALSE", "basicConstraints = CA:FALSE"),
+    ("SSL Client", "nsCertType = client"),
+    ("Digital Signature", "keyUsage = digitalSignature"),
+    ("Key Encipherment", "keyUsage = keyEncipherment"),
+    ("TLS Web Client Authentication", "extendedKeyUsage = clientAuth"),
+)
+
+
+def _cert_text(path: str) -> str:
+    import subprocess
+    try:
+        return subprocess.run(["openssl", "x509", "-in", path, "-noout",
+                               "-text"], capture_output=True, text=True,
+                              timeout=30).stdout
+    except Exception as e:
+        return f"(could not read certificate: {e})"
+
+
+def _print_extension_check(path: str = None) -> bool:
+    """Print the extension block verdict. True only if every line PASSes."""
+    path = path or _cert_path()
+    text = _cert_text(path)
+    ok = True
+    for needle, label in REQUIRED_EXTENSIONS:
+        hit = needle in text
+        ok = ok and hit
+        print(f"    {'PASS' if hit else 'FAIL'}  {label}")
+    if "CA:TRUE" in text:
+        ok = False
+        print("    FAIL  basicConstraints is CA:TRUE — this is a CA "
+              "certificate, not a client certificate, and Betfair will "
+              "refuse it no matter how often it is uploaded")
+    return ok
+
+
+def _cert_path() -> str:
+    p = os.environ.get("BETFAIR_CERT_PATH", "certs/betfair-client.crt")
+    return p if os.path.isabs(p) else str(ROOT / p)
+
+
 def main() -> int:
     from providers import betfair_auth as ba
 
@@ -64,6 +110,16 @@ def main() -> int:
         print(f"FAIL: missing config: {', '.join(missing)}")
         return 2
 
+    # Checked BEFORE the login attempt: a certificate Betfair cannot accept
+    # is knowable locally, and spending an attempt against a lockout-prone
+    # account to learn it is the wrong order.
+    print("\ncertificate extensions:")
+    if not _print_extension_check():
+        print("\nFAIL: this certificate cannot succeed at certlogin "
+              "regardless of upload state. Regenerate with "
+              "scripts/betfair-client-openssl.cnf, then upload the NEW .crt.")
+        return 5
+
     try:
         ba._refuse_if_blocked()
     except Exception as e:
@@ -74,15 +130,28 @@ def main() -> int:
         return 4
 
     print("\nattempting ONE cert login...")
+    print(f"  endpoint: {ba.CERT_LOGIN_URL}")
     try:
         token = ba.cert_login()
     except Exception as e:
         name = type(e).__name__
         print(f"\nFAIL ({name}): {e}")
         if "CERT_AUTH_REQUIRED" in str(e):
-            print("\n  This is the pre-upload state: Betfair does not yet "
-                  "have this certificate registered against the account. "
-                  "The .crt still needs uploading.")
+            # This message previously asserted "pre-upload state" as fact.
+            # It cannot know that. CERT_AUTH_REQUIRED is returned for BOTH
+            # a certificate that was never uploaded AND one Betfair rejects
+            # on its contents, and the 2026-07-31 pair was the second case:
+            # generated with basicConstraints CA:TRUE and no nsCertType, so
+            # it was refused however many times it was uploaded. Stating
+            # one cause sent the operator to check the upload for a defect
+            # that was in the file. List both, and print what is locally
+            # checkable so the reader can rule one out immediately.
+            print("\n  CERT_AUTH_REQUIRED has TWO causes and this script "
+                  "cannot tell them apart from the response alone:")
+            print("    (a) the .crt is not registered on the Betfair account")
+            print("    (b) it is registered but Betfair rejects its contents")
+            print("\n  Local extension check (rules out (b) if all PASS):")
+            _print_extension_check()
         return 3
 
     # Never print the token. Its length is enough to show one came back.
