@@ -219,6 +219,37 @@ def test_logout_only_kills_self_created_sessions(auth_env, monkeypatch):
     assert not betfair_auth._TOKEN_CACHE.exists()
 
 
+def test_readonly_token_cache_does_not_fail_a_good_login(auth_env, monkeypatch):
+    """A read-only filesystem must not defeat a successful login.
+
+    _TOKEN_CACHE lives inside the code tree, which is read-only on Lambda
+    (/var/task). Unguarded, the cache write raised OSError immediately
+    AFTER the login succeeded, so the Betfair Lambdas could never succeed
+    however healthy the credentials were. The token is still returned; only
+    the reuse optimisation is lost.
+    """
+    (auth_env / "missing.crt").write_text("cert")
+    (auth_env / "missing.key").write_text("key")
+
+    def readonly(*a, **k):
+        raise OSError(30, "Read-only file system")
+    monkeypatch.setattr(betfair_auth, "_write_cached_token", readonly)
+
+    fake = _install(monkeypatch, [
+        FakeResp({"sessionToken": "CTOK", "loginStatus": "SUCCESS"})])
+    assert betfair_auth.get_session_token() == "CTOK"
+    assert [url for url, _ in fake.calls] == [betfair_auth.CERT_LOGIN_URL]
+
+
+def test_cache_write_failure_still_leaves_no_cache(auth_env, monkeypatch):
+    # The optimisation is genuinely lost, not silently half-written.
+    def readonly(*a, **k):
+        raise OSError(30, "Read-only file system")
+    monkeypatch.setattr(betfair_auth, "_write_cached_token", readonly)
+    betfair_auth._cache_token_best_effort("TOK", "cert")
+    assert not betfair_auth._TOKEN_CACHE.exists()
+
+
 def test_missing_config_is_loud(auth_env, monkeypatch):
     monkeypatch.setenv("BETFAIR_PASSWORD", "")
     fake = _install(monkeypatch, [])

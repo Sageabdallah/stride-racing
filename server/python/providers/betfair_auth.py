@@ -259,6 +259,25 @@ def _read_cache() -> Optional[dict]:
         return None
 
 
+def _cache_token_best_effort(token: str, method: str = "cert"):
+    """Persist the session token, but never fail a successful login over it.
+
+    _TOKEN_CACHE lives under server/python/intelligence — inside the code
+    tree, which is READ-ONLY on Lambda (/var/task). Unguarded, this raised
+    OSError immediately *after* a successful login, so the Betfair Lambdas
+    could never succeed no matter how healthy the credentials were. The
+    cache is a login-saving optimisation; losing it costs an extra login
+    next run, which is strictly better than failing this one. Mirrors the
+    same guard already applied to the login-block marker above.
+    """
+    try:
+        _write_cached_token(token, method)
+    except OSError as e:
+        print(f"  [betfair] WARNING: could not cache session token ({e}) — "
+              f"continuing with the live token; the next run cannot reuse "
+              f"it and will log in again", file=sys.stderr)
+
+
 def _write_cached_token(token: str, method: str = "cert"):
     _TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
     # self_created marks sessions this module opened — the only ones logout()
@@ -370,7 +389,8 @@ def get_session_token(force: bool = False, allow_interactive: bool = True) -> st
             if cached["age"] < TOKEN_MAX_AGE_SECONDS and keep_alive(cached["token"]):
                 # keepAlive reset Betfair's idle clock, so the cache clock
                 # restarts too — no login consumed.
-                _write_cached_token(cached["token"], cached.get("auth_method", "cert"))
+                _cache_token_best_effort(cached["token"],
+                                         cached.get("auth_method", "cert"))
                 return cached["token"]
 
     _refuse_if_blocked()
@@ -402,5 +422,5 @@ def get_session_token(force: bool = False, allow_interactive: bool = True) -> st
             "cert files missing and interactive login disabled "
             f"(looked for {_config()['cert_path']})")
 
-    _write_cached_token(token, method)
+    _cache_token_best_effort(token, method)
     return token
