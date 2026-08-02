@@ -65,3 +65,35 @@ defects so far.
 the three never-executed jobs that matter, and they are chained: each
 feeds the next. First live proof arrives 06:00–10:20; every failure alarms
 to SNS, and the Mac can run the whole chain manually as fallback.
+
+## Jobs that could exit 0 having done nothing (2026-08-02, closed)
+
+Found by asking a different question than "does it run": *can this script
+report failure at all?* Scanning the 15 scripts the handler shells out to
+for any non-zero exit path returned four with none —
+`run_tips_pipeline.py`, `stride_build.py`, `odds_movement.py`,
+`stride_results_collector.py`. They still fail loudly on an uncaught
+exception; what they cannot do is report a semantic no-op.
+
+Two live consequences, both fixed:
+
+1. `auto_results_collector.py` printed `success: true` and exited 0 with
+   8 of 8 races failed. It is what settles `prediction_audit.actual_position`,
+   the source of the calibrator's shadow evidence and gate 4. A missing
+   `PUNTINGFORM_API_KEY` would have settled nothing every night while
+   reporting success, and gate-3 evidence would silently never accrue.
+   A failed *fetch* is now fatal; races merely not resulted yet stay
+   non-fatal for the retry pass.
+2. `job_tips_pipeline` staged the racecard `if os.path.exists(src)` and
+   never checked; `job_intelligence_build` ignored `_prepare_racecard()`'s
+   return. One failed 05:30 collect would have let all three morning jobs
+   no-op and report success. `_require_racecard` is now wired into all
+   three, and each asserts its own output afterwards.
+
+Note the asymmetry deliberately kept: tips does **not** assert a bet
+count. An all-NO_BET day is a legitimate outcome, not a failure.
+
+Still unguarded by choice: `odds_movement.py` and
+`stride_results_collector.py` have no post-condition. Both are covered by
+GitHub crons and neither gates evidence accrual, but they remain the two
+places a silent no-op could still hide.
