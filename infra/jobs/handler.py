@@ -262,7 +262,10 @@ def job_gap_heal() -> dict:
 
 
 def job_preflight() -> dict:
-    out = _run_ok("deploy_preflight.py")
+    # Exit 1 means "verdict RED", which is a finding to record, not a crash:
+    # treating it as failure would alarm every morning until the last gate
+    # passes — weeks of noise that teaches the operator to ignore the alarm.
+    out = _run_ok("deploy_preflight.py", ok_codes=(0, 1))
     verdict = "GREEN"
     for line in out.splitlines():
         if line.startswith("VERDICT"):
@@ -404,12 +407,15 @@ def job_weekly_digest() -> dict:
         pass
     body = "\n".join(lines)
     print(body)
-    topic = boto3.client("sns", region_name=REGION)
-    arn = [t["TopicArn"] for t in topic.list_topics()["Topics"]
-           if t["TopicArn"].endswith(":stride-alerts")]
-    if arn:
-        topic.publish(TopicArn=arn[0], Subject="STRIDE weekly digest",
-                      Message=body)
+    # The ARN is in the environment; listing topics needs an SNS:ListTopics
+    # grant the role deliberately does not have (least privilege) and cost
+    # the digest its entire run before publishing anything.
+    arn = os.environ.get("STRIDE_ALERT_TOPIC_ARN", "").strip()
+    if not arn:
+        raise RuntimeError("STRIDE_ALERT_TOPIC_ARN unset — digest has "
+                           "nowhere to publish")
+    boto3.client("sns", region_name=REGION).publish(
+        TopicArn=arn, Subject="STRIDE weekly digest", Message=body)
     return {"last_success_date": _today()}
 
 

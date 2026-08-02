@@ -52,6 +52,17 @@ jobs:
                 --cli-read-timeout 900 /tmp/out.json > /tmp/meta.json 2>&1 || OK=1
               cat /tmp/meta.json; echo; head -c 2000 /tmp/out.json; echo
               grep -q FunctionError /tmp/meta.json && OK=1
+              # The handler prints the failed script's stdout/stderr; without
+              # this the only signal is the exception type, which is never
+              # enough to fix anything.
+              LS=$(aws logs describe-log-streams --log-group-name "/aws/lambda/stride-$JOB" \
+                --order-by LastEventTime --descending --max-items 1 \
+                --query 'logStreams[0].logStreamName' --output text 2>/dev/null || echo "")
+              if [ -n "$LS" ] && [ "$LS" != "None" ]; then
+                aws logs get-log-events --log-group-name "/aws/lambda/stride-$JOB" \
+                  --log-stream-name "$LS" --limit 80 \
+                  --query 'events[].message' --output text | tail -60
+              fi
             else
               TASK=$(aws ecs run-task --cluster stride \
                 --task-definition "stride-$JOB" --launch-type FARGATE \
