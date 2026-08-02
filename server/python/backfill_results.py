@@ -6,7 +6,8 @@ Why: the 2026-07 coverage report (docs/12 §4c) found every table stops at
 driver reuses the EXACT production ingestion path to close a date gap:
 
   results     fetch_and_import_date.fetch_date / import_meetings
-              (The Racing API; race-level skip of existing rows)
+              (Punting Form via pf_client since the provider migration;
+               race-level skip of existing rows)
   NSW         nsw_sectional_collector.run_backfill(since_date=START)
               (pidata; one pass, all venues, internal dedup)
   QLD         sectional_times_collector.collect_for_date_track per

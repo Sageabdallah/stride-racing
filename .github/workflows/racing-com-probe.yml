@@ -3,18 +3,12 @@
 # repo's existing RACING_COM_API_KEY secret. racing.com is not geo-blocked
 # from GitHub runners (unlike Betfair), so this runs anywhere.
 #
-# Push trigger is scoped to the migration branch + probe files only, because
-# GitHub cannot dispatch a workflow that exists solely on a non-default
-# branch; drop the push trigger if this merges to main.
+# Dispatch-only: the branch-scoped push trigger was dropped once this landed
+# on main, as its own header instructed.
 
 name: racing-com-probe
 
 on:
-  push:
-    branches: ["claude/betfair-keys-smoke-test-4yqny1"]
-    paths:
-      - "scripts/racing_com_probe.py"
-      - ".github/workflows/racing-com-probe.yml"
   workflow_dispatch: {}
 
 permissions:
