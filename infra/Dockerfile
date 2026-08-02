@@ -1,15 +1,24 @@
-# Job image: Lambda python base so the same image serves container Lambdas
-# (entrypoint overridden per function) and Fargate tasks.
+# One image for container Lambdas and Fargate tasks.
 #
-# Build context is the REPO ROOT (04_ecr_image.sh passes infra/..). The
-# original paths said Race-Analytics/… — the Mac export-folder layout where
-# the repo's parent holds a Race-Analytics/ dir — and failed on any CI
-# checkout; never caught because the image had never been built anywhere.
-FROM public.ecr.aws/lambda/python:3.11
+# Base is Debian slim, NOT the Lambda python base: the Lambda 3.11 base is
+# AL2 (glibc 2.26) and rejects the ML stack's manylinux_2_28 wheels — even
+# correctly-pinned sklearn/pandas fell back to sdists and a compiler that
+# isn't there. Debian bookworm (glibc 2.36) takes every wheel; awslambdaric
+# restores Lambda compatibility, and entrypoint.sh picks Lambda vs Fargate
+# mode from AWS_LAMBDA_RUNTIME_API. libgomp1 is the OpenMP runtime
+# lightgbm/xgboost link against.
+FROM python:3.11-slim
+ENV LAMBDA_TASK_ROOT=/var/task
+WORKDIR /var/task
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt boto3
+RUN pip install --no-cache-dir -r /tmp/requirements.txt boto3 awslambdaric
 COPY server/python ${LAMBDA_TASK_ROOT}/server/python
 COPY migrations ${LAMBDA_TASK_ROOT}/migrations
 COPY infra/jobs ${LAMBDA_TASK_ROOT}/jobs
+COPY infra/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 ENV PYTHONPATH=${LAMBDA_TASK_ROOT}/server/python:${LAMBDA_TASK_ROOT}
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["jobs.handler.dispatch"]
