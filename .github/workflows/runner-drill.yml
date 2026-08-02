@@ -18,7 +18,7 @@ on:
       mode:
         type: choice
         default: "audit"
-        options: ["audit", "stopstart", "reboot"]
+        options: ["audit", "stopstart", "reboot", "purge-aws-creds"]
 
 permissions:
   contents: read
@@ -77,6 +77,26 @@ jobs:
           echo "== git remotes in the runner's clone (host only):"
           git -C "$HOME/stride-racing" remote -v 2>/dev/null \
             | sed -E 's#(https://)[^@]*@#\1<redacted>@#g' | head -4 || echo "   (no clone)"
+
+      - name: Purge the static AWS key
+        if: ${{ inputs.mode == 'purge-aws-creds' }}
+        run: |
+          # The audit found ~/.aws/credentials holding one long-lived access
+          # key and zero role/SSO entries — precisely what the OIDC migration
+          # was meant to end ("no long-lived keys sitting anywhere"). Nothing
+          # needs it: all six self-hosted workflows make zero AWS calls, and
+          # AWS-touching workflows run on ubuntu-latest via OIDC. This box
+          # executes code from a PUBLIC repo, so a static key here is the
+          # worst place for one.
+          #
+          # Deliberately prints nothing identifying: the key id is located in
+          # IAM by last-used metadata, not by echoing it to a public log.
+          P="$HOME/.aws/credentials"
+          if [ ! -f "$P" ]; then echo "already absent — nothing to purge"; exit 0; fi
+          shred -u "$P" 2>/dev/null || rm -f "$P"
+          if [ -f "$P" ]; then echo "::error::purge FAILED, file still present"; exit 1; fi
+          echo "purged $P"
+          echo "::warning::File removed. The key is still ACTIVE in IAM until it is deactivated there — that is the other half of this fix."
 
       - name: Harden + stop/start cycle
         if: ${{ inputs.mode == 'stopstart' }}
