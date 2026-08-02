@@ -69,6 +69,17 @@ jobs:
           DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
           echo "building racecard for $DATE"
           python3 server/python/download_racecards.py --date "$DATE"
+      - name: Upload racecard artifact
+        # The Mac tips pipeline consumes racecards/racecard_<date>.json; the
+        # runner workspace is ephemeral, so the card must leave as an artifact
+        # (gh run download -n racecard) or the serve side never sees it.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: racecard
+          path: racecards/racecard_*.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Per-meeting race counts -> run summary
         if: always()
         env:
