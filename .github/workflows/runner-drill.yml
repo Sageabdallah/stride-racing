@@ -29,7 +29,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Sudo capability
-        run: sudo -n true && echo "passwordless sudo: YES" || echo "passwordless sudo: NO — drill needs the operator"
+        run: |
+          sudo -n true && echo "passwordless sudo: YES" || echo "passwordless sudo: NO — drill needs the operator"
       - name: Service configuration
         run: |
           systemctl list-units --type=service --no-pager | grep -i actions.runner || true
