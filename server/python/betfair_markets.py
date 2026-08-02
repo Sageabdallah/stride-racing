@@ -72,6 +72,11 @@ _TRACK_ALIASES = {
     "rosehillgardens": "rosehill",
     "ascot": "ascotwa",
     "ascotwa": "ascotwa",
+    # Betfair's venue is plain "Sandown" for both circuits; race_schedule
+    # carries the circuit name. Same physical venue, one meeting per day,
+    # so collapsing both onto "sandown" cannot collide.
+    "sandownlakeside": "sandown",
+    "sandownhillside": "sandown",
 }
 
 
