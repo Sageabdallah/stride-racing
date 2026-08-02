@@ -89,6 +89,62 @@ BUCKET_WEIGHTS = {
 DAILY_TAVILY_CAP = 50     # panel extract (up to 35+ active sources)
 DAILY_CLAUDE_CAP = 200    # batched panel extraction (~40) + web search research (~40) + buffer
 
+
+# ── Extraction model ──
+# Read from env, never hardcoded. The previous hardcoded id
+# (claude-sonnet-4-20250514) was retired 2026-06-15; every extraction call
+# 404'd, the agent wrote all-zero-mention scores, printed "Complete" and exited
+# 0. Nothing downstream could tell that day from a genuinely quiet one. An id is
+# a deployment fact, so it lives in the environment and is checked at startup by
+# preflight_extraction_model() before any race is processed.
+#
+# temperature is deliberately NOT passed: non-default sampling parameters are
+# rejected on claude-sonnet-5 and later. thinking is explicitly disabled —
+# these models run adaptive thinking when the parameter is omitted, which shares
+# the max_tokens budget with the response and can truncate a JSON extraction.
+DEFAULT_EXTRACTION_MODEL = "claude-sonnet-5"
+
+
+def extraction_model() -> str:
+    """ANTHROPIC_CONSENSUS_MODEL, or the current default."""
+    return os.environ.get(
+        "ANTHROPIC_CONSENSUS_MODEL", DEFAULT_EXTRACTION_MODEL
+    ).strip() or DEFAULT_EXTRACTION_MODEL
+
+
+NO_THINKING = {"type": "disabled"}
+
+
+class ExtractionModelUnavailable(RuntimeError):
+    """The configured extraction model cannot be called. Fatal by design."""
+
+
+def preflight_extraction_model(client, model: str) -> None:
+    """One tiny call before any race is processed.
+
+    Uses the same parameter shape as the real extraction calls, so it catches a
+    retired/misspelled id (404) *and* a rejected parameter (400) — the two ways
+    this has actually broken. Between 2026-06-15 and 2026-08-02 every extraction
+    404'd and the agent still exited 0; this makes that impossible.
+    """
+    try:
+        client.messages.create(
+            model=model,
+            max_tokens=4,
+            thinking=NO_THINKING,
+            timeout=30,
+            messages=[{"role": "user", "content": "ok"}],
+        )
+    except Exception as e:
+        raise ExtractionModelUnavailable(
+            f"extraction model {model!r} is not callable: {type(e).__name__}: {e}. "
+            f"Set ANTHROPIC_CONSENSUS_MODEL to a live model id."
+        ) from e
+
+
+# Populated by run_consensus_agent, read by main() for the exit contract.
+LAST_RUN_HEALTH: dict = {}
+
 # ── Tipster-accuracy feedback (opt-in: STRIDE_ACCURACY_WEIGHTS=true) ──
 # source_accuracy_tracker records every panel tip's outcome; these weights
 # feed the measured hit rates back into panel quality multipliers. Leak-free
@@ -823,9 +879,9 @@ If no horses from the field are mentioned: {{"horses_found": [], "total_sources_
         _save_usage(date_str, usage)
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=extraction_model(),
             max_tokens=2500,
-            temperature=0,
+            thinking=NO_THINKING,
             timeout=90,
             system="You are a data extraction assistant. Extract structured data from racing research. Return ONLY valid JSON. No preamble.",
             messages=[{"role": "user", "content": extract_prompt}],
@@ -926,9 +982,9 @@ TEXT TO ANALYSE:
         _save_usage(date_str, usage)
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=extraction_model(),
             max_tokens=600,
-            temperature=0,
+            thinking=NO_THINKING,
             system="You are a data extraction assistant for horse racing. Return ONLY valid JSON.",
             messages=[{"role": "user", "content": prompt}],
         )
@@ -999,9 +1055,9 @@ SOURCES:
         _save_usage(date_str, usage)
 
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=extraction_model(),
             max_tokens=1200,
-            temperature=0,
+            thinking=NO_THINKING,
             system="You are a data extraction assistant for horse racing. Return ONLY valid JSON.",
             messages=[{"role": "user", "content": prompt}],
         )
@@ -1242,6 +1298,79 @@ def _write_output(date_str: str, data: dict) -> None:
     print(f"[CONSENSUS] Written to {output_path}", file=sys.stderr)
 
 
+def build_health(date_str: str, results_by_race: dict, usage: dict,
+                 panel_log: list, db_ok: bool, db_error: str | None,
+                 dry_run: bool = False) -> dict:
+    """Run health, so a broken day is distinguishable from a quiet one.
+
+    The agent used to exit 0 whether it found 400 mentions or none at all, which
+    is what let a retired model id corrupt six weeks of accrual unnoticed.
+    """
+    races = len(results_by_race)
+    horses = sum(len(r) for r in results_by_race.values() if isinstance(r, dict))
+    mentions = sum(
+        d.get("total_mentions", 0)
+        for r in results_by_race.values() if isinstance(r, dict)
+        for d in r.values() if isinstance(d, dict)
+    )
+    scored = sum(
+        1
+        for r in results_by_race.values() if isinstance(r, dict)
+        for d in r.values() if isinstance(d, dict) and d.get("total_mentions", 0) > 0
+    )
+    ok = sum(1 for e in panel_log if e.get("fetch_status") == "SUCCESS")
+    return {
+        "race_date": date_str,
+        "dry_run": dry_run,
+        "extraction_model": extraction_model(),
+        "races": races,
+        "horses_scored": horses,
+        "horses_with_mentions": scored,
+        "total_mentions": mentions,
+        "panel_fetch_success": ok,
+        "panel_fetch_attempted": len(panel_log),
+        "api_calls": dict(usage),
+        "db_mirror_ok": db_ok,
+        "db_mirror_error": db_error,
+        # The condition that must never again pass silently. A dry run makes no
+        # extraction calls, so zero mentions is its expected result, not a fault.
+        "zero_yield": (not dry_run) and races > 0 and mentions == 0,
+    }
+
+
+def _write_health(date_str: str, health: dict) -> None:
+    """Sibling file, not a key inside consensus_<date>.json.
+
+    consensus_blender.load_consensus_intelligence treats every top-level key as
+    a race, so a health block inside the artifact would be counted as one. The
+    consumed file's shape stays byte-identical.
+    """
+    path = INTELLIGENCE_DIR / f"consensus_{date_str}.health.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(health, indent=2, default=str))
+    print(f"[CONSENSUS] Health written to {path}", file=sys.stderr)
+
+
+def _store_with_retry(fn, *args, attempts: int = 3, base_delay: float = 2.0):
+    """Retry a DB mirror write. These were fire-and-forget: a transient Neon SSL
+    drop lost the whole day's mirror while the JSON still said everything was
+    fine. Raises the last error if every attempt fails."""
+    last = None
+    for i in range(attempts):
+        try:
+            return fn(*args)
+        except Exception as e:
+            last = e
+            if i < attempts - 1:
+                print(
+                    f"[CONSENSUS] DB write attempt {i + 1}/{attempts} failed "
+                    f"({type(e).__name__}); retrying",
+                    file=sys.stderr,
+                )
+                time.sleep(base_delay * (2 ** i))
+    raise last
+
+
 def run_consensus_agent(
     date_str: str,
     track_filter: str | None = None,
@@ -1270,6 +1399,14 @@ def run_consensus_agent(
 
     tavily_client = TavilyClient(api_key=tavily_key)
     anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
+
+    # Preflight runs in --dry-run too. It is a 4-token call, and the whole point
+    # of a dry run is to find out whether today's run would work; skipping the
+    # one check that catches the failure mode this repair exists for would
+    # defeat that.
+    _model = extraction_model()
+    preflight_extraction_model(anthropic_client, _model)
+    print(f"[CONSENSUS] Extraction model OK: {_model}", file=sys.stderr)
 
     try:
         meetings = load_racecard_meetings(date_str)
@@ -1610,22 +1747,46 @@ def run_consensus_agent(
         else:
             print(f"    No tips found for this race", file=sys.stderr)
 
+    db_ok, db_error = True, None
     if not dry_run and conn:
         try:
-            store_mentions_batch(conn, all_mentions)
-            store_consensus_scores_batch(conn, date_str, all_scores)
+            _store_with_retry(store_mentions_batch, conn, all_mentions)
+            _store_with_retry(store_consensus_scores_batch, conn, date_str, all_scores)
             print(
                 f"[CONSENSUS] DB: {len(all_mentions)} mentions, {len(all_scores)} scores stored",
                 file=sys.stderr,
             )
         except Exception as e:
-            print(f"[CONSENSUS] DB write error: {e}", file=sys.stderr)
+            db_ok, db_error = False, f"{type(e).__name__}: {e}"
+            print(f"[CONSENSUS] DB write error after retries: {e}", file=sys.stderr)
         finally:
             conn.close()
 
-    _write_output(date_str, results_by_race)
+    # A dry run must not touch the live artifact. It used to: _write_output ran
+    # unconditionally, so `consensus_agent.py <date> --dry-run` — the documented
+    # /stride-full-dry step — silently overwrote a real consensus file with
+    # all-zero scores. The file is gitignored and has no DB mirror on days the
+    # mirror failed, so that was an unrecoverable clobber of the only copy.
+    if dry_run:
+        print(
+            f"[CONSENSUS] DRY RUN: not writing consensus_{date_str}.json "
+            f"({len(results_by_race)} races would be written)",
+            file=sys.stderr,
+        )
+    else:
+        _write_output(date_str, results_by_race)
+
+    health = build_health(date_str, results_by_race, usage, panel_log_rows,
+                          db_ok, db_error, dry_run=dry_run)
+    if not dry_run:
+        _write_health(date_str, health)
+    LAST_RUN_HEALTH.clear()
+    LAST_RUN_HEALTH.update(health)
+
     print(
-        f"[CONSENSUS] Complete. API calls: Tavily={usage.get('tavily', 0)}, Claude={usage.get('claude', 0)}",
+        f"[CONSENSUS] Complete. API calls: Tavily={usage.get('tavily', 0)}, Claude={usage.get('claude', 0)} | "
+        f"mentions={health['total_mentions']} across {health['races']} races "
+        f"({health['horses_with_mentions']}/{health['horses_scored']} horses)",
         file=sys.stderr,
     )
     return results_by_race
@@ -1639,12 +1800,31 @@ def main():
     parser.add_argument("--max-races", type=int, default=None, help="Limit number of races")
     args = parser.parse_args()
 
-    run_consensus_agent(
-        date_str=args.date,
-        track_filter=args.track,
-        dry_run=args.dry_run,
-        max_races=args.max_races,
-    )
+    try:
+        run_consensus_agent(
+            date_str=args.date,
+            track_filter=args.track,
+            dry_run=args.dry_run,
+            max_races=args.max_races,
+        )
+    except ExtractionModelUnavailable as e:
+        print(f"[CONSENSUS] FATAL: {e}", file=sys.stderr)
+        sys.exit(3)
+
+    # Exit contract. A day that scored races but found nothing is a broken run,
+    # not a quiet one, and the pipeline must be able to tell: without a non-zero
+    # exit here, six weeks of 404s looked exactly like six weeks of quiet news.
+    h = LAST_RUN_HEALTH
+    if h.get("zero_yield"):
+        print(
+            f"[CONSENSUS] FATAL: {h['races']} races scored, zero mentions extracted. "
+            f"Treating as a failed run, not a quiet day.",
+            file=sys.stderr,
+        )
+        sys.exit(4)
+    if h and not h.get("db_mirror_ok", True):
+        print("[CONSENSUS] FATAL: DB mirror failed after retries.", file=sys.stderr)
+        sys.exit(5)
 
 
 if __name__ == "__main__":
