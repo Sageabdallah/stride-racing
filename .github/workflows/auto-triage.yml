@@ -1,0 +1,117 @@
+# .github/workflows/auto-triage.yml
+#
+# Watches other workflows. When one fails on main, grabs the failing step's log
+# and opens an issue tagging @claude, which fires claude.yml.
+#
+# Deduplicated by workflow + commit sha: a job that fails twelve times against
+# the same commit overnight produces one issue, not twelve.
+
+name: Auto-triage CI failure
+
+on:
+  workflow_run:
+    # Names match the `name:` field inside each workflow file, not the filename.
+    #
+    # Deliberately excludes the three workflows added alongside this one
+    # (Auto-triage CI failure, Claude, Morning outcome watch) — watching itself
+    # or the responder turns one failure into a loop.
+    #
+    # Also excludes the push-triggered probes (pf-verify, puntingform-probe,
+    # racing-com-probe, pf-backfill) and the manual-dispatch analysis jobs. Those
+    # run on demand or fail for reasons a fix cannot address — racing-com-probe
+    # is blocked on a secret it does not have.
+    workflows:
+      - "deploy-infra"            # deploy
+      - "post-deploy-verify"      # deploy verification
+      - "ci"                      # tests, on every push
+      - "pf-morning-racecards"    # 05:30 AEST, feeds everything downstream
+      - "betfair-odds-snapshot"   # 07:45 and 10:45 AEST price capture
+      - "pf-evening-results"      # 20:30 AEST settlement; the silent-no-op fixed in 7fae98c
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  triage:
+    # Only main. Feature-branch failures are yours to look at, not the agent's.
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'main'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Collect the failing log
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -uo pipefail
+          gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --log-failed > failed.log 2>/dev/null \
+            || echo "(no failed-step log retrievable for run $RUN_ID)" > failed.log
+
+          # Last 300 lines, hard-capped at 20k chars. GitHub issue bodies cap at
+          # 65536, and the tail is where the actual error lives anyway.
+          tail -n 300 failed.log | tail -c 20000 > trimmed.log
+          wc -l trimmed.log
+
+      - name: Open triage issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WF_NAME: ${{ github.event.workflow_run.name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${HEAD_SHA:0:7}"
+          TITLE="Auto-triage: ${WF_NAME} failed on ${SHORT_SHA}"
+
+          # Dedupe. Same workflow, same commit, already reported -> stop.
+          EXISTING=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label auto-triage \
+            --search "\"$TITLE\" in:title" \
+            --json number --jq 'length')
+
+          if [ "$EXISTING" != "0" ]; then
+            echo "Already an open issue for ${WF_NAME} @ ${SHORT_SHA}. Not filing again."
+            exit 0
+          fi
+
+          {
+            echo "\`${WF_NAME}\` failed on \`main\` at \`${SHORT_SHA}\`."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "<details><summary>Failing step output (tail)</summary>"
+            echo
+            echo '```'
+            cat trimmed.log
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "---"
+            echo
+            echo "@claude Investigate this failure and open a pull request with a fix."
+            echo
+            echo "Rules for this task:"
+            echo "- Open a PR against \`main\`. Do not commit to \`main\` directly."
+            echo "- Do not modify anything under \`infra/\`. Those scripts have"
+            echo "  full-replacement semantics and a wrong edit silently reverts live state."
+            echo "- If the root cause is a job that exited 0 without doing its work,"
+            echo "  say so explicitly — that class is already tracked in the execution register."
+            echo "- If you cannot determine the cause with confidence, comment with your"
+            echo "  findings and open no PR. A wrong fix is worse than no fix here."
+          } > body.md
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --label auto-triage \
+            --body-file body.md

@@ -1,0 +1,271 @@
+# .github/workflows/morning-watch.yml
+#
+# Covers the gap. The 07:00 job is a Fargate scheduled task, so no
+# workflow_run trigger will ever see it fail.
+#
+# This checks the OUTCOME, not the exit code — did rows actually land. That is
+# the only check that catches "ran, exited 0, did nothing", which is the class
+# that produced three of the sixteen defects.
+#
+# Four outcomes, deliberately distinct. Connectivity is tested on its own, before
+# the real query, so a broken query can never report itself as a network problem.
+# Collapsing those two is what let a wrong column name make this watcher
+# permanently blind while still running nightly and filing issues:
+#
+#   rows > 0     -> silent. Working as intended.
+#   rows == 0    -> @claude issue. The silent no-op class is still live upstream.
+#   query broken -> @claude issue. The watcher's own SQL is wrong: a code defect,
+#                   fixable by an agent, and invisible until it is named.
+#   unreachable  -> plain issue, no @claude. An agent cannot fix a network path,
+#                   and pointing one at an unreachable database wastes turns.
+
+name: Morning outcome watch
+
+on:
+  schedule:
+    # 21:20 UTC == 07:20 AEST. The 07:00 task gets 20 minutes to finish.
+    # AEST is UTC+10 year-round in NSW during winter; revisit in October when
+    # daylight saving starts and this drifts an hour.
+    - cron: "20 21 * * *"
+  workflow_dispatch:        # so you can test it right now without waiting
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Query consensus_mentions for today
+        id: q
+        env:
+          # Needs a runner that can reach the warehouse. If the DB sits in a
+          # private VPC subnet, a GitHub-hosted runner cannot reach it and the
+          # connectivity probe below reports unreachable, not a crash.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set +e
+          TODAY=$(TZ=Australia/Sydney date +%F)
+          echo "target_date=$TODAY" >> "$GITHUB_OUTPUT"
+
+          # A missing client exits 127 and would fail the probe below as though the
+          # warehouse were unreachable — the same disguise the wrong column name
+          # wore. Name it instead: no check ran at all, and an agent can fix that.
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "status=query_broken" >> "$GITHUB_OUTPUT"
+            {
+              echo "err<<STRIDE_ERR_EOF"
+              echo "psql is not on the runner, so no check ran. This is not a network"
+              echo "problem and the morning outcome is unverified."
+              echo "STRIDE_ERR_EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Connectivity, on its own, before anything schema-dependent touches it.
+          # `select 1` needs no tables, so a failure here is the network or the
+          # credential and nothing else.
+          psql "$DATABASE_URL" -tAc "select 1;" >/dev/null 2>conn_err.txt
+          if [ $? -ne 0 ]; then
+            echo "status=unreachable" >> "$GITHUB_OUTPUT"
+            {
+              echo "err<<STRIDE_ERR_EOF"
+              head -c 2000 conn_err.txt
+              echo ""
+              echo "STRIDE_ERR_EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The connection is known good, so any failure past this point is the
+          # watcher's own SQL — a wrong column, a renamed table, a dropped index.
+          ROWS=$(psql "$DATABASE_URL" -tAc \
+            "select count(*) from consensus_mentions where race_date = '$TODAY';" 2>q_err.txt)
+          if [ $? -ne 0 ]; then
+            echo "status=query_broken" >> "$GITHUB_OUTPUT"
+            {
+              echo "err<<STRIDE_ERR_EOF"
+              head -c 2000 q_err.txt
+              echo ""
+              echo "STRIDE_ERR_EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # psql exited 0, but a non-numeric answer means this is not counting
+          # what it claims to count. Treat it as broken rather than as zero —
+          # reading it as zero would file a false silent-no-op report.
+          case "$ROWS" in
+            ''|*[!0-9]*)
+              echo "status=query_broken" >> "$GITHUB_OUTPUT"
+              {
+                echo "err<<STRIDE_ERR_EOF"
+                echo "psql exited 0 but returned a non-numeric count: '${ROWS}'"
+                echo "STRIDE_ERR_EOF"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          echo "rows=$ROWS" >> "$GITHUB_OUTPUT"
+          if [ "$ROWS" -gt 0 ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=empty" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Silent no-op — escalate to Claude
+        if: steps.q.outputs.status == 'empty'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_DATE: ${{ steps.q.outputs.target_date }}
+        run: |
+          set -euo pipefail
+          cat > body.md <<EOF
+          The 07:00 Fargate task ran and \`consensus_mentions\` has zero rows for \`${TARGET_DATE}\`.
+
+          This is the silent no-op class: exited without producing output. Commit \`1aee192\`
+          made the morning jobs fail loudly when they produce nothing, and \`4c93fea\` recorded
+          the class in the execution register. If this issue exists, either the fix did not
+          cover this path or the cause sits upstream of it.
+
+          @claude Trace why the consensus path produced no rows. Read the task logs first.
+
+          Rules for this task:
+          - Open a PR against \`main\`. Never commit to \`main\` directly.
+          - Do not touch anything under \`infra/\`.
+          - Do not backfill or insert rows to make the check pass. The empty table is the
+            symptom; find what upstream of it returned nothing.
+          - If the cause is not clear from the logs, comment with findings and open no PR.
+          EOF
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Morning watch: consensus_mentions empty for ${TARGET_DATE}" \
+            --label auto-triage \
+            --body-file body.md
+
+      - name: Watcher query broken — escalate to Claude
+        if: steps.q.outputs.status == 'query_broken'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_DATE: ${{ steps.q.outputs.target_date }}
+          ERR: ${{ steps.q.outputs.err }}
+        run: |
+          set -euo pipefail
+          TITLE="Morning watch query is broken"
+
+          # Deduped on a date-free title, unlike the other branches. A wrong query
+          # fails identically every night until someone merges the fix, and every
+          # issue wakes an agent — without this it files a fresh issue and burns a
+          # fresh set of turns nightly for as long as it takes to notice.
+          EXISTING=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label auto-triage \
+            --search "\"$TITLE\" in:title" \
+            --json number --jq 'length')
+
+          if [ "$EXISTING" != "0" ]; then
+            echo "Already an open issue for the broken watcher query. Not filing again."
+            exit 0
+          fi
+
+          cat > body.md <<EOF
+          The database answered \`select 1\`, so the warehouse is reachable and the
+          credential is good. The watcher's own query then failed.
+
+          The morning outcome for \`${TARGET_DATE}\` is **unverified** — not confirmed
+          good, not confirmed bad — and it stays unverified every night until this
+          query is fixed.
+
+          \`\`\`
+          ${ERR}
+          \`\`\`
+
+          @claude Fix the query in \`.github/workflows/morning-watch.yml\` so it counts
+          what it claims to count.
+
+          Rules for this task:
+          - Open a PR against \`main\`. Never commit to \`main\` directly.
+          - Do not touch anything under \`infra/\`.
+          - Read the column names out of \`migrations/\` rather than inferring them.
+            This watcher was blind once already because \`consensus_mentions\` was
+            queried on a \`date\` column it has never had; the real one is \`race_date\`.
+          - Do not make this pass by deleting or weakening the check. An unverified
+            morning is the thing being reported, not an inconvenience to silence.
+          EOF
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --label auto-triage \
+            --body-file body.md
+
+      - name: Watcher blind — notify, do not escalate
+        if: steps.q.outputs.status == 'unreachable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_DATE: ${{ steps.q.outputs.target_date }}
+          ERR: ${{ steps.q.outputs.err }}
+        run: |
+          set -euo pipefail
+          cat > body.md <<EOF
+          The watcher could not reach the warehouse, so the morning outcome is **unknown** —
+          not confirmed good, not confirmed bad. Check \`consensus_mentions\` by hand.
+
+          No @claude tag on this one deliberately: this is a connectivity problem, not a
+          code defect, and an agent cannot fix the network path from a runner.
+
+          \`\`\`
+          ${ERR}
+          \`\`\`
+          EOF
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Morning watch could not verify ${TARGET_DATE}" \
+            --label watcher-health \
+            --body-file body.md
+
+      - name: Clear the query-broken suppressor
+        # Runs whenever the query demonstrably executed — `empty` proves that just
+        # as well as `ok` does, and a run of quiet days must not keep a stale
+        # suppressor alive.
+        if: steps.q.outputs.status == 'ok' || steps.q.outputs.status == 'empty'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Morning watch query is broken"
+
+          # The query_broken issue is deduped on a date-free title, which makes
+          # closing it load-bearing: fix the query, forget to close, and the next
+          # genuine break is suppressed by a stale open issue — silently, which is
+          # the exact shape this whole loop exists to catch. A working query clears
+          # its own suppressor so the suppression can never outlive the condition.
+          gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label auto-triage \
+            --search "\"$TITLE\" in:title" \
+            --json number --jq '.[].number' > stale.txt
+
+          if [ ! -s stale.txt ]; then
+            echo "No open query-broken issue to clear."
+            exit 0
+          fi
+
+          TODAY=$(TZ=Australia/Sydney date +%F)
+          while read -r n; do
+            [ -n "$n" ] || continue
+            echo "Closing #$n — the watcher query ran successfully."
+            gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
+              --comment "Closed automatically: the watcher query executed successfully on ${TODAY}, so it is no longer broken. The next failure files a fresh issue; this one must not sit open suppressing it."
+          done < stale.txt
+
+      - name: Report
+        run: |
+          echo "status=${{ steps.q.outputs.status }} rows=${{ steps.q.outputs.rows }}"

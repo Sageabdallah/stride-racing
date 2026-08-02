@@ -1,0 +1,65 @@
+# .github/workflows/claude.yml
+#
+# The responder. Wakes up when an issue or comment mentions @claude.
+# This file MUST exist on the default branch, byte-identical, before it will
+# authenticate. Commit it straight to main. Do not try to test it via a PR first.
+
+name: Claude
+
+on:
+  issues:
+    types: [opened, assigned]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # The github.actor guard stops Claude's own comments from re-triggering the
+    # workflow. Without it you get an infinite loop that runs until your quota
+    # is gone. This is a known footgun, not a hypothetical.
+    if: |
+      github.actor != 'claude[bot]' && (
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
+      )
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # One Claude per issue. Overlapping runs on the same thread produce
+    # conflicting branches.
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write        # needs write to push a branch
+      pull-requests: write
+      issues: write
+      id-token: write        # OIDC — omit this and auth fails with an unhelpful error
+      actions: read          # lets Claude read CI logs on PRs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # If you set up with an API key instead of /install-github-app,
+          # swap the line above for:
+          #   anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          # Turn cap is the cost ceiling for an unattended run. 25 is enough for
+          # a real fix and small enough that a confused agent gives up cheaply.
+          claude_args: |
+            --max-turns 25
