@@ -15,10 +15,18 @@ if ! aws iam get-role --role-name $EXEC_ROLE >/dev/null 2>&1; then
     "Version": "2012-10-17", "Statement": [{"Effect": "Allow",
     "Principal": {"Service": "ecs-tasks.amazonaws.com"},
     "Action": "sts:AssumeRole"}]}' >/dev/null
-  aws iam attach-role-policy --role-name $EXEC_ROLE \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
   sleep 10
 fi
+aws iam attach-role-policy --role-name $EXEC_ROLE \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+# AmazonECSTaskExecutionRolePolicy grants CreateLogStream/PutLogEvents but
+# NOT CreateLogGroup, which awslogs-create-group needs — every task died in
+# ResourceInitializationError before its container started (run
+# 30742118964). Granted explicitly; the groups are also pre-created below,
+# so this is belt and braces.
+aws iam put-role-policy --role-name $EXEC_ROLE --policy-name stride-logs-create \
+  --policy-document '{"Version": "2012-10-17", "Statement": [
+    {"Effect": "Allow", "Action": ["logs:CreateLogGroup"], "Resource": "*"}]}'
 for spec in "intelligence-build 2048 4096" "consensus-agent 1024 2048" \
             "tips-pipeline 2048 8192" "nightly-etl 1024 4096" \
             "racecard-collect 512 1024" "morning-odds 512 1024" \
@@ -42,8 +50,12 @@ for spec in "intelligence-build 2048 4096" "consensus-agent 1024 2048" \
      "awslogs-stream-prefix": "job", "awslogs-create-group": "true"}}}]}
 JSON
   aws ecs register-task-definition --cli-input-json file:///tmp/stride-task-$NAME.json >/dev/null
+  # Create the group BEFORE setting retention: put-retention-policy on a
+  # non-existent group fails, and the `|| true` meant the 14-day cost
+  # guardrail had never actually been applied to any group.
+  aws logs create-log-group --log-group-name "/ecs/stride-$NAME" 2>/dev/null || true
   aws logs put-retention-policy --log-group-name "/ecs/stride-$NAME" \
-    --retention-in-days 14 2>/dev/null || true
+    --retention-in-days 14
   echo "task stride-$NAME registered"
 done
 echo "NOTE: wire the four ECS schedules (06:00 intelligence, 07:00 consensus,"
