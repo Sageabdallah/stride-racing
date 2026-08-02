@@ -217,7 +217,10 @@ def job_tip_time_snapshot() -> dict:
 
 def job_late_odds_watch() -> dict:
     # Self-gating: exits instantly outside [first_jump - 30min, last + grace].
-    _run_ok("capture_late_odds.py", _today())
+    # --date, not positional: this script is one of the four that take a
+    # flag. Passing it positionally is an argparse exit 2 on EVERY one of
+    # the ~90 invocations a race day.
+    _run_ok("capture_late_odds.py", "--date", _today())
     return {"last_success_date": _today()}
 
 
