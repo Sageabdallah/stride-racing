@@ -174,14 +174,34 @@ def job_preflight() -> dict:
     for line in out.splitlines():
         if line.startswith("VERDICT"):
             verdict = line.split(":", 1)[1].strip()
-    return {"last_success_date": _today(), "preflight": verdict[:200]}
+    # Gate status rides along daily so run-state (and the digest scan) always
+    # carries a <24h-old readout; gate_status exits 1 while NOT READY, which
+    # is a report, not a failure.
+    gates = _run("gate_status.py")
+    gate_line = next((l.strip() for l in reversed(gates.stdout.splitlines())
+                      if l.strip()), "?")
+    return {"last_success_date": _today(), "preflight": verdict[:200],
+            "gates": gate_line[:200]}
 
 
 def job_calibrator_coverage() -> dict:
-    proc = _run("shadow_calibrator_compare.py")
-    print(proc.stdout[-2000:])
-    return {"last_success_date": _today(),
-            "detail": proc.stdout[-300:] or "ran"}
+    # Daily since the gate-3 fix: emits per-race-day calibrator_shadow_<date>
+    # evidence to the durable store (what gate_status counts). Recomputed
+    # from settled audit rows every run, so missed days backfill themselves.
+    out = _run_ok("shadow_calibrator_compare.py", "--emit-evidence")
+    return {"last_success_date": _today(), "detail": out[-300:] or "ran"}
+
+
+def job_bsp_settle() -> dict:
+    # Betfair BSP files publish on a lag; the sweep targets every settled
+    # row still missing SP since day zero, so a late file self-heals. Exit 4
+    # (a date past the grace window with no file) raises -> DLQ + alarm.
+    out = _run_ok("bsp_settlement.py", "--since", "2026-08-02", "--commit")
+    filled = 0
+    for line in out.splitlines():
+        if line.startswith("FILLED"):
+            filled = int(line.split()[1])
+    return {"last_success_date": _today(), "rows_written": filled}
 
 
 def job_intelligence_build() -> dict:
@@ -251,6 +271,7 @@ JOBS = {
     "gap-heal": job_gap_heal,
     "preflight": job_preflight,
     "calibrator-coverage": job_calibrator_coverage,
+    "bsp-settle": job_bsp_settle,
     "intelligence-build": job_intelligence_build,
     "consensus-agent": job_consensus_agent,
     "tips-pipeline": job_tips_pipeline,

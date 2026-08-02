@@ -42,5 +42,11 @@ schedule stride-results-2230       "30 22 * * ? *"   stride-results-collect
 schedule stride-results-retry-0100 "0 1 * * ? *"     stride-results-collect
 schedule stride-gapheal-0300       "0 3 * * ? *"     stride-gap-heal
 schedule stride-preflight-0400     "0 4 * * ? *"     stride-preflight
-schedule stride-calibrator-mon     "0 2 ? * MON *"   stride-calibrator-coverage
+# Daily since the gate-3 fix: the calibrator evidence day-count is data-
+# driven (recomputed from settled audit rows), but the gate and digest read
+# should never be more than a day stale.
+schedule stride-calibrator-0200    "0 2 * * ? *"     stride-calibrator-coverage
+# BSP files for AU race day D publish within hours of the last race (UK
+# evening); 05:00 Sydney gives slack and the sweep self-heals stragglers.
+schedule stride-bsp-settle-0500    "0 5 * * ? *"     stride-bsp-settle
 schedule stride-digest-mon         "0 7 ? * MON *"   stride-weekly-digest

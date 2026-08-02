@@ -14,18 +14,24 @@ if ! aws iam get-role --role-name $ROLE_NAME >/dev/null 2>&1; then
     "Action": "sts:AssumeRole"}]}' >/dev/null
   aws iam attach-role-policy --role-name $ROLE_NAME \
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-  aws iam put-role-policy --role-name $ROLE_NAME --policy-name stride-jobs-inline \
-    --policy-document '{"Version": "2012-10-17", "Statement": [
-      {"Effect": "Allow", "Action": ["secretsmanager:GetSecretValue"],
-       "Resource": "*"},
-      {"Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:PutItem",
-       "dynamodb:UpdateItem", "dynamodb:Scan"],
-       "Resource": "*"},
-      {"Effect": "Allow", "Action": ["sqs:SendMessage", "sns:Publish"],
-       "Resource": "*"}]}'
   sleep 10
 fi
+# Inline policy is asserted on every run (not only at role creation) so a
+# policy change here actually lands on re-deploy. s3 = the evidence store.
+aws iam put-role-policy --role-name $ROLE_NAME --policy-name stride-jobs-inline \
+  --policy-document '{"Version": "2012-10-17", "Statement": [
+    {"Effect": "Allow", "Action": ["secretsmanager:GetSecretValue"],
+     "Resource": "*"},
+    {"Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:PutItem",
+     "dynamodb:UpdateItem", "dynamodb:Scan"],
+     "Resource": "*"},
+    {"Effect": "Allow", "Action": ["sqs:SendMessage", "sns:Publish"],
+     "Resource": "*"},
+    {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject",
+     "s3:ListBucket"],
+     "Resource": "*"}]}'
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+EVIDENCE_BUCKET="stride-evidence-$ACCOUNT_ID"
 
 # name timeout_s memory_mb
 JOBS=(
@@ -37,6 +43,7 @@ JOBS=(
   "gap-heal 900 1024"
   "preflight 300 512"
   "calibrator-coverage 300 512"
+  "bsp-settle 300 512"
   "weekly-digest 300 512"
 )
 for spec in "${JOBS[@]}"; do
@@ -45,14 +52,20 @@ for spec in "${JOBS[@]}"; do
   DLQ_URL=$(aws sqs create-queue --queue-name "$FN-dlq" --query QueueUrl --output text)
   DLQ_ARN=$(aws sqs get-queue-attributes --queue-url "$DLQ_URL" \
     --attribute-names QueueArn --query Attributes.QueueArn --output text)
+  ENV="Variables={STRIDE_JOB=$NAME,STRIDE_SECRET_ID=stride/prod,STRIDE_EVIDENCE_BUCKET=$EVIDENCE_BUCKET}"
   if aws lambda get-function --function-name "$FN" >/dev/null 2>&1; then
     aws lambda update-function-code --function-name "$FN" \
       --image-uri "$IMAGE" >/dev/null
+    aws lambda wait function-updated --function-name "$FN"
+    aws lambda update-function-configuration --function-name "$FN" \
+      --timeout "$TIMEOUT" --memory-size "$MEMORY" \
+      --environment "$ENV" >/dev/null
+    aws lambda wait function-updated --function-name "$FN"
   else
     aws lambda create-function --function-name "$FN" \
       --package-type Image --code ImageUri="$IMAGE" \
       --role "$ROLE_ARN" --timeout "$TIMEOUT" --memory-size "$MEMORY" \
-      --environment "Variables={STRIDE_JOB=$NAME,STRIDE_SECRET_ID=stride/prod}" \
+      --environment "$ENV" \
       --dead-letter-config TargetArn="$DLQ_ARN" >/dev/null
   fi
   aws lambda put-function-event-invoke-config --function-name "$FN" \

@@ -4,30 +4,33 @@ Goal: the Mac off for two months, everything collected and ingested, gaps
 healed automatically, retrain gate status current, one query for health,
 weekly digest by email.
 
-## State at commit time (2026-08-02)
+## State (updated 2026-08-02 pm)
 
-BLOCKED ON DEPLOY, NOT ON CODE. Two operator actions are required before
-any script here can run:
-
-1. `aws login` on this machine (session expired; interactive, operator
-   only). Region is already ap-southeast-2.
-2. Docker for the one-time image build (this Mac has none). Run
-   `04_ecr_image.sh` on any machine with Docker, including the
-   stride-syd-runner box.
+Deploys from GitHub Actions, not a laptop. The one remaining operator
+action: after `aws login`, run `./09_bootstrap_oidc.sh` once — it creates
+the GitHub OIDC provider + a deploy role trusting only this repo, and
+records the non-secret parameters as repo variables. From then on the
+`deploy-infra` workflow (Actions tab, or `gh workflow run deploy-infra.yml`)
+runs 00-08 end to end on the syd runner: Docker image build included, AWS
+auth via OIDC, secrets sourced from GitHub Actions secrets (the store the
+Betfair smoke test verifies) — never a local .env.
 
 Everything below is idempotent: safe to re-run top to bottom at any time.
 
-## Order
+## Order (the deploy-infra workflow runs exactly this)
 
     ./00_prereqs.sh                     sanity: identity, region
-    ./01_secrets.sh                     .env -> Secrets Manager (stride/prod)
+    ./01_secrets.sh --from-env          GitHub secrets -> Secrets Manager (stride/prod)
     ./02_state_table.sh                 DynamoDB stride_run_state
+    ./02b_evidence_bucket.sh            S3 gate-3 evidence store (versioned, private)
     ./03_notifications.sh you@mail      SNS topic + budget alarm + log retention policy
     ./04_ecr_image.sh                   build + push the job image (needs Docker)
     ./05_lambda_jobs.sh                 container Lambdas + per-function DLQs + alarms
     ./06_schedules.sh                   EventBridge Scheduler, Australia/Sydney timezone
-    ./07_fargate_heavy.sh               ECS cluster + heavy task defs + their schedules
+    ./07_fargate_heavy.sh               ECS cluster + heavy task defs
+    ./07b_fargate_schedules.sh SUB SG   the four heavy-job schedules
     ./08_digest.sh                      weekly digest schedule
+    ./09_bootstrap_oidc.sh              (operator, once) OIDC provider + deploy role + repo vars
 
 ## Job map, Sydney time (deltas from the work-order table, with reasons)
 
@@ -43,8 +46,9 @@ Everything below is idempotent: safe to re-run top to bottom at any time.
 | results collection | 22:30 daily, retry 01:00 | Lambda | as ordered (Mac ran 23:00; 22:30 is fine, night meetings caught by the 01:00 retry) |
 | nightly ETL (import + sectionals + franking) | 00:45 daily | Fargate | after results settle, as ordered; franking recompute is heavy |
 | gap scan + backfill | 03:00 daily | Lambda | the self-healing pass, as ordered |
-| retrain_preflight | 04:00 daily | Lambda | result written to run-state, included in digest |
-| calibrator coverage check | Mon 02:00 | Lambda | as ordered |
+| retrain_preflight + gate status | 04:00 daily | Lambda | both written to run-state, included in digest |
+| calibrator shadow evidence | 02:00 daily | Lambda | per-race-day gate-3 evidence to S3; day count is data-driven so missed runs self-backfill (was Mon-only before the gate-3 fix) |
+| BSP settlement sweep | 05:00 daily | Lambda | sp/price_close/clv_pct from the free Betfair BSP files; gap-aware since day zero; a file missing past the grace window exits 4 -> alarm |
 | weekly digest | Mon 07:00 | Lambda | rows, gaps found/healed, preflight, tip_time day count, gate-status |
 
 All schedules use EventBridge Scheduler with

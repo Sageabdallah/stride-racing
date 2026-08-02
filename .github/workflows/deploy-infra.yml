@@ -1,0 +1,124 @@
+# One-button deploy of the WP-7 stack from GitHub Actions — no laptop, no
+# long-lived AWS keys. Auth is OIDC role assumption; infra/09_bootstrap_oidc.sh
+# (run once by the operator after `aws login`) creates the role and fills the
+# repo variables this workflow reads. Every script is idempotent: re-running
+# the whole workflow converges, never duplicates.
+#
+# Secrets Manager gets ONLY values that live in GitHub Actions secrets — the
+# store the Betfair smoke test verifies — never a laptop .env file.
+
+name: deploy-infra
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_image:
+        description: "Skip the Docker image build (config-only redeploy)"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write   # OIDC assume-role
+  contents: read
+
+concurrency:
+  group: deploy-infra
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Self-hosted: Docker for the image build lives on the syd runner box
+    # (installed as a service, so it survives reboots), and the box is on an
+    # AU IP for anything that touches Betfair's geo-blocked edge.
+    runs-on: [self-hosted]
+    timeout-minutes: 60
+    env:
+      AWS_REGION: ap-southeast-2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the deploy role (OIDC — run infra/09_bootstrap_oidc.sh once first)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: 00 prereqs
+        run: ./infra/00_prereqs.sh
+
+      - name: 01 secrets -> Secrets Manager (from GitHub secrets, the verified store)
+        env:
+          BETFAIR_APP_KEY: ${{ secrets.BETFAIR_APP_KEY }}
+          BETFAIR_USERNAME: ${{ secrets.BETFAIR_USERNAME }}
+          BETFAIR_PASSWORD: ${{ secrets.BETFAIR_PASSWORD }}
+          BETFAIR_CERT_PEM: ${{ secrets.BETFAIR_CERT_PEM }}
+          BETFAIR_KEY_PEM: ${{ secrets.BETFAIR_KEY_PEM }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_CHAT_MODEL: ${{ secrets.ANTHROPIC_CHAT_MODEL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          LLM_ENABLED: ${{ secrets.LLM_ENABLED }}
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          STRIDE_COMMISSION_RATE: ${{ secrets.STRIDE_COMMISSION_RATE }}
+          STRIDE_LEDGER_WRITE: ${{ secrets.STRIDE_LEDGER_WRITE }}
+          STRIDE_SHADOW_KELLY: ${{ secrets.STRIDE_SHADOW_KELLY }}
+          STRIDE_SERVE_LIVE_FEATURES_SHADOW: ${{ secrets.STRIDE_SERVE_LIVE_FEATURES_SHADOW }}
+          STRIDE_MODEL_WEIGHT: ${{ secrets.STRIDE_MODEL_WEIGHT }}
+          CONSENSUS_WEIGHT: ${{ secrets.CONSENSUS_WEIGHT }}
+          MARKET_SIGNAL_WEIGHT: ${{ secrets.MARKET_SIGNAL_WEIGHT }}
+          CONSENSUS_CONFIRM_THRESHOLD: ${{ secrets.CONSENSUS_CONFIRM_THRESHOLD }}
+          CONSENSUS_LOCK_THRESHOLD: ${{ secrets.CONSENSUS_LOCK_THRESHOLD }}
+          MARKET_SIGNAL_THRESHOLD: ${{ secrets.MARKET_SIGNAL_THRESHOLD }}
+        run: ./infra/01_secrets.sh --from-env
+
+      - name: 02 state table, 02b evidence bucket, 03 notifications
+        run: |
+          ./infra/02_state_table.sh
+          ./infra/02b_evidence_bucket.sh
+          ./infra/03_notifications.sh "${{ vars.ALERT_EMAIL }}"
+
+      - name: 04 build + push the job image
+        if: ${{ !inputs.skip_image }}
+        run: ./infra/04_ecr_image.sh
+
+      - name: 05-08 lambdas, schedules, fargate, digest
+        run: |
+          ./infra/05_lambda_jobs.sh
+          ./infra/06_schedules.sh
+          ./infra/07_fargate_heavy.sh
+          ./infra/07b_fargate_schedules.sh "${{ vars.AWS_SUBNET_ID }}" "${{ vars.AWS_SG_ID }}"
+          ./infra/08_digest.sh
+
+      - name: Apply additive DB migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python3 -m venv .wfvenv
+          .wfvenv/bin/pip install --quiet psycopg2-binary
+          .wfvenv/bin/python - <<'PY'
+          import os, psycopg2
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          with conn, conn.cursor() as cur:
+              cur.execute(open("migrations/selection_ledger_bsp.sql").read())
+          conn.close()
+          print("applied migrations/selection_ledger_bsp.sql")
+          PY
+
+      - name: Migrate committed shadow evidence into the durable store
+        run: |
+          B="stride-evidence-${{ vars.AWS_ACCOUNT_ID }}"
+          shopt -s nullglob
+          for f in logs/serve_liveness_shadow_*.json; do
+            aws s3 cp "$f" "s3://$B/evidence/$(basename "$f")"
+          done
+
+      - name: Smoke the deployment
+        run: |
+          aws lambda invoke --function-name stride-preflight \
+            --cli-read-timeout 330 /tmp/preflight.json >/dev/null && \
+            cat /tmp/preflight.json
+          echo
+          aws dynamodb scan --table-name stride_run_state --output table

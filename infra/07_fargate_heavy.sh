@@ -30,7 +30,8 @@ for spec in "intelligence-build 2048 4096" "consensus-agent 1024 2048" \
  "containerDefinitions": [{"name": "job", "image": "$IMAGE",
    "command": ["jobs.handler.dispatch"],
    "environment": [{"name": "STRIDE_JOB", "value": "$NAME"},
-                   {"name": "STRIDE_SECRET_ID", "value": "stride/prod"}],
+                   {"name": "STRIDE_SECRET_ID", "value": "stride/prod"},
+                   {"name": "STRIDE_EVIDENCE_BUCKET", "value": "stride-evidence-$ACCOUNT_ID"}],
    "logConfiguration": {"logDriver": "awslogs", "options": {
      "awslogs-group": "/ecs/stride-$NAME", "awslogs-region": "$AWS_REGION",
      "awslogs-stream-prefix": "job", "awslogs-create-group": "true"}}}]}

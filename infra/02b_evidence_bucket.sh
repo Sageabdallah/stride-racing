@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Durable evidence bucket for the retrain gates (gate 3). Lambda/Fargate
+# filesystems are ephemeral, so shadow evidence written there is gone when
+# the invocation ends — it must land where gate_status.py can count it.
+# Versioned because evidence is append-only by intent; fully private.
+set -euo pipefail
+source "$(dirname "$0")/00_prereqs.sh"
+BUCKET="stride-evidence-$ACCOUNT_ID"
+if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+  aws s3api create-bucket --bucket "$BUCKET" \
+    --create-bucket-configuration LocationConstraint="$AWS_REGION" >/dev/null
+fi
+aws s3api put-bucket-versioning --bucket "$BUCKET" \
+  --versioning-configuration Status=Enabled
+aws s3api put-public-access-block --bucket "$BUCKET" \
+  --public-access-block-configuration \
+  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+echo "evidence bucket $BUCKET ready"
