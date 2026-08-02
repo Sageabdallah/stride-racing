@@ -26,9 +26,17 @@ Connection: use `DATABASE_URL` from `.env` — never hardcode credentials
   cannot display tips without it
 
 ## Key Files
-See @.claude/skills/stride-full/SKILL.md for full system reference and model baselines
-See @.claude/skills/stride-health/SKILL.md for health gates and retrain baselines
-See @.claude/skills/stride-consensus/SKILL.md for convergence tier logic and panel
+The full pipeline reference lives under `.claude/skills/` — `stride-full` for the
+system reference and model baselines, `stride-health` for health gates and retrain
+baselines, `stride-consensus` for convergence tier logic and the panel.
+
+That directory is gitignored and stays that way. It holds model baselines, AUC
+figures, tier thresholds and the EV formula — the part of this system that is the
+edge rather than a description of it. **It is therefore not present in a CI
+checkout.** If you are running unattended you are working without it by design.
+That is not a missing file, it is not recoverable from this repository, and it is
+not something to reconstruct by guessing. Work from the code, or say what you
+could not determine.
 
 ## Commands
 - `/stride-full` — full daily pipeline run (results → health → build → tips → blackbook → performance)
