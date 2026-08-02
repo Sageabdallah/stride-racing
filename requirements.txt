@@ -1,28 +1,31 @@
 requests
 beautifulsoup4
-pandas
+# ML stack pinned to the venv that trains and unpickles the artifacts —
+# drift here is how a model pkl stops loading, and unpinned scikit-learn
+# resolved to 1.9.0 (no cp311 wheels) and broke the image build outright.
+pandas==3.0.3
 numpy==1.26.4
+scikit-learn==1.8.0
+scipy==1.17.1
+catboost==1.2.10
+lightgbm==4.6.0
+xgboost==3.2.0
+shap==0.49.1
+imbalanced-learn==0.14.2
+category_encoders==2.10.0
+feature-engine==1.9.4
+optuna==4.9.0
+hyperopt==0.3.0
+pytorch-tabnet==4.1.0
 tabulate
 colorama
-scikit-learn
-catboost
-imbalanced-learn
-lightgbm
-optuna
-shap
-xgboost
 psycopg2-binary
-category_encoders
-feature-engine
-hyperopt
-pytorch-tabnet
-scipy
 playwright
 dnfile
-networkx
+networkx==3.6.1
 python-louvain
 groq
-sqlalchemy
+sqlalchemy==2.0.51
 python-dateutil
 python-dotenv
 tavily-python
