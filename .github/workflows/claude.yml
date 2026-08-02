@@ -65,9 +65,14 @@ jobs:
           # --settings blanks the commit and PR attribution. There is no
           # --no-co-author flag; `attribution` is the documented mechanism, and it
           # has to be passed inline because .claude/ is gitignored, so a settings
-          # file would never reach this checkout. The JSON deliberately contains no
-          # spaces: it then survives shell-words and naive whitespace splitting
-          # identically, so it does not depend on how claude_args is parsed.
+          # file would never reach this checkout.
+          #
+          # The single quotes are load-bearing. claude_args is tokenised with
+          # shell-words, which removes quotes as well as splitting on whitespace,
+          # so a bare {"attribution":...} arrives as {attribution:...} and the CLI
+          # rejects it with `Invalid JSON provided to --settings`. That is not
+          # hypothetical: run 30749369919 failed exactly that way. Space-free is not
+          # sufficient; quote-safe is what matters.
           #
           # This kills the trailer naming Claude. It does NOT stop the action's own
           # prompt from asking for a Co-authored-by trailer naming the trigger user
@@ -75,4 +80,4 @@ jobs:
           # worth checking on the first agent PR rather than trusting either.
           claude_args: |
             --max-turns 25
-            --settings {"attribution":{"commit":"","pr":""}}
+            --settings '{"attribution":{"commit":"","pr":""}}'
