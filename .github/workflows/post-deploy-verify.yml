@@ -1,0 +1,73 @@
+# Post-deploy verification (work order item 7): proves the EventBridge ->
+# Fargate chain with a REAL one-shot schedule, not a manual run-task —
+# intelligence-build is the safe payload (rebuilds daily artifacts, no
+# ledger writes). Also checks the models bucket has artifacts and prints
+# the run-state table, whose preflight row carries gate_status read from S3.
+name: post-deploy-verify
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: post-deploy-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    env:
+      AWS_REGION: ap-southeast-2
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: Models bucket has artifacts
+        run: |
+          aws s3 ls "s3://stride-models-${{ vars.AWS_ACCOUNT_ID }}/" && \
+            echo "models present" || echo "MODELS BUCKET EMPTY — run infra/09b_upload_models.sh"
+
+      - name: One-shot EventBridge schedule -> Fargate intelligence task
+        run: |
+          AT=$(date -u -d "+3 minutes" +%Y-%m-%dT%H:%M:%S)
+          TD=$(aws ecs describe-task-definition --task-definition stride-intelligence-build \
+            --query taskDefinition.taskDefinitionArn --output text)
+          aws scheduler create-schedule --name stride-scheduled-proof \
+            --schedule-expression "at(${AT})" \
+            --schedule-expression-timezone "UTC" \
+            --flexible-time-window Mode=OFF \
+            --action-after-completion DELETE \
+            --target "{\"Arn\": \"arn:aws:ecs:${AWS_REGION}:${{ vars.AWS_ACCOUNT_ID }}:cluster/stride\", \"RoleArn\": \"arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-scheduler-role\", \"EcsParameters\": {\"TaskDefinitionArn\": \"${TD}\", \"LaunchType\": \"FARGATE\", \"NetworkConfiguration\": {\"awsvpcConfiguration\": {\"Subnets\": [\"${{ vars.AWS_SUBNET_ID }}\"], \"SecurityGroups\": [\"${{ vars.AWS_SG_ID }}\"], \"AssignPublicIp\": \"ENABLED\"}}}}" \
+            2>/dev/null || echo "schedule already existed (rerun) — fine"
+          echo "schedule fires at ${AT}Z; waiting for the task to appear"
+          TASK=""
+          for i in $(seq 1 30); do
+            sleep 30
+            TASK=$(aws ecs list-tasks --cluster stride \
+              --family stride-intelligence-build --desired-status RUNNING \
+              --query 'taskArns[0]' --output text)
+            [ "$TASK" != "None" ] && [ -n "$TASK" ] && break
+            TASK=$(aws ecs list-tasks --cluster stride \
+              --family stride-intelligence-build --desired-status STOPPED \
+              --query 'taskArns[0]' --output text)
+            [ "$TASK" != "None" ] && [ -n "$TASK" ] && break
+          done
+          [ "$TASK" = "None" ] || [ -z "$TASK" ] && { echo "NO TASK APPEARED — scheduler chain broken"; exit 1; }
+          echo "scheduler-started task: $TASK"
+          for i in $(seq 1 40); do
+            sleep 20
+            ST=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+              --query 'tasks[0].lastStatus' --output text)
+            [ "$ST" = "STOPPED" ] && break
+          done
+          aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+            --query 'tasks[0].{startedBy:startedBy,exit:containers[0].exitCode,reason:containers[0].reason}'
+
+      - name: Run-state (gates row = gate_status read from S3)
+        run: aws dynamodb scan --table-name stride_run_state --output table

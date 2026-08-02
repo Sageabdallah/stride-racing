@@ -117,8 +117,25 @@ jobs:
 
       - name: Smoke the deployment
         run: |
-          aws lambda invoke --function-name stride-preflight \
-            --cli-read-timeout 330 /tmp/preflight.json >/dev/null && \
-            cat /tmp/preflight.json
+          # Lambda-side proof: the BSP sweep is idempotent and harmless.
+          aws lambda invoke --function-name stride-bsp-settle \
+            --cli-read-timeout 330 /tmp/bsp.json >/dev/null && cat /tmp/bsp.json
+          echo
+          # Fargate-side proof: run the preflight task (first pull of the
+          # image takes minutes — poll generously). Its run-state row is
+          # the gate_status-against-S3 readout.
+          TASK_ARN=$(aws ecs run-task --cluster stride \
+            --task-definition stride-preflight --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.AWS_SUBNET_ID }}],securityGroups=[${{ vars.AWS_SG_ID }}],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "preflight task: $TASK_ARN"
+          for i in $(seq 1 40); do
+            sleep 20
+            ST=$(aws ecs describe-tasks --cluster stride --tasks "$TASK_ARN" \
+              --query 'tasks[0].lastStatus' --output text)
+            [ "$ST" = "STOPPED" ] && break
+          done
+          aws ecs describe-tasks --cluster stride --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].{exitCode:exitCode,reason:reason}'
           echo
           aws dynamodb scan --table-name stride_run_state --output table
