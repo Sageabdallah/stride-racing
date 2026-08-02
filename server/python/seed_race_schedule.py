@@ -38,7 +38,9 @@ ON CONFLICT (track, race_number, race_date) DO NOTHING
 """
 
 
-def seed_from_racecard(cur, date_str: str) -> int:
+def seed_from_racecard(cur, date_str: str):
+    """(card_found, inserted). Distinguishes "no card" from "card already
+    seeded" so the caller only falls back when there was nothing to read."""
     card = None
     for d in CARD_DIRS:
         p = d / f"racecard_{date_str}.json"
@@ -46,7 +48,7 @@ def seed_from_racecard(cur, date_str: str) -> int:
             card = json.loads(p.read_text())
             break
     if card is None:
-        return 0
+        return False, 0
     inserted = 0
     for meet in card if isinstance(card, list) else [card]:
         for race in meet.get("races", []):
@@ -69,7 +71,7 @@ def seed_from_racecard(cur, date_str: str) -> int:
             cur.execute(INSERT_SQL,
                         (track, int(number), date_str, off_time, due))
             inserted += cur.rowcount
-    return inserted
+    return True, inserted
 
 
 def main() -> int:
@@ -85,9 +87,9 @@ def main() -> int:
     conn = psycopg2.connect(url)
     cur = conn.cursor()
 
-    inserted = seed_from_racecard(cur, args.date)
+    card_found, inserted = seed_from_racecard(cur, args.date)
     source = "racecard"
-    if inserted == 0:
+    if not card_found:
         from results_projection import ensure_race_schedule_from_prediction_audit
         inserted = ensure_race_schedule_from_prediction_audit(conn, args.date)
         source = "prediction_audit"
