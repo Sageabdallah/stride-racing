@@ -5,12 +5,17 @@
 # is populated by the day's tips pipeline: dispatch AFTER tips have run for
 # the date, or every market reports unmapped and nothing is written.
 #
-# Dispatch-only for now. Once a day's capture has been eyeballed, add a cron
-# (e.g. "0 22 * * *" = 08:00 AEST morning capture) in a follow-up commit.
+# Scheduled (WP-2) after the 2026-08-02 dispatch runs were eyeballed clean.
+# GitHub cron is UTC and does not follow Sydney DST; these times drift one
+# hour across transitions. Interim only: WP-7 moves this to EventBridge
+# Scheduler with an explicit Australia/Sydney timezone.
 
 name: betfair-odds-snapshot
 
 on:
+  schedule:
+    - cron: "45 21 * * *"  # 07:45 AEST morning capture (after 05:30 card+seed)
+    - cron: "45 0 * * *"   # 10:45 AEST tip_time capture (after the 10:00 tips window)
   workflow_dispatch:
     inputs:
       date:
@@ -59,6 +64,12 @@ jobs:
           COMMIT_INPUT: ${{ inputs.commit }}
         run: |
           DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
-          ARGS=(--date "$DATE" --kind "$KIND_INPUT")
-          if [ "$COMMIT_INPUT" = "true" ]; then ARGS+=(--commit); fi
+          KIND=$KIND_INPUT
+          if [ -z "$KIND" ]; then
+            # Schedule-triggered runs carry no inputs: pick the kind from the
+            # UTC hour the two cron lines fire at.
+            if [ "$(date -u +%H)" -ge 12 ]; then KIND=morning; else KIND=tip_time; fi
+          fi
+          ARGS=(--date "$DATE" --kind "$KIND")
+          if [ "${COMMIT_INPUT:-true}" != "false" ]; then ARGS+=(--commit); fi
           .wfvenv/bin/python server/python/betfair_odds_snapshot.py "${ARGS[@]}"

@@ -207,6 +207,50 @@ def _print_report(mapped, unmapped_markets, unmapped_runners, rows, skipped):
     print(f"Snapshot rows built: {len(rows)}")
 
 
+GAPS_SQL = """
+WITH days AS (
+    SELECT generate_series(%s::date, %s::date, '1 day')::date AS d
+),
+race_days AS (
+    SELECT d FROM days WHERE
+        EXISTS (SELECT 1 FROM race_results_history r WHERE r.race_date::date = days.d)
+        OR EXISTS (SELECT 1 FROM race_schedule s WHERE s.race_date::date = days.d)
+        OR EXISTS (SELECT 1 FROM prediction_audit p WHERE p.race_date::date = days.d)
+),
+captured AS (
+    SELECT DISTINCT race_date::date AS d FROM runner_odds_snapshots
+    WHERE snapshot_kind = 'tip_time'
+)
+SELECT rd.d, (SELECT COUNT(*) FROM race_results_history r
+              WHERE r.race_date::date = rd.d) AS results_rows
+FROM race_days rd
+LEFT JOIN captured c ON c.d = rd.d
+WHERE c.d IS NULL
+ORDER BY rd.d
+"""
+
+
+def report_gaps(conn, date_from: str, date_to: str) -> list:
+    """Race days in [date_from, date_to] with zero tip_time snapshot rows.
+
+    A day counts as a race day when race_results_history, race_schedule or
+    prediction_audit knows about it; it counts as captured when at least one
+    tip_time row exists. The capture clock only accrues on captured days, so
+    every row this prints is a day added to the retrain wait.
+    """
+    cur = conn.cursor()
+    cur.execute(GAPS_SQL, (date_from, date_to))
+    gaps = cur.fetchall()
+    cur.close()
+    if not gaps:
+        print(f"NO GAPS: every race day in {date_from}..{date_to} has tip_time rows")
+    else:
+        print(f"GAPS ({len(gaps)}): race days with no tip_time snapshot rows")
+        for d, results_rows in gaps:
+            print(f"  {d}  (results rows that day: {results_rows})")
+    return gaps
+
+
 def main(argv=None, post=None, connect=None) -> int:
     # post/connect are test seams: injected fake transport / DB factory.
     parser = argparse.ArgumentParser(
@@ -217,7 +261,25 @@ def main(argv=None, post=None, connect=None) -> int:
                         help="write rows (default: dry run, print only)")
     parser.add_argument("--kind", default=DEFAULT_KIND, choices=SNAPSHOT_KINDS,
                         help=f"snapshot_kind for the rows (default {DEFAULT_KIND})")
+    parser.add_argument("--check-gaps", action="store_true",
+                        help="report race days missing tip_time rows, then exit "
+                             "(no Betfair call; exit 4 when gaps exist)")
+    parser.add_argument("--gaps-from", default="2026-08-02",
+                        help="gap scan start (capture epoch: first tip_time row)")
+    parser.add_argument("--gaps-to", default=None,
+                        help="gap scan end (default: --date)")
     args = parser.parse_args(argv)
+
+    if args.check_gaps:
+        conn = (connect or _connect)()
+        if conn is None:
+            print("CONFIG ERROR: DATABASE_URL not set")
+            return 2
+        try:
+            gaps = report_gaps(conn, args.gaps_from, args.gaps_to or args.date)
+        finally:
+            conn.close()
+        return 4 if gaps else 0
 
     missing = betfair_auth.missing_config()
     if missing:
@@ -259,6 +321,19 @@ def main(argv=None, post=None, connect=None) -> int:
 
         mapped, unmapped_markets, unmapped_runners = betfair_markets.map_markets(
             catalogue, schedule, bridge)
+
+        if args.kind == "tip_time":
+            # Same poison guard as odds_snapshots.capture_tip_time_snapshots:
+            # a tip_time row must never hold a post-jump price, and this
+            # adapter is the only place that can stop it for Exchange pulls.
+            now = _utcnow()
+            pre_jump = [m for m in mapped
+                        if m.get("start_time") and m["start_time"] > now]
+            dropped = len(mapped) - len(pre_jump)
+            if dropped:
+                print(f"tip_time guard: dropped {dropped} market(s) at or "
+                      f"past their advertised jump")
+            mapped = pre_jump
 
         books = betfair_markets.list_market_books(
             [m["market_id"] for m in mapped], app_key, token, post=post) if mapped else []

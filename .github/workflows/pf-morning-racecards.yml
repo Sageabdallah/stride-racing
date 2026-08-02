@@ -69,6 +69,15 @@ jobs:
           DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
           echo "building racecard for $DATE"
           python3 server/python/download_racecards.py --date "$DATE"
+      - name: Seed race_schedule from the card
+        # The Betfair capture maps markets against race_schedule; seeding
+        # here (05:30 AEST) decouples capture from the 10:00 tips run.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATE_INPUT: ${{ inputs.date }}
+        run: |
+          DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
+          python3 server/python/seed_race_schedule.py "$DATE"
       - name: Upload racecard artifact
         # The Mac tips pipeline consumes racecards/racecard_<date>.json; the
         # runner workspace is ephemeral, so the card must leave as an artifact
