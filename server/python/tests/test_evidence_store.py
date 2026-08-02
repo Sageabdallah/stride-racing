@@ -98,3 +98,52 @@ class TestS3Mode:
                             lambda: _FakeS3(fail_list=True))
         with pytest.raises(evidence_store.EvidenceStoreError):
             evidence_store.list_evidence_dates("calibrator_shadow")
+
+
+class _FakeSNS:
+    def __init__(self, fail=False):
+        self.published = []
+        self.fail = fail
+
+    def publish(self, TopicArn, Subject, Message):
+        if self.fail:
+            raise RuntimeError("sns down")
+        self.published.append((TopicArn, Subject, Message))
+
+
+class TestWriteFailureAlerts:
+    def test_s3_put_failure_publishes_to_sns(self, tmp_path, monkeypatch):
+        sns = _FakeSNS()
+        monkeypatch.setenv("STRIDE_EVIDENCE_BUCKET", "b")
+        monkeypatch.setenv("STRIDE_ALERT_TOPIC_ARN", "arn:sns:stride-alerts")
+        monkeypatch.setattr(evidence_store, "local_dir", lambda: tmp_path)
+        monkeypatch.setattr(evidence_store, "_s3_client",
+                            lambda: _FakeS3(fail_put=True))
+        monkeypatch.setattr(evidence_store, "_sns_client", lambda: sns)
+        out = evidence_store.put_evidence("x_2026-08-04.json", "{}")
+        assert out["s3_error"]
+        ((arn, subject, message),) = sns.published
+        assert arn == "arn:sns:stride-alerts"
+        assert "x_2026-08-04.json" in message and "5-day count" in message
+
+    def test_no_topic_configured_means_no_publish_attempt(self, tmp_path,
+                                                          monkeypatch):
+        monkeypatch.setenv("STRIDE_EVIDENCE_BUCKET", "b")
+        monkeypatch.delenv("STRIDE_ALERT_TOPIC_ARN", raising=False)
+        monkeypatch.setattr(evidence_store, "local_dir", lambda: tmp_path)
+        monkeypatch.setattr(evidence_store, "_s3_client",
+                            lambda: _FakeS3(fail_put=True))
+        monkeypatch.setattr(evidence_store, "_sns_client",
+                            lambda: (_ for _ in ()).throw(AssertionError))
+        assert evidence_store.put_evidence("x.json", "{}")["s3_error"]
+
+    def test_alert_failure_never_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STRIDE_EVIDENCE_BUCKET", "b")
+        monkeypatch.setenv("STRIDE_ALERT_TOPIC_ARN", "arn:sns:x")
+        monkeypatch.setattr(evidence_store, "local_dir", lambda: tmp_path)
+        monkeypatch.setattr(evidence_store, "_s3_client",
+                            lambda: _FakeS3(fail_put=True))
+        monkeypatch.setattr(evidence_store, "_sns_client",
+                            lambda: _FakeSNS(fail=True))
+        out = evidence_store.put_evidence("x.json", "{}")
+        assert out["s3_error"] and out["local"]

@@ -420,13 +420,25 @@ def emit_evidence(rows, cal_old, cal_new, n_bins: int = 10) -> int:
                                            "matrix")}
                   for name, p in (tt.get("pairs") or {}).items()},
     }
+    # Registered interpretation, stamped into every artifact: only race
+    # days on/after the frozen window open are emitted or counted; races
+    # predating day zero can never produce evidence. Conservative by
+    # construction — an ambiguity is never resolved in the direction that
+    # clears a gate faster.
+    interpretation = (f"race days >= {SHADOW_WINDOW_OPEN} (registration day "
+                      f"zero) only; pre-window races are never emitted or "
+                      f"counted; day files derive from settled audit rows, "
+                      f"so a day exists only once its results are in")
+    slim["window_interpretation"] = interpretation
     s3_failures = 0
     for d in dates:
         day = compare([r for r in window_rows if str(r["race_date"]) == d],
                       cal_old=cal_old, cal_new=cal_new, n_bins=n_bins)
         out = put_evidence(
             f"calibrator_shadow_{d}.json",
-            json.dumps({"date": d, "day": day, "pooled_window": slim},
+            json.dumps({"date": d, "day": day,
+                        "window_interpretation": interpretation,
+                        "pooled_window": slim},
                        indent=2, default=str))
         if out.get("s3_error"):
             s3_failures += 1
@@ -439,8 +451,10 @@ def emit_evidence(rows, cal_old, cal_new, n_bins: int = 10) -> int:
         print(f"  [shadow] pooled upload FAILED: {out['s3_error']}",
               file=sys.stderr)
     print(f"  [shadow] evidence emitted for {len(dates)} race day(s) since "
-          f"{SHADOW_WINDOW_OPEN}"
+          f"{SHADOW_WINDOW_OPEN} — dates: {dates or '(none settled yet)'}"
           + (f"; {s3_failures} S3 FAILURE(S)" if s3_failures else ""),
+          file=sys.stderr)
+    print(f"  [shadow] window interpretation: {interpretation}",
           file=sys.stderr)
     return 5 if s3_failures else 0
 

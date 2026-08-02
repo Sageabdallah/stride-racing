@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -71,6 +72,28 @@ def _s3_client():
         "s3", region_name=os.environ.get("AWS_REGION", "ap-southeast-2"))
 
 
+def _sns_client():
+    import boto3
+    return boto3.client(
+        "sns", region_name=os.environ.get("AWS_REGION", "ap-southeast-2"))
+
+
+def _alert(message: str) -> None:
+    """Evidence-write failures must reach a human, not an ephemeral log
+    nobody reads for two months — that is the defect this store exists to
+    kill. Publishes to STRIDE_ALERT_TOPIC_ARN when configured; never
+    raises (alerting about a failure must not create a second failure)."""
+    arn = os.environ.get("STRIDE_ALERT_TOPIC_ARN", "").strip()
+    if not arn:
+        return
+    try:
+        _sns_client().publish(TopicArn=arn,
+                              Subject="STRIDE evidence write FAILED",
+                              Message=message)
+    except Exception as e:
+        print(f"[evidence] alert publish also failed: {e}", file=sys.stderr)
+
+
 def _key(filename: str) -> str:
     return f"{prefix()}/{filename}"
 
@@ -97,6 +120,11 @@ def put_evidence(filename: str, text: str) -> Dict[str, Optional[str]]:
             out["s3"] = f"s3://{b}/{_key(filename)}"
         except Exception as e:
             out["s3_error"] = f"{type(e).__name__}: {e}"
+            _alert(f"evidence write to s3://{b}/{_key(filename)} FAILED: "
+                   f"{out['s3_error']}\nlocal copy: {out['local'] or 'ALSO FAILED'}"
+                   f"\nA failed shadow write restarts that flag's 5-day count "
+                   f"(shadow-flip-criteria.md #2) — investigate today, not at "
+                   f"flip review.")
     return out
 
 

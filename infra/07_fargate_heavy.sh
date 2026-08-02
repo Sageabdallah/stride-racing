@@ -20,7 +20,10 @@ if ! aws iam get-role --role-name $EXEC_ROLE >/dev/null 2>&1; then
   sleep 10
 fi
 for spec in "intelligence-build 2048 4096" "consensus-agent 1024 2048" \
-            "tips-pipeline 2048 8192" "nightly-etl 1024 4096"; do
+            "tips-pipeline 2048 8192" "nightly-etl 1024 4096" \
+            "racecard-collect 512 1024" "morning-odds 512 1024" \
+            "results-collect 1024 2048" "gap-heal 1024 2048" \
+            "preflight 512 1024"; do
   read -r NAME CPU MEM <<< "$spec"
   cat > /tmp/stride-task-$NAME.json <<JSON
 {"family": "stride-$NAME", "networkMode": "awsvpc",
@@ -31,7 +34,9 @@ for spec in "intelligence-build 2048 4096" "consensus-agent 1024 2048" \
    "command": ["jobs.handler.dispatch"],
    "environment": [{"name": "STRIDE_JOB", "value": "$NAME"},
                    {"name": "STRIDE_SECRET_ID", "value": "stride/prod"},
-                   {"name": "STRIDE_EVIDENCE_BUCKET", "value": "stride-evidence-$ACCOUNT_ID"}],
+                   {"name": "STRIDE_EVIDENCE_BUCKET", "value": "stride-evidence-$ACCOUNT_ID"},
+                   {"name": "STRIDE_MODELS_BUCKET", "value": "stride-models-$ACCOUNT_ID"},
+                   {"name": "STRIDE_ALERT_TOPIC_ARN", "value": "arn:aws:sns:$AWS_REGION:$ACCOUNT_ID:stride-alerts"}],
    "logConfiguration": {"logDriver": "awslogs", "options": {
      "awslogs-group": "/ecs/stride-$NAME", "awslogs-region": "$AWS_REGION",
      "awslogs-stream-prefix": "job", "awslogs-create-group": "true"}}}]}

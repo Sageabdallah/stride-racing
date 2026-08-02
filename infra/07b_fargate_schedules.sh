@@ -29,7 +29,13 @@ JSON
     --flexible-time-window Mode=OFF --target "$TARGET" >/dev/null
   echo "schedule $NAME -> $FAMILY @ cron($CRON) Australia/Sydney"
 }
+sched_ecs stride-racecard-0530     "30 5 * * ? *"  stride-racecard-collect
 sched_ecs stride-intelligence-0600 "0 6 * * ? *"  stride-intelligence-build
 sched_ecs stride-consensus-0700    "0 7 * * ? *"  stride-consensus-agent
+sched_ecs stride-morning-odds-0800 "0 8 * * ? *"  stride-morning-odds
 sched_ecs stride-tips-1000         "0 10 * * ? *" stride-tips-pipeline
+sched_ecs stride-results-2230      "30 22 * * ? *" stride-results-collect
+sched_ecs stride-results-retry-0100 "0 1 * * ? *" stride-results-collect
 sched_ecs stride-etl-0045          "45 0 * * ? *" stride-nightly-etl
+sched_ecs stride-gapheal-0300      "0 3 * * ? *"  stride-gap-heal
+sched_ecs stride-preflight-0400    "0 4 * * ? *"  stride-preflight

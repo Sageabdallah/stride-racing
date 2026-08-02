@@ -7,13 +7,21 @@ weekly digest by email.
 ## State (updated 2026-08-02 pm)
 
 Deploys from GitHub Actions, not a laptop. The one remaining operator
-action: after `aws login`, run `./09_bootstrap_oidc.sh` once — it creates
-the GitHub OIDC provider + a deploy role trusting only this repo, and
-records the non-secret parameters as repo variables. From then on the
-`deploy-infra` workflow (Actions tab, or `gh workflow run deploy-infra.yml`)
-runs 00-08 end to end on the syd runner: Docker image build included, AWS
-auth via OIDC, secrets sourced from GitHub Actions secrets (the store the
-Betfair smoke test verifies) — never a local .env.
+sitting: after `aws login`, run `./09_bootstrap_oidc.sh` (OIDC provider +
+repo-locked deploy role + repo variables) and `./09b_upload_models.sh`
+(model artifacts -> private S3 bucket; the repo is PUBLIC, so the
+proprietary pkl never enters git, releases, or the image — Fargate tasks
+stage it at startup). From then on the `deploy-infra` workflow (Actions
+tab, or `gh workflow run deploy-infra.yml`) runs 00-08 end to end on the
+syd runner: Docker image build included, AWS auth via OIDC, secrets
+sourced from GitHub Actions secrets (the store the Betfair smoke test
+verifies) — never a local .env.
+
+Runtime split rule: Lambda's filesystem is read-only and Fargate tasks
+share no filesystem, so every job that writes repo paths (racecards/,
+intelligence/) or reads models/ runs on Fargate, and the racecard ->
+intelligence -> consensus -> tips chain relays its file artifacts through
+s3://stride-evidence-<acct>/artifacts/. Only DB-only jobs stay on Lambda.
 
 Everything below is idempotent: safe to re-run top to bottom at any time.
 
@@ -36,19 +44,19 @@ Everything below is idempotent: safe to re-run top to bottom at any time.
 
 | Job | Time | Runs on | Notes |
 |---|---|---|---|
-| racecard_collect + schedule seed | 05:30 daily | Lambda | as ordered; PF cards are published overnight |
-| intelligence build | 06:00 daily | Fargate | NOT in the work-order table but required: without it tips cannot run and nothing accrues toward the retrain gates. Time kept from the Mac scheduler |
-| consensus agent | 07:00 daily | Fargate | same reason; LLM calls plus multi-minute runtime |
-| morning odds snapshot | 08:00 daily | Lambda | odds_movement morning (Betfair since WP-1) |
-| tips pipeline | 10:00 daily | Fargate | MC scoring runs ~17 minutes with a large model artifact: over Lambda's 15-minute and memory ceilings, hence Fargate |
-| tip_time Betfair snapshot | 10:45 daily, retry 11:00 | Lambda | work order said "at defined tip_time"; tips are struck at 10:00, so tip time IS ~10:45. Retry 15 min later as ordered |
-| late-odds watcher | every 5 min, 11:00 to 18:30 | Lambda | work order said "rolling 30 min before first jump through last jump"; EventBridge cannot read race_schedule, so the Lambda self-gates: it exits instantly unless now is inside [first_jump - 30min, last_jump + grace] |
-| results collection | 22:30 daily, retry 01:00 | Lambda | as ordered (Mac ran 23:00; 22:30 is fine, night meetings caught by the 01:00 retry) |
-| nightly ETL (import + sectionals + franking) | 00:45 daily | Fargate | after results settle, as ordered; franking recompute is heavy |
-| gap scan + backfill | 03:00 daily | Lambda | the self-healing pass, as ordered |
-| retrain_preflight + gate status | 04:00 daily | Lambda | both written to run-state, included in digest |
+| racecard_collect + schedule seed | 05:30 daily | Fargate | writes racecards/ (read-only on Lambda); card relayed via S3 artifacts |
+| intelligence build | 06:00 daily | Fargate | NOT in the work-order table but required: without it tips cannot run and nothing accrues toward the retrain gates. Uploads intelligence/ to the artifact relay |
+| consensus agent | 07:00 daily | Fargate | LLM calls plus multi-minute runtime; downloads + re-uploads intelligence/ |
+| morning odds snapshot | 08:00 daily | Fargate | odds_movement writes market_signals into intelligence/ |
+| tips pipeline | 10:00 daily | Fargate | MC scoring ~17 minutes with the model artifact (staged from the models bucket at startup); downloads intelligence/ + racecard, performs the two-location card copy, uploads tips json |
+| tip_time Betfair snapshot | 10:45 daily, retry 11:00 | Lambda | DB-only; work order said "at defined tip_time"; tips are struck at 10:00, so tip time IS ~10:45 |
+| late-odds watcher | every 5 min, 11:00 to 18:30 | Lambda | DB-only; self-gates outside [first_jump - 30min, last_jump + grace] |
+| results collection | 22:30 daily, retry 01:00 | Fargate | collectors write result files as well as DB rows |
+| nightly ETL (import + sectionals + franking) | 00:45 daily | Fargate | franking recompute is heavy; re-uploads intelligence/ |
+| gap scan + backfill | 03:00 daily | Fargate | calls the racecard/results jobs in-process, so it needs their writable fs |
+| retrain_preflight + gate status | 04:00 daily | Fargate | gate 5 shells retrain_preflight, which reads models/racing_ensemble_v2.pkl; both lines written to run-state, digest reads them from there |
 | calibrator shadow evidence | 02:00 daily | Lambda | per-race-day gate-3 evidence to S3; day count is data-driven so missed runs self-backfill (was Mon-only before the gate-3 fix) |
-| BSP settlement sweep | 05:00 daily | Lambda | sp/price_close/clv_pct from the free Betfair BSP files; gap-aware since day zero; a file missing past the grace window exits 4 -> alarm |
+| BSP settlement sweep | 12:00 + 18:00 daily | Lambda | sp/price_close/clv_pct from the free Betfair BSP files. The file stamped D appears only after UK day D-1 closes (impossible before ~09:00 AEST, observed by 15:46 AEST), so the sweep runs midday+evening; gap-aware since day zero; a file missing past the grace window exits 4 -> alarm |
 | weekly digest | Mon 07:00 | Lambda | rows, gaps found/healed, preflight, tip_time day count, gate-status |
 
 All schedules use EventBridge Scheduler with

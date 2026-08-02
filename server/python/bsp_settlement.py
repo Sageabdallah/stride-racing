@@ -333,11 +333,19 @@ def reconcile_results(conn, d: str, http_get=None) -> int:
         cur.close()
     matched = agree = winners = 0
     samples: List[str] = []
+    by_track: Dict[str, Dict[str, Any]] = {}
+    near_misses: List[str] = []
+    all_csv_names = list(index["by_horse"].keys())
     for track, race_no, horse, pos in results:
+        t = by_track.setdefault(track, {"rows": 0, "matched": 0,
+                                        "unmatched": []})
+        t["rows"] += 1
         entry = index["by_key"].get((race_no, _norm(horse))) \
             or index["by_horse"].get(_norm(horse))
         if entry is _AMBIGUOUS or entry is None:
+            t["unmatched"].append(horse)
             continue
+        t["matched"] += 1
         matched += 1
         is_win = (pos == 1)
         winners += int(is_win)
@@ -353,6 +361,37 @@ def reconcile_results(conn, d: str, http_get=None) -> int:
           if results else f"RECONCILE {d}: no result rows in DB")
     for s in samples:
         print(s)
+
+    # The decisive split for the unmatched residue: a track whose ENTIRE
+    # meeting has zero matches was never offered in the file (genuine
+    # market absence); a track that mostly matches but drops some runners
+    # is a name/ID matching failure — different bugs, same symptom. Fuzzy
+    # near-misses inside covered tracks are surfaced by closest CSV name.
+    import difflib
+    print(f"\nBREAKDOWN {d} — per track (rows matched/total):")
+    for track in sorted(by_track):
+        t = by_track[track]
+        kind = ("MEETING ABSENT FROM FILE" if t["matched"] == 0
+                else "covered" if not t["unmatched"]
+                else "PARTIAL - possible matching failures")
+        print(f"  {track}: {t['matched']}/{t['rows']}  [{kind}]")
+        if t["matched"] > 0:
+            for horse in t["unmatched"]:
+                close = difflib.get_close_matches(_norm(horse),
+                                                  all_csv_names, n=1,
+                                                  cutoff=0.85)
+                near_misses.append(
+                    f"  {track}: {horse!r} unmatched; closest in file: "
+                    f"{close[0] if close else 'none >=0.85'}")
+    if near_misses:
+        print(f"\nNEAR-MISS candidates inside covered tracks "
+              f"({len(near_misses)} — these are matching failures if the "
+              f"closest name is the same horse):")
+        for line in near_misses[:20]:
+            print(line)
+    else:
+        print("\nNo unmatched runners inside covered tracks — the whole "
+              "residue is absent meetings.")
     return 0
 
 

@@ -33,20 +33,21 @@ schedule() {  # name cron function
   echo "schedule $NAME -> $FN @ cron($CRON) Australia/Sydney"
 }
 
-schedule stride-racecard-0530      "30 5 * * ? *"    stride-racecard-collect
-schedule stride-morning-odds-0800  "0 8 * * ? *"     stride-morning-odds
+# File-writing / model-reading jobs schedule as ECS tasks in 07b, not here:
+# racecard 05:30, intelligence 06:00, consensus 07:00, morning-odds 08:00,
+# tips 10:00, results 22:30 + retry 01:00, ETL 00:45, gap-heal 03:00,
+# preflight 04:00.
 schedule stride-tiptime-1045       "45 10 * * ? *"   stride-tip-time-snapshot
 schedule stride-tiptime-retry-1100 "0 11 * * ? *"    stride-tip-time-snapshot
 schedule stride-lateodds-5min     "0/5 11-18 * * ? *" stride-late-odds-watch
-schedule stride-results-2230       "30 22 * * ? *"   stride-results-collect
-schedule stride-results-retry-0100 "0 1 * * ? *"     stride-results-collect
-schedule stride-gapheal-0300       "0 3 * * ? *"     stride-gap-heal
-schedule stride-preflight-0400     "0 4 * * ? *"     stride-preflight
 # Daily since the gate-3 fix: the calibrator evidence day-count is data-
 # driven (recomputed from settled audit rows), but the gate and digest read
 # should never be more than a day stale.
 schedule stride-calibrator-0200    "0 2 * * ? *"     stride-calibrator-coverage
-# BSP files for AU race day D publish within hours of the last race (UK
-# evening); 05:00 Sydney gives slack and the sweep self-heals stragglers.
-schedule stride-bsp-settle-0500    "0 5 * * ? *"     stride-bsp-settle
+# The BSP file stamped D appears only after UK day D-1 closes: structurally
+# impossible before ~09:00 AEST on D, observed present by 15:46 AEST
+# (2026-08-02 probes). A 05:00 sweep would therefore ALWAYS miss by a day.
+# 12:00 catches early publication, 18:00 sweeps stragglers — cheap, the
+# sweep touches unresolved rows only.
+schedule stride-bsp-settle-1218    "0 12,18 * * ? *" stride-bsp-settle
 schedule stride-digest-mon         "0 7 ? * MON *"   stride-weekly-digest
