@@ -82,6 +82,90 @@ def devig_probabilities_pct(odds_list):
     return [p * 100.0 / total for p in implied]
 
 
+def devig_probabilities_pct_power(odds_list, tol=1e-10, max_iter=100):
+    """Power de-vig: implied probs raised to k, k solved so the book sums to 1.
+
+    Corrects favourite-longshot bias better than proportional on typical win
+    books (longshots carry proportionally more vig).
+    """
+    implied = [implied_prob_pct(o) / 100.0 for o in odds_list]
+    if not implied or any(p <= 0 for p in implied):
+        return [0.0 for _ in implied]
+    lo, hi = 0.25, 4.0
+    for _ in range(max_iter):
+        k = (lo + hi) / 2.0
+        total = sum(p ** k for p in implied)
+        if abs(total - 1.0) < tol:
+            break
+        if total > 1.0:
+            lo = k
+        else:
+            hi = k
+    total = sum(p ** k for p in implied)
+    if total <= 0:
+        return [0.0 for _ in implied]
+    return [(p ** k) / total * 100.0 for p in implied]
+
+
+def devig_probabilities_pct_shin(odds_list, tol=1e-10, max_iter=100):
+    """Shin (1992) de-vig: models the book as balanced action plus a share z
+    of insider money; solving for z yields fair probabilities.
+
+    Standard iterative solution: with pi the implied probs (normalised) and
+    z the insider share, p_i = (sqrt(z^2 + 4(1-z) pi^2 / total) - z) / (2(1-z)).
+    z is solved so the p_i sum to 1.
+    """
+    implied = [implied_prob_pct(o) / 100.0 for o in odds_list]
+    total = sum(implied)
+    if not implied or total <= 0 or any(p <= 0 for p in implied):
+        return [0.0 for _ in implied]
+
+    def probs_for(z):
+        if z >= 1.0:
+            return None
+        out = []
+        for pi in implied:
+            val = (z * z + 4.0 * (1.0 - z) * (pi * pi) / total) ** 0.5
+            out.append((val - z) / (2.0 * (1.0 - z)))
+        return out
+
+    lo, hi = 0.0, 0.5
+    for _ in range(max_iter):
+        z = (lo + hi) / 2.0
+        ps = probs_for(z)
+        s = sum(ps)
+        if abs(s - 1.0) < tol:
+            break
+        if s > 1.0:
+            lo = z
+        else:
+            hi = z
+    ps = probs_for((lo + hi) / 2.0)
+    s = sum(ps)
+    if s <= 0:
+        return [0.0 for _ in implied]
+    return [p / s * 100.0 for p in ps]
+
+
+def devig_method() -> str:
+    """STRIDE_DEVIG: proportional (default) | power | shin. The default only
+    changes after the task 09 pre-registered comparison selects a winner on
+    settled data; never flip it ad hoc (task 10 guardrail)."""
+    import os
+    method = os.environ.get("STRIDE_DEVIG", "proportional").strip().lower()
+    return method if method in ("proportional", "power", "shin") else "proportional"
+
+
+def devig(odds_list, method=None):
+    """De-vig a whole book with the configured method; sums to 100.0."""
+    method = method or devig_method()
+    if method == "power":
+        return devig_probabilities_pct_power(odds_list)
+    if method == "shin":
+        return devig_probabilities_pct_shin(odds_list)
+    return devig_probabilities_pct(odds_list)
+
+
 def reference_price(runner_odds):
     """Median decimal price across bookmakers for one runner.
 

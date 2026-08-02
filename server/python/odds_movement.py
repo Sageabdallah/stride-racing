@@ -103,13 +103,10 @@ def read_racecard_odds(date_str: str) -> dict[str, dict[str, float]]:
                 continue
             odds_list = runner.get("odds", [])
             if isinstance(odds_list, list):
-                win_odds = [safe_float(item.get("win_odds")) for item in odds_list if isinstance(item, dict)]
-                win_odds = [v for v in win_odds if v and v > 1.0]
-                if win_odds:
-                    win_odds.sort()
-                    mid = len(win_odds) // 2
-                    median_odds = win_odds[mid] if len(win_odds) % 2 else (win_odds[mid - 1] + win_odds[mid]) / 2
-                    race_odds[horse] = round(median_odds, 2)
+                from market_prob import reference_price
+                ref = reference_price(odds_list)
+                if ref:
+                    race_odds[horse] = round(ref, 2)
             if horse not in race_odds:
                 sp = safe_float(runner.get("sp"))
                 if sp and sp > 1.0:

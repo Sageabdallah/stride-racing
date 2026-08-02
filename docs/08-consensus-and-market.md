@@ -315,3 +315,14 @@ fuzzy-match 0.85 (agent); `MAX_ADJUSTMENT = 0.08` (pre-MC LLM).
 - `betfair_odds_snapshots.back_price` holds Racing-API medians, not Betfair prices.
 - `source_accuracy` was originally write-only; the opt-in feedback loop (§2.4)
   now reads it when `STRIDE_ACCURACY_WEIGHTS=true`.
+
+## Gate-only contract (task 07, 2026-08-02)
+
+The crowd signal is a gate, not a tipster. It may confirm a bet the EV gate
+already approved, downgrade its stake, or veto it to NO_BET. It may never
+flip NO_BET to BET. Promotions the legacy path would have made are recorded
+as refused ledger rows with refusal_reason 'crowd_promotion_blocked' and
+reported weekly by crowd_promotion_report.py. Flag:
+STRIDE_CROWD_GATE_ONLY (default on); turning it off restores legacy
+behaviour byte-identically. Re-enabling promotion for real requires a
+pre-registered window-B validation under the task 09 protocol.

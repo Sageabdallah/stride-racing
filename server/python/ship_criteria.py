@@ -382,3 +382,21 @@ def _self_test():
 
 if __name__ == "__main__":
     _self_test()
+
+# --- Task 09: registry promotion gate -------------------------------------
+
+def gate_registry_pass(verdict: str) -> dict:
+    """A band may be quoted in outputs and used for stake sizing only with a
+    registry PASS once its window B has resolved.
+
+    FAIL retires the rule to the registry graveyard and the fallback is
+    publish NO_BET until task 12 re-derives bands on honest features; never
+    a re-sweep on window B. INSUFFICIENT_SAMPLE (or a still-open window)
+    keeps current behaviour while evidence accrues.
+    """
+    v = str(verdict or "").upper()
+    if v == "PASS":
+        return {"quotable": True, "action": "quote"}
+    if v == "FAIL":
+        return {"quotable": False, "action": "no_bet_fallback"}
+    return {"quotable": False, "action": "accrue"}

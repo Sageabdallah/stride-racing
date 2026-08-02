@@ -232,7 +232,11 @@ class PortfolioRiskManager:
             odds = b['odds']
             wp = b['win_probability']
             ev += stake * (wp * odds - 1.0)
-            variance += (stake ** 2) * odds * (1.0 - 1.0 / odds)
+            # Same probability as the EV line. Payoff X = stake*(odds*B - 1)
+            # with B ~ Bernoulli(wp), so Var(X) = stake^2 * odds^2 * wp*(1-wp).
+            # The old form used the market-implied 1/odds and disagreed with
+            # its own EV numerator.
+            variance += (stake ** 2) * (odds ** 2) * wp * (1.0 - wp)
 
         sharpe = (ev / math.sqrt(variance)) if variance > 0 else 0.0
 

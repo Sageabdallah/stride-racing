@@ -49,7 +49,7 @@ def fetch_racecards(provider, date_str):
     meets = provider.fetch_meets(date_str)
     if not meets:
         print("no data")
-        return None
+        return None, [], []
 
     all_tracks = [m["course"] for m in meets]
     print(f"Available tracks: {', '.join(all_tracks[:10])}", end="")

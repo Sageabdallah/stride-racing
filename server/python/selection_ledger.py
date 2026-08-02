@@ -179,6 +179,7 @@ def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
         # both prices — never one
         "price_taken": price_taken,
         "price_source": pick.get("price_source") or ("betfair" if pick.get("has_real_market_odds") else "none"),
+        "refusal_reason": pick.get("refusal_reason"),
         "price_close": price_close,
         "has_real_market_odds": pick.get("has_real_market_odds"),
 
@@ -258,6 +259,49 @@ MIN_BETS_REPORTABLE = roi_stats.MIN_BETS_REPORTABLE
 INSUFFICIENT_SAMPLE = "INSUFFICIENT_SAMPLE"
 
 
+def kelly_readiness(rows: Sequence[Dict[str, Any]],
+                    min_bets: int = 400) -> Dict[str, Any]:
+    """Task 06 step 5: report-only gate for fractional Kelly activation.
+
+    True only when (a) at least min_bets settled real bets exist, (b) the
+    lower 95% CI bound of net ROI is above zero, and (c) mean CLV over the
+    same window is positive. Activation itself remains a separate,
+    human-approved change at 0.25x fractional Kelly; this function only
+    reports.
+    """
+    settled = [r for r in rows
+               if r.get("settled") and not r.get("refused")
+               and r.get("price_taken")]
+    n = len(settled)
+    ci_lower = None
+    mean_clv = None
+    if settled:
+        try:
+            from roi_stats import (per_bet_returns, roi_ci, ci_lower_bound,
+                                    commission_rate_from_env)
+            won = [1.0 if r.get("won") else 0.0 for r in settled]
+            odds = [float(r.get("price_taken") or 0.0) for r in settled]
+            returns = per_bet_returns(won, odds, commission_rate_from_env())
+            ci_lower = ci_lower_bound(roi_ci(returns).get("ci95"))
+        except Exception:
+            ci_lower = None
+        clvs = [float(r["clv_pct"]) for r in settled
+                if r.get("clv_pct") is not None]
+        mean_clv = (sum(clvs) / len(clvs)) if clvs else None
+    checks = {
+        "settled_bets": n,
+        "min_bets": min_bets,
+        "enough_bets": n >= min_bets,
+        "roi_ci_lower": ci_lower,
+        "roi_ci_positive": bool(ci_lower is not None and ci_lower > 0),
+        "mean_clv": mean_clv,
+        "clv_positive": bool(mean_clv is not None and mean_clv > 0),
+    }
+    checks["ready"] = (checks["enough_bets"] and checks["roi_ci_positive"]
+                       and checks["clv_positive"])
+    return checks
+
+
 def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
                    bootstrap_seed: int = 42) -> Dict[str, Any]:
     """Summarise settled ledger rows using the harness's own metric functions.
@@ -303,6 +347,19 @@ def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
     pct_clv_pos = (round(sum(1 for c in clvs if c > 0) / len(clvs) * 100.0, 2)
                    if clvs else None)
 
+    settled_priced = [r for r in rows if r.get("settled") and not r.get("refused")
+                      and r.get("price_taken") and r.get("sp")]
+    if settled_priced:
+        gains = [float(r["price_taken"]) / float(r["sp"]) - 1.0
+                 for r in settled_priced if float(r["sp"] or 0) > 1.0]
+        if gains:
+            print(f"  [EXECUTION] avg execution_gain_pct vs SP: "
+                  f"{sum(gains) / len(gains) * 100:.2f}% over {len(gains)} bets")
+    metrics_kelly = kelly_readiness(rows)
+    print(f"  [KELLY] readiness: {metrics_kelly['ready']} "
+          f"(bets {metrics_kelly['settled_bets']}/{metrics_kelly['min_bets']}, "
+          f"roi_ci_lower {metrics_kelly['roi_ci_lower']}, "
+          f"mean_clv {metrics_kelly['mean_clv']})")
     return {
         "n_bets": n,
         "reportable": n >= roi_stats.MIN_BETS_REPORTABLE,
@@ -340,7 +397,7 @@ LEDGER_COLUMNS = (
     "has_real_market_odds", "stake_rule", "stake_units", "stake",
     "commission_rate", "settled", "won", "pnl", "shadow_kelly_json",
     "refused", "settled_at_sp_fallback", "sp", "settled_pnl",
-    "price_source",
+    "price_source", "refusal_reason",
 )
 
 # The upsert names uq_selection_ledger_race_horse, which the migration creates

@@ -438,8 +438,11 @@ def _flag_enabled(name):
 def calculate_overround(runners):
     total_implied = 0
     valid = 0
+    from market_prob import reference_price
     for r in runners:
-        odds = extract_odds(r)
+        # Fair-prob inputs use the reference price (median across books,
+        # task 10); the execution side (extract_odds) takes the best price.
+        odds = reference_price(r.get("odds")) or extract_odds(r)
         if odds and odds > 1:
             total_implied += 100 / odds
             valid += 1
@@ -452,6 +455,9 @@ def extract_odds(runner):
     """Extract decimal odds from runner object (matches pipeline.ts logic)."""
     odds_arr = runner.get("odds", [])
     if isinstance(odds_arr, list):
+        # Task 10 price-taken policy: the price we quote and settle at is the
+        # BEST fixed price across bookmakers, not the first one in the array.
+        best = 0.0
         for entry in odds_arr:
             if isinstance(entry, dict):
                 for key in ("decimal", "win_odds", "odds"):
@@ -460,11 +466,14 @@ def extract_odds(runner):
                         try:
                             dec = float(str(val).replace("$", ""))
                             if dec > 1:
-                                return dec
+                                best = max(best, dec)
                         except (ValueError, TypeError):
                             pass
+                        break
             elif isinstance(entry, (int, float)) and entry > 1:
-                return float(entry)
+                best = max(best, float(entry))
+        if best > 1:
+            return best
     for key in ("sp", "win_odds", "fixed_odds"):
         val = runner.get(key)
         if val is not None:
@@ -1059,10 +1068,19 @@ def compute_race_predictability(runners, race_class, distance_m, going):
         return None
 
 
+def flat_staking_enabled() -> bool:
+    """Task 06: flat 1u until net ROI's CI excludes zero. Default on (risk
+    cut, not an experiment); STRIDE_FLAT_STAKING=false restores the 2u ladder."""
+    return os.environ.get("STRIDE_FLAT_STAKING", "true").strip().lower() in ("true", "1", "yes")
+
+
 def compute_staking(h):
-    """EV-mapped staking: high=2u, medium=1u, low=skip."""
+    """Staking: flat 1u/1u/0u under STRIDE_FLAT_STAKING (default), else the
+    legacy EV-mapped ladder (high=2u, medium=1u, low=skip)."""
     conf = h.get("confidence", "low")
 
+    if flat_staking_enabled():
+        return "1u" if conf in ("high", "medium") else "0u"
     if conf == "high":
         return "2u"
     if conf == "medium":
@@ -1443,6 +1461,14 @@ def persist_selection_ledger(race_tips, date_str):
         refused_pick["selection_origin"] = (
             leader.get("selection_origin") or "ev_gate_refused")
         rows.append(build_ledger_row(refused_pick, race_key, refused=True))
+        for _pick in race.get("top_picks") or []:
+            if not _pick.get("_crowd_promotion_blocked"):
+                continue
+            _shadow = dict(_pick)
+            _shadow["should_bet"] = False
+            _shadow["staking"] = "0u"
+            _shadow["selection_origin"] = "crowd_promotion_blocked"
+            rows.append(build_ledger_row(_shadow, race_key, refused=True))
 
     if not rows:
         return
@@ -1842,6 +1868,26 @@ def store_final_probs_in_audit(race_tips, date_str):
                 conn.close()
         except Exception:
             pass
+
+
+def crowd_gate_only_enabled() -> bool:
+    """Task 07: the crowd may confirm, downgrade, or veto a bet; it may never
+    create one. Default on (safety fix); STRIDE_CROWD_GATE_ONLY=false restores
+    the legacy promotion path byte-identically."""
+    return os.environ.get("STRIDE_CROWD_GATE_ONLY", "true").strip().lower() in ("true", "1", "yes")
+
+
+def apply_crowd_gate(current_should_bet: bool, gate_should_bet: bool,
+                     gate_only: bool):
+    """(new_should_bet, action). Actions: confirm, veto, promote, blocked, none.
+    With gate_only, the promote transition is forbidden for every input."""
+    if current_should_bet and not gate_should_bet:
+        return False, "veto"
+    if not current_should_bet and gate_should_bet:
+        if gate_only:
+            return False, "blocked"
+        return True, "promote"
+    return current_should_bet, ("confirm" if current_should_bet else "none")
 
 
 def load_racecard(date_str):
@@ -2929,12 +2975,24 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                         _classification = "REJECTED"
                         _gate_reason = "REJECTED — not a consensus candidate"
 
-                    if not _should_bet and pick.get("should_bet"):
+                    _new_bet, _gate_action = apply_crowd_gate(
+                        bool(pick.get("should_bet")), _should_bet,
+                        crowd_gate_only_enabled())
+                    if _gate_action == "veto":
                         pick["should_bet"] = False
                         pick["selection_origin"] = "crowd_gated"
                         pick["selection_origin_reason"] = _gate_reason
                         print(f"    [GATE] {_horse}: BET → NO_BET ({_gate_reason})", file=sys.stderr)
-                    elif _should_bet and not pick.get("should_bet"):
+                    elif _gate_action == "blocked":
+                        # Task 07: promotion forbidden; shadow-track what the
+                        # legacy path would have bet so its value is measured,
+                        # not argued about.
+                        pick["_crowd_promotion_blocked"] = True
+                        pick["refusal_reason"] = "crowd_promotion_blocked"
+                        pick["selection_origin_reason"] = _gate_reason
+                        print(f"    [GATE-ONLY] {_horse}: promotion blocked, "
+                              f"shadow-tracked ({_gate_reason})", file=sys.stderr)
+                    elif _gate_action == "promote":
                         pick["should_bet"] = True
                         pick["selection_origin"] = "crowd_promoted"
                         pick["selection_origin_reason"] = _gate_reason
@@ -3123,6 +3181,13 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
 
     # roi-roadmap 01: ledger capture is measurement-only and must never block
     # the pipeline; it no-ops unless STRIDE_LEDGER_WRITE=true.
+    try:
+        from staking_controls import apply_drawdown_breaker, enforce_exposure_caps
+        apply_drawdown_breaker(all_race_tips)
+        enforce_exposure_caps(all_race_tips)
+    except Exception as _risk_err:
+        print(f"  [RISK] staking controls unavailable (non-fatal): {_risk_err}",
+              file=sys.stderr)
     persist_selection_ledger(all_race_tips, date_str)
 
     if store_in_db:

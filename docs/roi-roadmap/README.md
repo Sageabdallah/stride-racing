@@ -79,17 +79,17 @@ of accumulation. Every day delayed is a day added to the retrain date.
 
 | Task | Status | Date | Evidence link |
 |------|--------|------|---------------|
-| 01 | 🟡 | 2026-07-27 | `roi/01-ledger-clv-net-settlement` |
-| 02 | ⬜ | | |
-| 03 | ⬜ | | |
-| 04 | 🟡 | 2026-07-27 | branch `roi/04-as-of-odds-snapshot` (migration `migrations/runner_odds_snapshots.sql`; capture live, coverage pending 3 race days) |
-| 05 | 🟡 | 2026-07-27 | roi/05-calibrator-and-normalisation |
-| 06 | ⬜ | | |
-| 07 | ⬜ | | |
-| 08 | ⬜ | | |
-| 09 | ⬜ | | |
-| 10 | ⬜ | | |
-| 11 | ⬜ | | |
+| 01 | ✅ | 2026-08-01 | merged PR #1; ledger live 2026-08-02 (deploy session) |
+| 02 | ✅ | 2026-08-01 | merged PR #4 (roi_stats.py) |
+| 03 | ✅ | 2026-08-01 | merged PR #5; parity flag inert, shadow accruing |
+| 04 | ✅ | 2026-08-02 | capture live: betfair-odds-snapshot workflow on the AU runner, first 52 tip_time rows 2026-08-02 |
+| 05 | ✅ | 2026-08-01 | merged PR #3; live flags off pending shadow evidence |
+| 06 | ✅ | 2026-08-02 | WP-6: flat staking (default on), drawdown breaker, exposure caps, variance fix, kelly_readiness report |
+| 07 | ✅ | 2026-08-02 | WP-6: gate-only crowd (default on), blocked promotions shadow-tracked, weekly report |
+| 08 | ⬜ | | after 07 per dependency graph |
+| 09 | ✅ | 2026-08-02 | WP-6: registry (VR-001 window B open), validate_forward.py, registry PASS gate in ship_criteria; first validation run is calendar-bound (window B) |
+| 10 | 🟡 | 2026-08-02 | WP-6: shin/power de-vig + STRIDE_DEVIG (default proportional), best-price policy, reference_price wired, exchange spike GO; method SELECTION deferred behind prereg guard |
+| 11 | 🟡 | 2026-08-02 | WP-6: place/each-way shadow settlement built (positions); BLOCKED for dividends: no dividend data exists in results table, PF payloads, or collectors |
 | 12 | ⬜ | | |
 | 13 | ⬜ | | |
 | 14 | ⬜ | | |

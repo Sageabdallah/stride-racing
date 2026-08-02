@@ -105,6 +105,14 @@ PHASE5_FEATURES = [
     "fair_implied_prob",
     "odds_rank",
     "odds_rank_pct",
+    # Winner-pattern gap features (winner_pattern_features.py, 12P-8 rescue
+    # from backup/winner-pattern-d695894). Roadmap priority 1-4; additive and
+    # NaN-safe; populated by attach_features in the load path. Live only after
+    # the task 12 retrain promotes an artifact trained with them.
+    "prior_pb_close_underreaction",  # flagship: prior PB close + finish 3-5 + odds 6-12
+    "cohort_fast_close_prior",       # prior best last-200m vs cohort 25th-pctile bar (NaN-preserved)
+    "pos400_win_prior",              # win-rate uplift for usual 400m in-run bucket (NaN-preserved)
+    "jockey_wet_residual",           # jockey wet-minus-dry strike delta, on wet going only
 ]
 
 # Task-12 odds-source modes (env STRIDE_TRAIN_ODDS_SOURCE, default "legacy"):
@@ -254,6 +262,14 @@ FEATURE_COLUMNS = [
     "fair_implied_prob",
     "odds_rank",
     "odds_rank_pct",
+    # Winner-pattern gap features (winner_pattern_features.py, 12P-8 rescue
+    # from backup/winner-pattern-d695894). Roadmap priority 1-4; additive and
+    # NaN-safe; populated by attach_features in the load path. Live only after
+    # the task 12 retrain promotes an artifact trained with them.
+    "prior_pb_close_underreaction",  # flagship: prior PB close + finish 3-5 + odds 6-12
+    "cohort_fast_close_prior",       # prior best last-200m vs cohort 25th-pctile bar (NaN-preserved)
+    "pos400_win_prior",              # win-rate uplift for usual 400m in-run bucket (NaN-preserved)
+    "jockey_wet_residual",           # jockey wet-minus-dry strike delta, on wet going only
 ]
 
 # Non-sectional features — fill NaN with 0 for these. NAN_PRESERVE_FEATURES
@@ -692,6 +708,13 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
     if "has_sectional_data" in out.columns:
         out["has_sectional_data"] = out["has_sectional_data"].clip(0, 1).round().astype(int)
+
+    # Winner-pattern gap features ride on df as plain columns (12P-8);
+    # copy any that are present so the matrix keeps their values.
+    for _wp_col in ("prior_pb_close_underreaction", "cohort_fast_close_prior",
+                    "pos400_win_prior", "jockey_wet_residual"):
+        if _wp_col in df.columns:
+            out[_wp_col] = pd.to_numeric(df[_wp_col], errors="coerce")
 
     out = out[[c for c in FEATURE_COLUMNS if c in out.columns]]
 
@@ -1437,6 +1460,15 @@ def main():
     print(f"  Winners      : {n_winners:,}  ({n_winners/n_total*100:.1f}%)")
     n_phase2 = int(df_raw["prior_z_200m"].notna().sum())
     print(f"  Rows w/ Phase 2 sectionals : {n_phase2}")
+
+        # Winner-pattern gap features (12P-8). Fully defensive: on any failure
+    # the frame is returned unchanged so retrain never breaks.
+    try:
+        from winner_pattern_features import attach_features as _attach_winner_pattern_features
+        print("\n[1d] Attaching winner-pattern gap features ...")
+        df = _attach_winner_pattern_features(df)
+    except Exception as e:
+        print(f"    WARNING: winner-pattern feature attach failed: {e}")
 
     print("\n[2] Building feature matrix ...")
     X = build_feature_matrix(df_raw)

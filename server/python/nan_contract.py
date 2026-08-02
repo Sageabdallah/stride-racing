@@ -46,6 +46,11 @@ TRAINER_NAN_PRESERVE = [
 
 # The full preserve set — the trainer's contract (retrain_v2: everything not in
 # this list gets fillna(0); everything in it keeps NaN end to end).
-NAN_PRESERVE_FEATURES = PHASE2_FEATURES + TRAINER_NAN_PRESERVE
+# Winner-pattern priors (12P-8): NaN means "no prior sectional / cohort
+# match exists", which is signal, not zero.
+WINNER_PATTERN_NAN_PRESERVE = ["cohort_fast_close_prior", "pos400_win_prior"]
+
+NAN_PRESERVE_FEATURES = (PHASE2_FEATURES + TRAINER_NAN_PRESERVE
+                         + WINNER_PATTERN_NAN_PRESERVE)  # lists throughout
 
 NAN_PRESERVE_SET = frozenset(NAN_PRESERVE_FEATURES)

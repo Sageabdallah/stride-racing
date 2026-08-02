@@ -151,6 +151,13 @@ class RacingMLModel:
         'fair_implied_prob',      # overround-corrected implied win % within the field (0-100)
         'odds_rank',              # 1 = market favourite; ties share the lower rank
         'odds_rank_pct',          # odds_rank / field size
+        # Winner-pattern gap features (12P-8 rescue). Declared for schema
+        # lockstep with retrain_v2; the live pkl predicts from its own stored
+        # feature list, so the current model is unaffected until task 12.
+        'prior_pb_close_underreaction',
+        'cohort_fast_close_prior',
+        'pos400_win_prior',
+        'jockey_wet_residual',
     ]
     
     def __init__(self, model_path: str = None):

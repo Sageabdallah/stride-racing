@@ -239,3 +239,10 @@ Each race is wrapped in a try/except: a failing race emits an `error` entry with
 `bet_status: "ERROR"` and the pipeline continues (:2712-2725). Failed races are
 listed in a warning summary. DB and LLM failures inside a race are individually
 non-fatal — the pipeline degrades to whatever signals are available.
+
+## Crowd gating is asymmetric (task 07, 2026-08-02)
+
+Scoring output feeds an asymmetric gate: crowd input can only hold a
+selection back (veto, downgrade) or agree with it, never create it. See
+docs/08-consensus-and-market.md for the contract and the shadow
+measurement of blocked promotions.
