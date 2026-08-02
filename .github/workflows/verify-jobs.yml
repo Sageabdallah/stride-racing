@@ -1,0 +1,93 @@
+# Execute every job that is safe to run out-of-schedule, once, and report
+# its real exit status. The WP-7 stack shipped five latent defects that
+# only appeared on first execution; the remedy is to execute, not to read.
+#
+# Excluded by design (data honesty, not laziness):
+#   tips-pipeline      an evening run would re-upsert day-1 ledger rows at
+#                      post-race prices and contaminate the registered window
+#   tip-time-snapshot  writing tip_time rows after the last jump is exactly
+#                      what the WP-2 post-jump guard exists to prevent
+#   morning-odds       'morning' snapshot rows written at night are a lie
+#   consensus-agent    real LLM spend + overwrites today's consensus file
+# Those four are verified by their own scheduled slots tomorrow.
+name: verify-jobs
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Comma-separated job names (default: the safe set)"
+        default: "calibrator-coverage,bsp-settle,late-odds-watch,weekly-digest,racecard-collect,results-collect,nightly-etl,gap-heal"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: verify-jobs
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AWS_REGION: ap-southeast-2
+      LAMBDA_JOBS: "tip-time-snapshot late-odds-watch calibrator-coverage bsp-settle weekly-digest"
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: Run each job and report
+        run: |
+          PASS=""; FAIL=""
+          for JOB in $(echo "${{ inputs.jobs }}" | tr ',' ' '); do
+            echo "::group::$JOB"
+            OK=0
+            if echo "$LAMBDA_JOBS" | grep -qw "$JOB"; then
+              # Lambda: a handler exception surfaces as FunctionError.
+              aws lambda invoke --function-name "stride-$JOB" \
+                --cli-read-timeout 900 /tmp/out.json > /tmp/meta.json 2>&1 || OK=1
+              cat /tmp/meta.json; echo; head -c 2000 /tmp/out.json; echo
+              grep -q FunctionError /tmp/meta.json && OK=1
+            else
+              TASK=$(aws ecs run-task --cluster stride \
+                --task-definition "stride-$JOB" --launch-type FARGATE \
+                --network-configuration "awsvpcConfiguration={subnets=[${{ vars.AWS_SUBNET_ID }}],securityGroups=[${{ vars.AWS_SG_ID }}],assignPublicIp=ENABLED}" \
+                --query 'tasks[0].taskArn' --output text) || OK=1
+              echo "task: $TASK"
+              for i in $(seq 1 60); do
+                sleep 20
+                ST=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+                  --query 'tasks[0].lastStatus' --output text)
+                [ "$ST" = "STOPPED" ] && break
+              done
+              EXIT=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+                --query 'tasks[0].containers[0].exitCode' --output text)
+              REASON=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+                --query 'tasks[0].stoppedReason' --output text)
+              echo "exit=$EXIT reason=$REASON"
+              [ "$EXIT" = "0" ] || OK=1
+              # Last 60 log lines: the actual failure text, not just a code.
+              STREAM=$(aws logs describe-log-streams --log-group-name "/ecs/stride-$JOB" \
+                --order-by LastEventTime --descending --max-items 1 \
+                --query 'logStreams[0].logStreamName' --output text 2>/dev/null || echo "")
+              [ -n "$STREAM" ] && [ "$STREAM" != "None" ] && \
+                aws logs get-log-events --log-group-name "/ecs/stride-$JOB" \
+                  --log-stream-name "$STREAM" --limit 60 \
+                  --query 'events[].message' --output text | tail -60
+            fi
+            if [ "$OK" = "0" ]; then PASS="$PASS $JOB"; else FAIL="$FAIL $JOB"; fi
+            echo "::endgroup::"
+          done
+          echo "=============================="
+          echo "PASSED:$PASS"
+          echo "FAILED:$FAIL"
+          echo "=============================="
+          [ -z "$FAIL" ]
+
+      - name: Run-state after the sweep
+        if: always()
+        run: aws dynamodb scan --table-name stride_run_state --output table
