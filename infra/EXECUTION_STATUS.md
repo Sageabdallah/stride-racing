@@ -98,6 +98,19 @@ Still unguarded by choice: `odds_movement.py` and
 GitHub crons and neither gates evidence accrual, but they remain the two
 places a silent no-op could still hide.
 
+## Recorded decision: stay on the DELAYED Betfair app key (2026-08-02)
+
+Measured, not assumed. The delayed key reports `isMarketDataDelayed=True`,
+but the observed price-refresh cadence before jump was **median 2.3 s,
+p90 4.6 s** — indistinguishable from live for a system that places nothing
+in-play and reads its last prices well before the gate.
+
+Decision: keep the delayed key. Revisit only if the strategy ever needs
+in-play or sub-second pre-jump reaction, which nothing in the current
+pipeline does. Reversal cost is small and known: update one Secrets
+Manager value and run `deploy-infra` with `-f skip_image=true`, then the
+smoke. No code depends on which key is in use.
+
 ## Known, not fixed: a hand-disabled schedule does not survive a deploy
 
 `infra/06_schedules.sh:36` and `infra/07b_fargate_schedules.sh:34` both

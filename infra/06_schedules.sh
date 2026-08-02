@@ -3,6 +3,7 @@
 # DST-proof by construction (raw UTC cron drifts an hour twice a year).
 set -euo pipefail
 source "$(dirname "$0")/00_prereqs.sh"
+source "$(dirname "$0")/lib_schedule.sh"
 ROLE_NAME=stride-scheduler-role
 if ! aws iam get-role --role-name $ROLE_NAME >/dev/null 2>&1; then
   aws iam create-role --role-name $ROLE_NAME --assume-role-policy-document '{
@@ -33,10 +34,13 @@ schedule() {  # name cron function
       break
     fi
     if grep -q "ConflictException\|already exists" /tmp/sched_err; then
+      local KEEP
+      KEEP=$(sched_state_to_keep "$NAME")
       aws scheduler update-schedule --name "$NAME" \
         --schedule-expression "cron($CRON)" \
         --schedule-expression-timezone "Australia/Sydney" \
         --flexible-time-window Mode=OFF \
+        --state "$KEEP" \
         --target "$TARGET" >/dev/null
       break
     fi

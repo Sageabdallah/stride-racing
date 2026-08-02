@@ -3,6 +3,7 @@
 # group (default VPC values work): ./07b_fargate_schedules.sh subnet-xxx sg-xxx
 set -euo pipefail
 source "$(dirname "$0")/00_prereqs.sh"
+source "$(dirname "$0")/lib_schedule.sh"
 SUBNET="${1:?subnet id}"; SG="${2:?security group id}"
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/stride-scheduler-role"
 CLUSTER_ARN="arn:aws:ecs:$AWS_REGION:$ACCOUNT_ID:cluster/stride"
@@ -31,10 +32,13 @@ JSON
       break
     fi
     if grep -q "ConflictException\|already exists" /tmp/sched_err; then
+      local KEEP
+      KEEP=$(sched_state_to_keep "$NAME")
       aws scheduler update-schedule --name "$NAME" \
         --schedule-expression "cron($CRON)" \
         --schedule-expression-timezone "Australia/Sydney" \
-        --flexible-time-window Mode=OFF --target "$TARGET" >/dev/null
+        --flexible-time-window Mode=OFF --state "$KEEP" \
+        --target "$TARGET" >/dev/null
       break
     fi
     echo "  $NAME: retrying (attempt $attempt): $(head -c 120 /tmp/sched_err)"
