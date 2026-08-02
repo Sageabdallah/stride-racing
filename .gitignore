@@ -86,3 +86,9 @@ dev-server.err.log
 *.swp
 ziUPj6wr
 certs/
+
+# Shadow/gate evidence is model output (per-horse win probabilities, tier
+# changes) and this repo is public. The durable store is S3; the local copy
+# is only a cache. One of these files was committed as one-time migration
+# transport on 2026-08-02 and is now untracked.
+logs/
