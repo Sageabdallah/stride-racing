@@ -31,7 +31,7 @@ Everything below is idempotent: safe to re-run top to bottom at any time.
     ./01_secrets.sh --from-env          GitHub secrets -> Secrets Manager (stride/prod)
     ./02_state_table.sh                 DynamoDB stride_run_state
     ./02b_evidence_bucket.sh            S3 gate-3 evidence store (versioned, private)
-    ./03_notifications.sh you@mail      SNS topic + budget alarm + log retention policy
+    ./03_notifications.sh you@mail      SNS topic + $20/mo cost tripwire (3 thresholds)
     ./04_ecr_image.sh                   build + push the job image (needs Docker)
     ./05_lambda_jobs.sh                 container Lambdas + per-function DLQs + alarms
     ./06_schedules.sh                   EventBridge Scheduler, Australia/Sydney timezone
