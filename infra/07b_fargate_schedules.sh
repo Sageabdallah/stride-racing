@@ -19,14 +19,28 @@ sched_ecs() {  # name cron family
      "SecurityGroups": ["$SG"], "AssignPublicIp": "ENABLED"}}}}
 JSON
 )
-  aws scheduler create-schedule --name "$NAME" \
-    --schedule-expression "cron($CRON)" \
-    --schedule-expression-timezone "Australia/Sydney" \
-    --flexible-time-window Mode=OFF --target "$TARGET" 2>/dev/null || \
-  aws scheduler update-schedule --name "$NAME" \
-    --schedule-expression "cron($CRON)" \
-    --schedule-expression-timezone "Australia/Sydney" \
-    --flexible-time-window Mode=OFF --target "$TARGET" >/dev/null
+  # Same IAM propagation retry as 06 — the ECS target's RoleArn is
+  # validated at create time.
+  local attempt
+  for attempt in $(seq 1 10); do
+    if aws scheduler create-schedule --name "$NAME" \
+      --schedule-expression "cron($CRON)" \
+      --schedule-expression-timezone "Australia/Sydney" \
+      --flexible-time-window Mode=OFF --target "$TARGET" \
+      >/dev/null 2>/tmp/sched_err; then
+      break
+    fi
+    if grep -q "ConflictException\|already exists" /tmp/sched_err; then
+      aws scheduler update-schedule --name "$NAME" \
+        --schedule-expression "cron($CRON)" \
+        --schedule-expression-timezone "Australia/Sydney" \
+        --flexible-time-window Mode=OFF --target "$TARGET" >/dev/null
+      break
+    fi
+    echo "  $NAME: retrying (attempt $attempt): $(head -c 120 /tmp/sched_err)"
+    sleep 10
+    [ "$attempt" = "10" ] && { cat /tmp/sched_err >&2; exit 1; }
+  done
   echo "schedule $NAME -> $FAMILY @ cron($CRON) Australia/Sydney"
 }
 sched_ecs stride-racecard-0530     "30 5 * * ? *"  stride-racecard-collect

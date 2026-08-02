@@ -19,17 +19,31 @@ ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
 
 schedule() {  # name cron function
   local NAME=$1 CRON=$2 FN=$3
-  aws scheduler create-schedule --name "$NAME" \
-    --schedule-expression "cron($CRON)" \
-    --schedule-expression-timezone "Australia/Sydney" \
-    --flexible-time-window Mode=OFF \
-    --target "Arn=arn:aws:lambda:$AWS_REGION:$ACCOUNT_ID:function:$FN,RoleArn=$ROLE_ARN" \
-    2>/dev/null || \
-  aws scheduler update-schedule --name "$NAME" \
-    --schedule-expression "cron($CRON)" \
-    --schedule-expression-timezone "Australia/Sydney" \
-    --flexible-time-window Mode=OFF \
-    --target "Arn=arn:aws:lambda:$AWS_REGION:$ACCOUNT_ID:function:$FN,RoleArn=$ROLE_ARN" >/dev/null
+  local TARGET="Arn=arn:aws:lambda:$AWS_REGION:$ACCOUNT_ID:function:$FN,RoleArn=$ROLE_ARN"
+  # Scheduler validates the role at create time, so a freshly created role
+  # hits the same IAM propagation window that broke Lambda creation in run
+  # 30741287142. Retry create, then fall back to update for an existing one.
+  local attempt
+  for attempt in $(seq 1 10); do
+    if aws scheduler create-schedule --name "$NAME" \
+      --schedule-expression "cron($CRON)" \
+      --schedule-expression-timezone "Australia/Sydney" \
+      --flexible-time-window Mode=OFF \
+      --target "$TARGET" >/dev/null 2>/tmp/sched_err; then
+      break
+    fi
+    if grep -q "ConflictException\|already exists" /tmp/sched_err; then
+      aws scheduler update-schedule --name "$NAME" \
+        --schedule-expression "cron($CRON)" \
+        --schedule-expression-timezone "Australia/Sydney" \
+        --flexible-time-window Mode=OFF \
+        --target "$TARGET" >/dev/null
+      break
+    fi
+    echo "  $NAME: retrying (attempt $attempt): $(head -c 120 /tmp/sched_err)"
+    sleep 10
+    [ "$attempt" = "10" ] && { cat /tmp/sched_err >&2; exit 1; }
+  done
   echo "schedule $NAME -> $FN @ cron($CRON) Australia/Sydney"
 }
 
