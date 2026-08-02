@@ -18,15 +18,49 @@ on:
 
 jobs:
   claude:
-    # The github.actor guard stops Claude's own comments from re-triggering the
-    # workflow. Without it you get an infinite loop that runs until your quota
-    # is gone. This is a known footgun, not a hypothetical.
+    # Two independent guards. Both are load-bearing; neither replaces the other.
+    #
+    # 1. The author allowlist. This repository is public, and this job holds
+    #    `contents: write` and `pull-requests: write` below. Without an author
+    #    check, any person on the internet can open an issue containing the
+    #    string @claude and drive an agent with write access to this repo,
+    #    spending against CLAUDE_CODE_OAUTH_TOKEN, with prompt text of their
+    #    choosing. --max-turns caps one run's cost; it does not cap how many
+    #    runs a stranger can start. Only the repository owner may invoke.
+    #
+    #    Check the *event author*, not github.actor. They coincide for
+    #    `issues.opened` but not for every path, and the per-event field is what
+    #    actually says who wrote the text being fed to the agent.
+    #
+    #    Consequence, deliberate: this also excludes github-actions[bot], so
+    #    issues filed by auto-triage.yml and morning-watch.yml do NOT wake this
+    #    workflow. That was already true in practice — GitHub does not dispatch
+    #    workflows from GITHUB_TOKEN-authored events — so the loop those two
+    #    watchers imply has never once closed. Making it explicit here means the
+    #    next person to read this file learns it from the code instead of from a
+    #    week-old issue with no replies. Closing that loop is a separate,
+    #    deliberate decision about unattended spend.
+    #
+    # 2. The github.actor != 'claude[bot]' guard stops Claude's own comments from
+    #    re-triggering the workflow. Without it you get an infinite loop that runs
+    #    until your quota is gone. This is a known footgun, not a hypothetical.
+    #    Redundant while the allowlist is a single human, and kept anyway: the
+    #    allowlist is the thing most likely to be widened later, and this is the
+    #    guard that must survive that change.
     if: |
       github.actor != 'claude[bot]' && (
-        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
-        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
+        (github.event_name == 'issues'
+          && github.event.issue.user.login == 'Sageabdallah'
+          && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
+        (github.event_name == 'issue_comment'
+          && github.event.comment.user.login == 'Sageabdallah'
+          && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment'
+          && github.event.comment.user.login == 'Sageabdallah'
+          && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review'
+          && github.event.review.user.login == 'Sageabdallah'
+          && contains(github.event.review.body, '@claude'))
       )
 
     runs-on: ubuntu-latest
