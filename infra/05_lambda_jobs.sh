@@ -7,15 +7,24 @@ source "$(dirname "$0")/00_prereqs.sh"
 IMAGE="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/stride-jobs:latest"
 TOPIC_ARN=$(aws sns create-topic --name stride-alerts --query TopicArn --output text)
 ROLE_NAME=stride-jobs-role
-if ! aws iam get-role --role-name $ROLE_NAME >/dev/null 2>&1; then
-  aws iam create-role --role-name $ROLE_NAME --assume-role-policy-document '{
-    "Version": "2012-10-17", "Statement": [{"Effect": "Allow",
-    "Principal": {"Service": "lambda.amazonaws.com"},
-    "Action": "sts:AssumeRole"}]}' >/dev/null
-  aws iam attach-role-policy --role-name $ROLE_NAME \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+# This role is BOTH the Lambda execution role and the ECS task role, so
+# both services must be able to assume it. Lambda-only trust made every
+# Fargate RunTask fail with "ECS was unable to assume the role" (run
+# 30741594107) — i.e. all nine scheduled tasks would have died at startup.
+# Asserted on every run, not just creation, so an existing role is repaired.
+TRUST='{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+  "Principal": {"Service": ["lambda.amazonaws.com", "ecs-tasks.amazonaws.com"]},
+  "Action": "sts:AssumeRole"}]}'
+if aws iam get-role --role-name $ROLE_NAME >/dev/null 2>&1; then
+  aws iam update-assume-role-policy --role-name $ROLE_NAME \
+    --policy-document "$TRUST"
+else
+  aws iam create-role --role-name $ROLE_NAME \
+    --assume-role-policy-document "$TRUST" >/dev/null
   sleep 10
 fi
+aws iam attach-role-policy --role-name $ROLE_NAME \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 # Inline policy is asserted on every run (not only at role creation) so a
 # policy change here actually lands on re-deploy. s3 = the evidence store.
 aws iam put-role-policy --role-name $ROLE_NAME --policy-name stride-jobs-inline \
