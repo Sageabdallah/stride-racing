@@ -60,15 +60,21 @@ def fetch_racecards(provider, date_str):
 
     results = []
     tracks_info = []
+    expected = []   # target meetings PF listed for the date
+    missing = []    # target meetings that produced no races
 
     for meet in meets:
         course = meet["course"]
         course_lower = course.lower()
         if not any(t in course_lower or course_lower in t for t in TARGET_TRACKS):
             continue
+        expected.append(course)
 
         proper_races = provider.fetch_detailed_races(meet["meet_id"], date_str, course)
         if not proper_races:
+            # PF listed the meeting but delivered no races: that is partial
+            # data, and partial must never be silent.
+            missing.append(course)
             continue
 
         trials_count = 0
@@ -95,7 +101,13 @@ def fetch_racecards(provider, date_str):
     else:
         print("no target tracks")
 
-    return results if results else None
+    got = [m["course"] for m in results]
+    print(f"  MEETINGS GOT ({len(got)}): {', '.join(got) or '-'}")
+    if missing:
+        print(f"  MEETINGS MISSING ({len(missing)}): {', '.join(missing)} "
+              "- PF listed these but delivered no races", file=sys.stderr)
+
+    return (results if results else None), expected, missing
 
 
 def main():
@@ -123,8 +135,11 @@ def main():
     saved = []
     rejected = []
 
+    partial = []
     for date_str in dates:
-        data = fetch_racecards(provider, date_str)
+        data, expected, missing = fetch_racecards(provider, date_str)
+        if missing:
+            partial.append(date_str)
         if data:
             # A card that fails the ingest contract must never reach disk —
             # downstream reads it blind, so a bad save poisons the pipeline.
@@ -146,9 +161,17 @@ def main():
         print("  Next: python3 get_tips.py")
     if rejected:
         print(f"  REJECTED {len(rejected)} day(s) on ingest validation: {', '.join(rejected)}")
+    if partial:
+        print(f"  PARTIAL {len(partial)} day(s): a listed target meeting "
+              f"delivered no races: {', '.join(partial)}", file=sys.stderr)
     if not saved:
         print("  WARNING: No data downloaded")
         sys.exit(1)
+    if rejected or partial:
+        # Saved days stay on disk and are reported above; the non-zero exit
+        # is what stops a scheduler from treating partial output as a green
+        # day. 3 = partial/rejected, distinct from 1 = nothing at all.
+        sys.exit(3)
     print()
 
 
