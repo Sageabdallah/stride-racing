@@ -44,10 +44,18 @@ jobs:
           echo "== docker images:"; docker images 2>/dev/null | head -10 || echo "(docker unavailable to this user)"
           echo "== runner dir:"; ls "$HOME"/actions-runner 2>/dev/null | head -10
           echo "== enabled custom units:"; systemctl list-unit-files --state=enabled --no-pager | grep -v "@\|systemd\|dbus\|network\|ssh\|cron\|getty\|cloud\|snap" | head -15
-      - name: Stop/start cycle
+      - name: Harden + stop/start cycle
         if: ${{ inputs.mode == 'stopstart' }}
         run: |
           SVC=$(systemctl list-units --type=service --no-pager | grep -io 'actions\.runner[^ ]*\.service' | head -1)
+          # The audit found Restart=no: the service survives a reboot (it is
+          # enabled) but NOT a crash, which would silently stop snapshot
+          # capture until someone noticed. Add a drop-in so it restarts.
+          sudo -n mkdir -p "/etc/systemd/system/${SVC}.d"
+          printf '[Service]\nRestart=always\nRestartSec=10\n' \
+            | sudo -n tee "/etc/systemd/system/${SVC}.d/restart.conf" >/dev/null
+          sudo -n systemctl daemon-reload
+          systemctl show "$SVC" -p Restart -p RestartUSec --no-pager
           echo "cycling $SVC after this job completes (systemd queues it)"
           sudo -n systemd-run --on-active=30 systemctl restart "$SVC"
           echo "restart scheduled in 30s"
