@@ -7,17 +7,33 @@
 # the only check that catches "ran, exited 0, did nothing", which is the class
 # that produced three of the sixteen defects.
 #
-# Four outcomes, deliberately distinct. Connectivity is tested on its own, before
+# Five outcomes, deliberately distinct. Connectivity is tested on its own, before
 # the real query, so a broken query can never report itself as a network problem.
 # Collapsing those two is what let a wrong column name make this watcher
 # permanently blind while still running nightly and filing issues:
 #
-#   rows > 0     -> silent. Working as intended.
-#   rows == 0    -> @claude issue. The silent no-op class is still live upstream.
-#   query broken -> @claude issue. The watcher's own SQL is wrong: a code defect,
+#   rows > 0      -> silent. Working as intended.
+#   rows == 0 and
+#     quiet day   -> silent. There was no target-track racing, so there is no
+#                    consensus to produce. Measured over the 75 days to
+#                    2026-08-03, 28 of them were quiet — Mondays 8/10, Sundays
+#                    and Tuesdays 6/11. Filing on those is not a watcher that
+#                    catches a real failure three days a week; it is a watcher
+#                    that teaches you to ignore its issues.
+#     card built  -> @claude issue. The silent no-op class is still live upstream.
+#     no card     -> @claude issue, but aimed at the RACECARD path, not consensus.
+#                    Zero mentions is the same number either way; blaming the
+#                    07:00 job for a 05:30 failure sends an agent to the wrong
+#                    file, which costs a whole run to discover.
+#   query broken  -> @claude issue. The watcher's own SQL is wrong: a code defect,
 #                   fixable by an agent, and invisible until it is named.
-#   unreachable  -> plain issue, no @claude. An agent cannot fix a network path,
+#   unreachable   -> plain issue, no @claude. An agent cannot fix a network path,
 #                   and pointing one at an unreachable database wastes turns.
+#
+# The quiet/card/neither signal comes from the pf-morning-racecards artifact
+# rather than from the database. race_schedule row counts cannot answer it: zero
+# rows means "quiet" or "the 05:30 died", which is the distinction being drawn.
+# The artifact carries the producer's own evidence, and needs no new IAM grant.
 
 name: Morning outcome watch
 
@@ -32,6 +48,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: read        # to read the pf-morning-racecards artifact
 
 jobs:
   check:
@@ -116,8 +133,93 @@ jobs:
             echo "status=empty" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Silent no-op — escalate to Claude
+      - name: Was there anything to build consensus from?
+        # Only asked when the count is zero. Zero mentions has three causes and
+        # they need three different responses, so the count alone is not enough
+        # to act on.
+        #
+        # The date in the filename is what makes this self-validating: if the
+        # most recent racecard run is stale, neither racecard_$TODAY.json nor
+        # quiet_$TODAY.json is present, and the verdict falls to racecard_dead —
+        # which is the correct reading of "today's 05:30 produced nothing".
+        id: card
         if: steps.q.outputs.status == 'empty'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TODAY: ${{ steps.q.outputs.target_date }}
+        run: |
+          set +e
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow pf-morning-racecards.yml --limit 1 \
+            --json databaseId --jq '.[0].databaseId')
+          rm -rf card_art && mkdir -p card_art
+          if [ -n "$RUN_ID" ]; then
+            gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              -n racecard -D card_art >/dev/null 2>&1
+          fi
+          ls -la card_art || true
+
+          if [ -f "card_art/quiet_$TODAY.json" ]; then
+            echo "verdict=quiet" >> "$GITHUB_OUTPUT"
+            echo "Quiet day: the provider listed meetings, none on the target list."
+            cat "card_art/quiet_$TODAY.json"
+          elif [ -f "card_art/racecard_$TODAY.json" ]; then
+            echo "verdict=card" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=racecard_dead" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Quiet day — nothing to report
+        if: steps.q.outputs.status == 'empty' && steps.card.outputs.verdict == 'quiet'
+        env:
+          TODAY: ${{ steps.q.outputs.target_date }}
+        run: |
+          {
+            echo "## Morning watch — $TODAY"
+            echo
+            echo "**Quiet day.** Punting Form listed meetings but none were on the"
+            echo "target-track list, so there was no consensus to build and"
+            echo "\`consensus_mentions\` is correctly empty. No issue filed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Racecard never arrived — escalate to Claude
+        if: steps.q.outputs.status == 'empty' && steps.card.outputs.verdict == 'racecard_dead'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_DATE: ${{ steps.q.outputs.target_date }}
+        run: |
+          set -euo pipefail
+          cat > body.md <<EOF
+          \`consensus_mentions\` has zero rows for \`${TARGET_DATE}\`, and the 05:30
+          \`pf-morning-racecards\` run produced **neither** a racecard nor a quiet-day
+          sentinel for that date.
+
+          So this is very probably not a consensus defect. The 07:00 job had nothing to
+          work from. Zero mentions is the same number whichever job failed, which is why
+          this branch exists separately: starting from \`consensus_agent.py\` here means
+          spending a whole run to arrive back at 05:30.
+
+          @claude Start at the racecard path, not the consensus path. Check the most
+          recent \`pf-morning-racecards\` run and \`download_racecards.py\`.
+
+          Rules for this task:
+          - Open a PR against \`main\`. Never commit to \`main\` directly.
+          - Do not touch anything under \`infra/*.sh\`.
+          - Do not backfill or insert rows to make the check pass. The empty table is the
+            symptom; find what upstream of it returned nothing.
+          - A quiet day is NOT this. A quiet day writes \`quiet_<date>.json\` and is
+            handled silently. This branch means neither file exists, which is a failure.
+          - If the cause is not clear from the logs, comment with findings and open no PR.
+          EOF
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Morning watch: no racecard and no consensus for ${TARGET_DATE}" \
+            --label auto-triage \
+            --body-file body.md
+
+      - name: Silent no-op — escalate to Claude
+        if: steps.q.outputs.status == 'empty' && steps.card.outputs.verdict == 'card'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_DATE: ${{ steps.q.outputs.target_date }}
@@ -125,6 +227,11 @@ jobs:
           set -euo pipefail
           cat > body.md <<EOF
           The 07:00 Fargate task ran and \`consensus_mentions\` has zero rows for \`${TARGET_DATE}\`.
+
+          **A racecard was built for this date** — \`racecard_${TARGET_DATE}.json\` is present in
+          the \`pf-morning-racecards\` artifact — so there were races to find mentions for, and
+          this is not a quiet day. That check is why this issue is worth your turns: it rules
+          out the explanation that accounts for roughly a third of all days.
 
           This is the silent no-op class: exited without producing output. Commit \`1aee192\`
           made the morning jobs fail loudly when they produce nothing, and \`4c93fea\` recorded
@@ -135,7 +242,7 @@ jobs:
 
           Rules for this task:
           - Open a PR against \`main\`. Never commit to \`main\` directly.
-          - Do not touch anything under \`infra/\`.
+          - Do not touch anything under \`infra/*.sh\`.
           - Do not backfill or insert rows to make the check pass. The empty table is the
             symptom; find what upstream of it returned nothing.
           - If the cause is not clear from the logs, comment with findings and open no PR.
@@ -144,6 +251,48 @@ jobs:
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "Morning watch: consensus_mentions empty for ${TARGET_DATE}" \
+            --label auto-triage \
+            --body-file body.md
+
+      - name: Zero rows and no verdict — escalate anyway
+        # The verdict step sets one of three values on every path, so reaching
+        # here means it did not run to completion at all. A watcher that goes
+        # quiet because its own classifier broke is the failure this file
+        # exists to catch, so the unknown case escalates rather than falling
+        # through the three exact-match branches into silence.
+        if: >-
+          steps.q.outputs.status == 'empty'
+          && steps.card.outputs.verdict != 'quiet'
+          && steps.card.outputs.verdict != 'card'
+          && steps.card.outputs.verdict != 'racecard_dead'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_DATE: ${{ steps.q.outputs.target_date }}
+          VERDICT: ${{ steps.card.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          cat > body.md <<EOF
+          \`consensus_mentions\` has zero rows for \`${TARGET_DATE}\`, and the step that
+          decides whether that is a quiet day, a dead racecard or a real silent no-op
+          produced no verdict (got: \`${VERDICT:-<empty>}\`).
+
+          So the count is unexplained rather than explained-and-benign. Filing rather than
+          staying silent, because a watcher whose own classifier failed looks exactly like
+          a watcher with nothing to report.
+
+          @claude Check the "Was there anything to build consensus from?" step in the most
+          recent \`Morning outcome watch\` run, then determine the real cause of the zero.
+
+          Rules for this task:
+          - Open a PR against \`main\`. Never commit to \`main\` directly.
+          - Do not touch anything under \`infra/*.sh\`.
+          - Do not backfill or insert rows to make the check pass.
+          - If the cause is not clear from the logs, comment with findings and open no PR.
+          EOF
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Morning watch: unclassified zero for ${TARGET_DATE}" \
             --label auto-triage \
             --body-file body.md
 
@@ -268,4 +417,4 @@ jobs:
 
       - name: Report
         run: |
-          echo "status=${{ steps.q.outputs.status }} rows=${{ steps.q.outputs.rows }}"
+          echo "status=${{ steps.q.outputs.status }} rows=${{ steps.q.outputs.rows }} racecard=${{ steps.card.outputs.verdict }}"
