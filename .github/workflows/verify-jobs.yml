@@ -33,7 +33,10 @@ jobs:
     timeout-minutes: 60
     env:
       AWS_REGION: ap-southeast-2
-      LAMBDA_JOBS: "tip-time-snapshot late-odds-watch calibrator-coverage bsp-settle weekly-digest"
+      # Must match 05_lambda_jobs.sh exactly. calibrator-coverage moved to
+      # Fargate (its import chain writes); leaving it here made verify hit
+      # the orphaned Lambda and report a fixed defect as still broken.
+      LAMBDA_JOBS: "tip-time-snapshot late-odds-watch bsp-settle weekly-digest"
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
