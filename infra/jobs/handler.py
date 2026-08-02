@@ -327,6 +327,47 @@ def job_tips_pipeline() -> dict:
     return {"last_success_date": _today(), "detail": out[-300:]}
 
 
+def _tips_prepare() -> None:
+    """Everything the tips run needs on disk: relayed artifacts plus the
+    two-location racecard copy (CLAUDE.md's recurring bug)."""
+    import shutil
+    _sync_down("server/python/intelligence")
+    _sync_down("server/python/racecards")
+    src = f"{_root()}/server/python/racecards/racecard_{_today()}.json"
+    dst_dir = f"{_root()}/racecards"
+    os.makedirs(dst_dir, exist_ok=True)
+    if os.path.exists(src):
+        shutil.copy(src, f"{dst_dir}/racecard_{_today()}.json")
+
+
+def job_tips_proof() -> dict:
+    """Exercise the whole 10:00 path in the real runtime, writing nothing.
+
+    The tips job stops two gate clocks if it fails, and cannot be rehearsed
+    by running it for real out-of-hours: an evening run would re-upsert
+    day-one ledger rows at post-race prices. This proves the parts that
+    have never executed — model staging from S3, the artifact relay, the
+    card copy, MC scoring under the task's memory and time limits — with
+    DB writes skipped, the ledger forced off, shadow evidence forced off
+    (so the registered delta distribution gains no duplicate races), and
+    output to a suffixed file that no consumer reads.
+    """
+    os.environ["STRIDE_LEDGER_WRITE"] = "false"
+    os.environ["STRIDE_SERVE_LIVE_FEATURES_SHADOW"] = "false"
+    _tips_prepare()
+    out = _run_ok("run_tips_pipeline.py", _today(), "--skip-db-store",
+                  "--output-suffix", "cloudproof")
+    return {"last_success_date": _today(), "detail": out[-400:]}
+
+
+def job_consensus_proof() -> dict:
+    """Consensus in --dry-run: proves the container, secrets, DB and panel
+    setup without LLM spend and without overwriting today's consensus file
+    (which the tips hard-gate depends on)."""
+    out = _run_ok("consensus_agent.py", _today(), "--dry-run")
+    return {"last_success_date": _today(), "detail": out[-400:]}
+
+
 def job_nightly_etl() -> dict:
     yesterday = (datetime.now(SYD).date() - timedelta(days=1)).strftime("%Y-%m-%d")
     for script, args in (("nsw_sectional_collector.py", ("--date", yesterday)),
@@ -385,6 +426,11 @@ JOBS = {
     "intelligence-build": job_intelligence_build,
     "consensus-agent": job_consensus_agent,
     "tips-pipeline": job_tips_pipeline,
+    # Proof variants: same image and task definition, selected by the
+    # STRIDE_JOB override. Never scheduled — dispatched by hand to verify
+    # a path before it runs for real.
+    "tips-proof": job_tips_proof,
+    "consensus-proof": job_consensus_proof,
     "nightly-etl": job_nightly_etl,
     "weekly-digest": job_weekly_digest,
 }
