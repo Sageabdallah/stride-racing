@@ -26,10 +26,36 @@ jobs:
           python-version: "3.11"
 
       - name: Install test dependencies
-        run: pip install --quiet numpy scipy pandas scikit-learn lightgbm
+        # requests and psycopg2 are import-time dependencies of the test suite,
+        # not runtime-only ones, and neither is optional:
+        #   - providers/__init__.py imports the TheRacingAPI adapter
+        #     unconditionally, and that module imports requests at module scope,
+        #     so even the Punting Form path that never calls it needs it;
+        #   - six test modules import application modules (auto_results_collector,
+        #     fetch_and_import_date, intelligence/common, ...) that import
+        #     psycopg2 at module scope, so collection fails without it.
+        # Both were found by this step going red on its first real run.
+        run: pip install --quiet numpy scipy pandas scikit-learn lightgbm pytest requests psycopg2-binary
 
       - name: Syntax-compile entire repository
         run: python -m compileall -q .
+
+      - name: pytest suite
+        # 628 tests across 24 test_*.py files plus server/python/providers,
+        # none of which had ever run in CI — nothing in .github/workflows
+        # executed pytest at all, so this entire regression net was connected
+        # to nothing. The module self-tests below are a different set and stay.
+        #
+        # Among what this covers: the golden-card tests assert the generated
+        # racecard JSON is byte-identical to a committed fixture, and the
+        # exit-code tests assert an erroring or empty provider response still
+        # exits 1 rather than going quietly green.
+        #
+        # Verified hermetic before wiring in: the full suite passes in ~9s with
+        # DATABASE_URL, PUNTINGFORM_API_KEY and RACING_DATA_PROVIDER all unset,
+        # reaching no network and no database. So this cannot become a flaky or
+        # secret-dependent gate.
+        run: python -m pytest server/python -q
 
       - name: Module self-tests
         run: |
