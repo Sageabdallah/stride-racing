@@ -40,7 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
-        run: pip install --quiet psycopg2-binary requests
+        # The runner's system python is PEP-668 externally managed — pip
+        # refuses global installs, so run out of a throwaway venv.
+        run: |
+          python3 -m venv .wfvenv
+          .wfvenv/bin/pip install --quiet psycopg2-binary requests
       - name: Capture snapshot
         env:
           BETFAIR_APP_KEY: ${{ secrets.BETFAIR_APP_KEY }}
@@ -55,4 +59,4 @@ jobs:
           DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
           ARGS=(--date "$DATE" --kind "$KIND_INPUT")
           if [ "$COMMIT_INPUT" = "true" ]; then ARGS+=(--commit); fi
-          python3 server/python/betfair_odds_snapshot.py "${ARGS[@]}"
+          .wfvenv/bin/python server/python/betfair_odds_snapshot.py "${ARGS[@]}"
