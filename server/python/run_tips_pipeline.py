@@ -1128,7 +1128,9 @@ def fetch_prior_sectionals(horse_names, race_date):
 
 def _write_serve_liveness_shadow(race_date, track, race_num, entries):
     """Append one race's shadow-liveness comparison to
-    logs/serve_liveness_shadow_<date>.json (STRIDE_SERVE_LIVE_FEATURES_SHADOW).
+    logs/serve_liveness_shadow_<date>.json (STRIDE_SERVE_LIVE_FEATURES_SHADOW),
+    mirrored to the durable evidence store (S3) when one is configured —
+    gate 3 counts from the store, and ephemeral Fargate disks don't count.
 
     Each entry: horse, legacy_prob_pct (published), live_prob_pct (would-be),
     delta_pp, plus field ranks under each variant. tier_change = the would-be
@@ -1144,20 +1146,28 @@ def _write_serve_liveness_shadow(race_date, track, race_num, entries):
             e["legacy_rank"] = legacy_rank[e["horse"]]
             e["live_rank"] = live_rank[e["horse"]]
             e["tier_change"] = (legacy_rank[e["horse"]] <= 3) != (live_rank[e["horse"]] <= 3)
-        log_dir = PROJECT_ROOT / "logs"
-        os.makedirs(log_dir, exist_ok=True)
-        path = log_dir / f"serve_liveness_shadow_{race_date}.json"
+        from evidence_store import fetch_evidence, put_evidence
+        fname = f"serve_liveness_shadow_{race_date}.json"
+        # Seed from the store so a fresh container appending to a date an
+        # earlier run started never clobbers the earlier races.
         blocks = []
-        if path.exists():
-            try:
-                with open(path) as f:
-                    blocks = json.load(f)
-            except Exception:
-                blocks = []
+        try:
+            prior = fetch_evidence(fname)
+            if prior:
+                blocks = json.loads(prior)
+        except Exception as _fetch_err:
+            # Registered dirty-day marker (shadow-flip-criteria.md #2).
+            print(f"    [FEATURES] shadow log write failed (store fetch): "
+                  f"{_fetch_err}", file=sys.stderr)
+            blocks = []
+        if not isinstance(blocks, list):
+            blocks = []
         blocks.append({"track": track, "race_number": race_num,
                        "runners": entries})
-        with open(path, "w") as f:
-            json.dump(blocks, f, indent=2, default=str)
+        out = put_evidence(fname, json.dumps(blocks, indent=2, default=str))
+        if out.get("s3_error"):
+            print(f"    [FEATURES] shadow log write failed (s3): "
+                  f"{out['s3_error']}", file=sys.stderr)
     except Exception as e:
         print(f"    [FEATURES] shadow log write failed (non-fatal): {e}", file=sys.stderr)
 

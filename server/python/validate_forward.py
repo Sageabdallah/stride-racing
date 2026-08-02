@@ -36,6 +36,23 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
 }
 
 
+def window_read_allowed(entry: Dict[str, Any], today=None):
+    """Mechanical no-peeking guard: window-B outcomes are unreadable until
+    the window has closed. The registry's discipline, enforced in code —
+    the operator being away must never leave early reading as an option.
+    Returns (allowed, reason)."""
+    from datetime import datetime, timedelta
+    close = datetime.strptime(entry["window_b"][1], "%Y-%m-%d").date()
+    if today is None:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("Australia/Sydney")).date()
+    first_read = close + timedelta(days=1)
+    if today < first_read:
+        return False, (f"window B closes {close}; outcomes are readable from "
+                       f"{first_read} ({(first_read - today).days} day(s) away)")
+    return True, ""
+
+
 def rows_matching(entry: Dict[str, Any],
                   rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     lo, hi = entry["window_b"]
@@ -105,6 +122,13 @@ def main() -> int:
     parser.add_argument("entry_id", choices=sorted(REGISTRY))
     args = parser.parse_args()
     entry = REGISTRY[args.entry_id]
+    allowed, why = window_read_allowed(entry)
+    if not allowed:
+        # Refused BEFORE any DB read: the guard means no outcome row is
+        # ever loaded early, not merely that a loaded result goes unprinted.
+        print(json.dumps({"entry": args.entry_id, "verdict": "WINDOW_LOCKED",
+                          "reason": why}, indent=2))
+        return 3
     rows = _load_ledger_rows(*entry["window_b"])
     result = verdict_for(entry, rows)
     print(json.dumps({"entry": args.entry_id, **result}, indent=2, default=str))

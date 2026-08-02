@@ -6,8 +6,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from datetime import date
+
 from ship_criteria import gate_registry_pass
-from validate_forward import REGISTRY, verdict_for
+from validate_forward import REGISTRY, verdict_for, window_read_allowed
 
 
 def _row(date, won, price, source="betfair", clv=1.0):
@@ -17,6 +19,23 @@ def _row(date, won, price, source="betfair", clv=1.0):
 
 
 ENTRY = REGISTRY["VR-001"]
+
+
+class TestWindowGuard:
+    """The no-peeking guard is mechanical: outcomes are unreadable until the
+    day after window B closes, however the runner is invoked."""
+
+    def test_locked_during_window(self):
+        allowed, why = window_read_allowed(ENTRY, today=date(2026, 8, 15))
+        assert not allowed and "2026-09-14" in why
+
+    def test_locked_on_close_day_itself(self):
+        allowed, _ = window_read_allowed(ENTRY, today=date(2026, 9, 13))
+        assert not allowed
+
+    def test_open_from_the_day_after_close(self):
+        allowed, why = window_read_allowed(ENTRY, today=date(2026, 9, 14))
+        assert allowed and why == ""
 
 
 class TestVerdicts:

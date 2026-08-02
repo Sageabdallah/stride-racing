@@ -45,6 +45,10 @@ V2_PATH = os.path.join(SCRIPT_DIR, "models", "staging", "isotonic_calibrator_v2.
 
 SUM_TOLERANCE = 1e-6
 
+# Gate-3 evidence window: frozen at registration (docs/project_retrain_gate.md
+# day zero). Evidence files are emitted only for race days inside it.
+SHADOW_WINDOW_OPEN = "2026-08-02"
+
 
 # --------------------------------------------------------------------------
 # Pure core
@@ -387,6 +391,60 @@ def load_calibrator(path: str):
     return cal if cal.load() else None
 
 
+def emit_evidence(rows, cal_old, cal_new, n_bins: int = 10) -> int:
+    """Per-race-day gate-3 evidence for the STRIDE_RENORMALISE_FIELD flip.
+
+    One calibrator_shadow_<date>.json per race day since the shadow window
+    opened, plus the pooled window report. Everything is recomputed from
+    settled audit rows, so a single run backfills every missed day — the
+    day count is data-driven, not cadence-driven — and re-runs rewrite
+    identical content. Files land in the durable evidence store, where
+    gate_status counts them by the strict date pattern. Returns 0, or 5
+    when any store upload failed (the scheduled job treats that as fatal).
+    """
+    from evidence_store import put_evidence
+
+    window_rows = [r for r in rows
+                   if str(r.get("race_date", "")) >= SHADOW_WINDOW_OPEN]
+    dates = sorted({str(r["race_date"]) for r in window_rows})
+    pooled = compare(window_rows, cal_old=cal_old, cal_new=cal_new,
+                     n_bins=n_bins)
+    # Day files carry the pooled context in summary form (matrices only);
+    # the full pooled report, races detail included, gets its own file with
+    # a name the day-glob cannot mistake for a day.
+    slim = {k: v for k, v in pooled.items() if k != "tier_transitions"}
+    tt = pooled.get("tier_transitions") or {}
+    slim["tier_transitions"] = {
+        "available": tt.get("available", False),
+        "pairs": {name: {k: p[k] for k in ("n_compared", "n_transitions",
+                                           "matrix")}
+                  for name, p in (tt.get("pairs") or {}).items()},
+    }
+    s3_failures = 0
+    for d in dates:
+        day = compare([r for r in window_rows if str(r["race_date"]) == d],
+                      cal_old=cal_old, cal_new=cal_new, n_bins=n_bins)
+        out = put_evidence(
+            f"calibrator_shadow_{d}.json",
+            json.dumps({"date": d, "day": day, "pooled_window": slim},
+                       indent=2, default=str))
+        if out.get("s3_error"):
+            s3_failures += 1
+            print(f"  [shadow] evidence upload FAILED for {d}: "
+                  f"{out['s3_error']}", file=sys.stderr)
+    out = put_evidence("calibrator_compare_pooled.json",
+                       json.dumps(pooled, indent=2, default=str))
+    if out.get("s3_error"):
+        s3_failures += 1
+        print(f"  [shadow] pooled upload FAILED: {out['s3_error']}",
+              file=sys.stderr)
+    print(f"  [shadow] evidence emitted for {len(dates)} race day(s) since "
+          f"{SHADOW_WINDOW_OPEN}"
+          + (f"; {s3_failures} S3 FAILURE(S)" if s3_failures else ""),
+          file=sys.stderr)
+    return 5 if s3_failures else 0
+
+
 # --------------------------------------------------------------------------
 
 def _self_test():
@@ -500,6 +558,9 @@ if __name__ == "__main__":
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--output", type=str, default=None,
                         help="Write the comparison JSON here (default: stdout)")
+    parser.add_argument("--emit-evidence", action="store_true",
+                        help="Write per-race-day gate-3 evidence files "
+                             "(calibrator_shadow_<date>.json) to the store")
     args = parser.parse_args()
 
     rows = load_audit_rows(input_csv=args.input_csv)
@@ -529,3 +590,5 @@ if __name__ == "__main__":
         print(f"  [shadow] comparison written to {args.output}", file=sys.stderr)
     else:
         print(text)
+    if args.emit_evidence:
+        sys.exit(emit_evidence(rows, cal_old, cal_new, n_bins=args.bins))

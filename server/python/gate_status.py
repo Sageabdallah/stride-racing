@@ -10,7 +10,6 @@ here on purpose: the window does not move because a script re-derived it.
 
 from __future__ import annotations
 
-import glob
 import os
 import subprocess
 import sys
@@ -77,9 +76,18 @@ def gate2_gseries(cur) -> dict:
 
 
 def gate3_shadow_flips() -> dict:
-    live_days = len(glob.glob(str(HERE / "logs" / "serve_liveness_shadow_*.json")))
-    cal_days = len(glob.glob(str(HERE / "logs" / "calibrator_shadow_*.json"))) \
-        or len(glob.glob(str(HERE / "intelligence" / "calibrator_shadow_*.json")))
+    # Distinct race days, counted from the durable evidence store (S3 plus
+    # the local logs/ cache). The old local-only glob pointed at
+    # server/python/logs/ while the writer targeted the repo root, so the
+    # gate read zero with evidence on disk — an unreadable store is
+    # therefore a loud WAIT, never a silent zero.
+    from evidence_store import EvidenceStoreError, describe, list_evidence_dates
+    try:
+        live_days = len(list_evidence_dates("serve_liveness_shadow"))
+        cal_days = len(list_evidence_dates("calibrator_shadow"))
+    except EvidenceStoreError as e:
+        return {"name": "3. shadow flips", "ok": False,
+                "detail": f"EVIDENCE STORE UNREADABLE: {e}"}
     flipped = (os.environ.get("STRIDE_SERVE_LIVE_FEATURES", "").lower()
                in ("true", "1", "yes"),
                os.environ.get("STRIDE_RENORMALISE_FIELD", "").lower()
@@ -90,7 +98,8 @@ def gate3_shadow_flips() -> dict:
         "detail": (f"serve-liveness shadow days {live_days}/"
                    f"{SHADOW_DAYS_REQUIRED}, calibrator shadow days "
                    f"{cal_days}/{SHADOW_DAYS_REQUIRED}; flags flipped: "
-                   f"serve={flipped[0]}, renorm={flipped[1]}"),
+                   f"serve={flipped[0]}, renorm={flipped[1]}; "
+                   f"store: {describe()}"),
     }
 
 
