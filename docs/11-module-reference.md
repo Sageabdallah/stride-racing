@@ -3,6 +3,13 @@
 One-line purpose for every module in the repo, grouped by role. **Bold** = part of
 the live daily path. *(dead)* = no callers found / superseded.
 
+> **Scope caveat.** "No callers found" here means no caller *in this repository*.
+> The Express/TypeScript server (`server/*.ts`) and the STRIDE skill runbooks
+> (`.claude/skills/`) are both outside the Python tree — `server/scheduler.ts` and
+> `server/routes.ts` invoke a dozen Python modules by filename, and the skills
+> invoke more. Treat "zero importers" as a prompt to check those two surfaces, not
+> as evidence a module is dead.
+
 ## Repo root
 
 | File | Purpose |
@@ -26,14 +33,21 @@ the live daily path. *(dead)* = no callers found / superseded.
 
 | File | Purpose |
 |---|---|
-| **`download_racecards.py`** | Racing API → `racecards/racecard_<date>.json` (27 metro tracks, trials tagged) |
-| `download_historical.py` | Slow-mode bulk history downloader with checkpoints/resume |
-| **`fetch_and_import_date.py`** | One date: Racing API results → `race_results_history` (append) |
+| **`pf_client.py`** | Punting Form fetch layer (meetings, results, meeting detail); raises `PFError` on any failure so a dead day cannot pass silently |
+| **`pf_results_mapper.py`** | Maps PF payloads to the 21-column `race_results_history` contract |
+| `pf_backfill_results.py` | Results backfill inside the PF Starter window (~31 days) |
+| `pf_verify_backfill.py` | Post-backfill verification pass |
+| `pf_window.py` | PF subscription-window arithmetic (the pre-window wall) |
+| `pf_track_dedup.py` / `pf_fork_repair.py` / `pf_trust_checks.py` | Repair + audit tools for the horse-ID bridge and track aliases (applies still pending) |
+| **`providers/puntingform.py`** / `providers/betfair_auth.py` | Provider adapters behind the collectors |
+| **`download_racecards.py`** | Provider (PF) → `racecards/racecard_<date>.json` (27 metro tracks, trials tagged) |
+| `download_historical.py` | Slow-mode bulk history downloader with checkpoints/resume (PF-era) |
+| **`fetch_and_import_date.py`** | One date: PF results → `race_results_history` (append) |
 | `backfill_results.py` | Date-range gap backfill, week by week: reuses `fetch_and_import_date` + all three sectional collectors (run via the `backfill-results` Action) — has self-test |
 | `audit_write_smoke.py` | Sentinel-row smoke test of mc_api's `prediction_audit` write path, self-cleaning (run via the `audit-smoke` Action) |
-| `import_historical_to_db.py` | Historical JSON → `training_data` + `race_results_history` with heuristic prior predictions |
-| `import_race_results.py` | **TRUNCATE-and-reload** of `race_results_history` from track imports (destructive) |
-| `import_track_json.py` / `_fast.py` | Track-import JSON → `training_data` (row-wise / bulk execute_values) |
+| `import_historical_to_db.py` *(dead-API era)* | Historical JSON → `training_data` + `race_results_history` with heuristic prior predictions |
+| `import_race_results.py` *(dead-API era)* | **TRUNCATE-and-reload** of `race_results_history` from track imports (destructive — do not run) |
+| `import_track_json.py` / `_fast.py` *(dead-API era)* | Track-import JSON → `training_data` (row-wise / bulk execute_values) |
 | `backfill_barrier_trials.py` → `import_barrier_trials_to_db.py` | Barrier-trial download → `barrier_trial_results` table |
 
 ## Ingestion — results & sectionals
