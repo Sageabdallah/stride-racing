@@ -49,6 +49,35 @@ jobs:
           echo "== docker images:"; docker images 2>/dev/null | head -10 || echo "(docker unavailable to this user)"
           echo "== runner dir:"; ls "$HOME"/actions-runner 2>/dev/null | head -10
           echo "== enabled custom units:"; systemctl list-unit-files --state=enabled --no-pager | grep -v "@\|systemd\|dbus\|network\|ssh\|cron\|getty\|cloud\|snap" | head -15
+      - name: Credential material inventory
+        run: |
+          # THIS REPO IS PUBLIC, so this log is public. Report PRESENCE and
+          # SHAPE only — never a key id, a secret, a token or a connection
+          # string. Anything added here must survive being read by a
+          # stranger. Counts and filenames are safe; values never are.
+          echo "== ~/.aws contents (names + modes only):"
+          ls -la "$HOME/.aws" 2>/dev/null || echo "(no ~/.aws)"
+          for f in credentials config; do
+            P="$HOME/.aws/$f"
+            if [ -f "$P" ]; then
+              echo "-- $f: present, mode $(stat -c '%a' "$P")"
+              echo "   profiles: $(grep -c '^\[' "$P" 2>/dev/null || echo 0)"
+              echo "   static access-key entries: $(grep -ci 'aws_access_key_id' "$P" 2>/dev/null || echo 0)"
+              echo "   sso/role entries: $(grep -ciE 'sso_|role_arn' "$P" 2>/dev/null || echo 0)"
+            else
+              echo "-- $f: absent"
+            fi
+          done
+          echo "== other credential-shaped files on the box:"
+          for P in "$HOME/stride-racing/.env" "$HOME/stride-racing/Race-Analytics/.env"; do
+            [ -f "$P" ] && echo "   $P present ($(wc -l < "$P") lines) mode $(stat -c '%a' "$P")" || true
+          done
+          find "$HOME" -maxdepth 3 \( -name '*.pem' -o -name '*.key' -o -name 'id_rsa*' \) \
+            -printf '   %p (mode %m)\n' 2>/dev/null | head -10
+          echo "== git remotes in the runner's clone (host only):"
+          git -C "$HOME/stride-racing" remote -v 2>/dev/null \
+            | sed -E 's#(https://)[^@]*@#\1<redacted>@#g' | head -4 || echo "   (no clone)"
+
       - name: Harden + stop/start cycle
         if: ${{ inputs.mode == 'stopstart' }}
         run: |
