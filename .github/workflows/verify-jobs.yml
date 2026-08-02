@@ -62,10 +62,20 @@ jobs:
               aws logs tail "/aws/lambda/stride-$JOB" --since 15m \
                 --format short 2>/dev/null | tail -60 || true
             else
+              # Proof variants share a task definition with the real job and
+              # select themselves through the STRIDE_JOB override.
+              case "$JOB" in
+                tips-proof)      TD=stride-tips-pipeline ;;
+                consensus-proof) TD=stride-consensus-agent ;;
+                *)               TD="stride-$JOB" ;;
+              esac
+              OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}]}]}"
               TASK=$(aws ecs run-task --cluster stride \
-                --task-definition "stride-$JOB" --launch-type FARGATE \
+                --task-definition "$TD" --launch-type FARGATE \
+                --overrides "$OVR" \
                 --network-configuration "awsvpcConfiguration={subnets=[${{ vars.AWS_SUBNET_ID }}],securityGroups=[${{ vars.AWS_SG_ID }}],assignPublicIp=ENABLED}" \
                 --query 'tasks[0].taskArn' --output text) || OK=1
+              LOG_JOB="${TD#stride-}"
               echo "task: $TASK"
               for i in $(seq 1 60); do
                 sleep 20
@@ -80,7 +90,7 @@ jobs:
               echo "exit=$EXIT reason=$REASON"
               [ "$EXIT" = "0" ] || OK=1
               # Last log lines: the actual failure text, not just a code.
-              aws logs tail "/ecs/stride-$JOB" --since 20m \
+              aws logs tail "/ecs/stride-${LOG_JOB:-$JOB}" --since 20m \
                 --format short 2>/dev/null | tail -60 || true
             fi
             if [ "$OK" = "0" ]; then PASS="$PASS $JOB"; else FAIL="$FAIL $JOB"; fi
