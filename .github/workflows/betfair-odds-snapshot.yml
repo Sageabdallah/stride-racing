@@ -1,0 +1,58 @@
+# Betfair odds snapshot capture — runs betfair_odds_snapshot.py on the
+# self-hosted AU runner (GitHub-hosted runners are geo-blocked by Betfair's
+# edge; see scripts/BETFAIR_KEYS_STATUS.md). Writes runner_odds_snapshots
+# rows — the task-12 retrain clock. Markets map against race_schedule, which
+# is populated by the day's tips pipeline: dispatch AFTER tips have run for
+# the date, or every market reports unmapped and nothing is written.
+#
+# Dispatch-only for now. Once a day's capture has been eyeballed, add a cron
+# (e.g. "0 22 * * *" = 08:00 AEST morning capture) in a follow-up commit.
+
+name: betfair-odds-snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Race day (ISO, AEST); empty = today"
+        default: ""
+      kind:
+        description: "snapshot_kind for the rows"
+        type: choice
+        default: "tip_time"
+        options: ["tip_time", "late_t5", "morning", "baseline"]
+      commit:
+        description: "Write rows (unchecked = dry run report only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: betfair-odds-snapshot
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: pip install --quiet psycopg2-binary requests
+      - name: Capture snapshot
+        env:
+          BETFAIR_APP_KEY: ${{ secrets.BETFAIR_APP_KEY }}
+          BETFAIR_USERNAME: ${{ secrets.BETFAIR_USERNAME }}
+          BETFAIR_PASSWORD: ${{ secrets.BETFAIR_PASSWORD }}
+          BETFAIR_SESSION_TOKEN: ${{ secrets.BETFAIR_SESSION_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATE_INPUT: ${{ inputs.date }}
+          KIND_INPUT: ${{ inputs.kind }}
+          COMMIT_INPUT: ${{ inputs.commit }}
+        run: |
+          DATE=${DATE_INPUT:-$(TZ=Australia/Sydney date +%F)}
+          ARGS=(--date "$DATE" --kind "$KIND_INPUT")
+          if [ "$COMMIT_INPUT" = "true" ]; then ARGS+=(--commit); fi
+          python3 server/python/betfair_odds_snapshot.py "${ARGS[@]}"
