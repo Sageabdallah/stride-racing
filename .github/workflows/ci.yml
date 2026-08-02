@@ -26,7 +26,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install test dependencies
-        run: pip install --quiet numpy scipy pandas scikit-learn lightgbm
+        # requests is here for the provider registry, which download_racecards
+        # imports before its self-test can run. Still no heavy training stack.
+        run: pip install --quiet numpy scipy pandas scikit-learn lightgbm requests
 
       - name: Syntax-compile entire repository
         run: python -m compileall -q .
@@ -52,3 +54,4 @@ jobs:
           python selection_diagnostics.py
           python feature_interactions.py
           python ship_criteria.py
+          python download_racecards.py --self-test

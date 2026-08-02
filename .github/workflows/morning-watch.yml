@@ -7,13 +7,20 @@
 # the only check that catches "ran, exited 0, did nothing", which is the class
 # that produced three of the sixteen defects.
 #
-# Four outcomes, deliberately distinct. Connectivity is tested on its own, before
+# Five outcomes, deliberately distinct. Connectivity is tested on its own, before
 # the real query, so a broken query can never report itself as a network problem.
 # Collapsing those two is what let a wrong column name make this watcher
 # permanently blind while still running nightly and filing issues:
 #
 #   rows > 0     -> silent. Working as intended.
-#   rows == 0    -> @claude issue. The silent no-op class is still live upstream.
+#   rows == 0,
+#   racing on    -> @claude issue. The silent no-op class is still live upstream.
+#   rows == 0,
+#   no racing    -> run summary only. `race_schedule` is empty too, so there was
+#                   nothing to run on — an Australian Monday has no meeting at a
+#                   covered track, and a broken 05:30 collect already alarms by
+#                   SNS. Filing here invents a bug or duplicates an alarm; on
+#                   2026-08-03 it did the first (issue #64).
 #   query broken -> @claude issue. The watcher's own SQL is wrong: a code defect,
 #                   fixable by an agent, and invisible until it is named.
 #   unreachable  -> plain issue, no @claude. An agent cannot fix a network path,
@@ -112,6 +119,30 @@ jobs:
           echo "rows=$ROWS" >> "$GITHUB_OUTPUT"
           if [ "$ROWS" -gt 0 ]; then
             echo "status=ok" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Zero rows is two different mornings, and they need different
+          # answers. If race_schedule has no rows either, there was nothing
+          # to run on: no meeting at a covered track (an Australian Monday),
+          # or a 05:30 collect that broke and already alarmed by SNS. Either
+          # way an empty consensus table is the expected consequence, not a
+          # silent no-op, and waking an agent to trace it sends it hunting a
+          # bug that is not there — which is exactly what happened on
+          # 2026-08-03 (issue #64).
+          #
+          # The escalation below is deliberately NOT weakened for the case it
+          # exists to catch: racing on, consensus empty, still an @claude
+          # issue. Only the no-racing morning is separated out.
+          SCHED=$(psql "$DATABASE_URL" -tAc \
+            "select count(*) from race_schedule where race_date = '$TODAY';" \
+            2>/dev/null | tr -d '[:space:]')
+          case "$SCHED" in
+            ''|*[!0-9]*) SCHED=-1 ;;   # unknown: fall through and escalate
+          esac
+          echo "scheduled=$SCHED" >> "$GITHUB_OUTPUT"
+          if [ "$SCHED" = "0" ]; then
+            echo "status=no_racing" >> "$GITHUB_OUTPUT"
           else
             echo "status=empty" >> "$GITHUB_OUTPUT"
           fi
@@ -121,10 +152,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_DATE: ${{ steps.q.outputs.target_date }}
+          SCHEDULED: ${{ steps.q.outputs.scheduled }}
         run: |
           set -euo pipefail
           cat > body.md <<EOF
-          The 07:00 Fargate task ran and \`consensus_mentions\` has zero rows for \`${TARGET_DATE}\`.
+          \`race_schedule\` has ${SCHEDULED} row(s) for \`${TARGET_DATE}\`, so there was racing
+          to work on, and \`consensus_mentions\` has zero rows for it.
+
+          This watcher checks the outcome, not the exit code, so it does **not** know whether
+          the 07:00 task exited 0 or failed — check the task logs before assuming either.
+          (It used to assert the task "ran"; on 2026-08-03 that was false and it sent an agent
+          after a bug that did not exist.)
 
           This is the silent no-op class: exited without producing output. Commit \`1aee192\`
           made the morning jobs fail loudly when they produce nothing, and \`4c93fea\` recorded
@@ -146,6 +184,28 @@ jobs:
             --title "Morning watch: consensus_mentions empty for ${TARGET_DATE}" \
             --label auto-triage \
             --body-file body.md
+
+      - name: No racing to verify — report, do not escalate
+        # `race_schedule` empty means the morning had nothing to run on. Two
+        # causes, neither an agent's to chase: no meeting at a covered track,
+        # or a 05:30 collect that already alarmed by SNS on its own. Filing
+        # here would either invent a bug or duplicate an alarm you already
+        # have. Nothing is silenced — it is on the run summary, and every
+        # genuine failure keeps its own signal.
+        if: steps.q.outputs.status == 'no_racing'
+        env:
+          TARGET_DATE: ${{ steps.q.outputs.target_date }}
+        run: |
+          {
+            echo "## Morning watch — ${TARGET_DATE}"
+            echo
+            echo "No rows in \`race_schedule\`, so there was no racing to verify."
+            echo "\`consensus_mentions\` being empty is the expected consequence,"
+            echo "not a silent no-op. No issue filed."
+            echo
+            echo "If you expected racing today, check the 05:30 racecard-collect"
+            echo "task: an empty schedule is also what a broken collect leaves."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Watcher query broken — escalate to Claude
         if: steps.q.outputs.status == 'query_broken'
@@ -231,10 +291,10 @@ jobs:
             --body-file body.md
 
       - name: Clear the query-broken suppressor
-        # Runs whenever the query demonstrably executed — `empty` proves that just
-        # as well as `ok` does, and a run of quiet days must not keep a stale
-        # suppressor alive.
-        if: steps.q.outputs.status == 'ok' || steps.q.outputs.status == 'empty'
+        # Runs whenever the query demonstrably executed — `empty` and `no_racing`
+        # prove that just as well as `ok` does, and a run of quiet days must not
+        # keep a stale suppressor alive.
+        if: steps.q.outputs.status == 'ok' || steps.q.outputs.status == 'empty' || steps.q.outputs.status == 'no_racing'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -268,4 +328,4 @@ jobs:
 
       - name: Report
         run: |
-          echo "status=${{ steps.q.outputs.status }} rows=${{ steps.q.outputs.rows }}"
+          echo "status=${{ steps.q.outputs.status }} rows=${{ steps.q.outputs.rows }} scheduled=${{ steps.q.outputs.scheduled }}"

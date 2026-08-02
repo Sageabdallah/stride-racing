@@ -21,6 +21,33 @@ TARGET_TRACKS = [
 
 OUTPUT_DIR = Path("./racecards")
 
+# Exit codes. Everything but 0 is read by infra/jobs/handler.py, so these are
+# a contract between the two files, not an implementation detail.
+EXIT_NOTHING = 1            # nothing reached disk and something is wrong
+EXIT_PARTIAL = 3            # saved, but the day is incomplete
+EXIT_NO_TARGET_RACING = 4   # provider answered; no meeting at a covered track
+
+
+def classify_exit(saved, rejected, partial, quiet, blank):
+    """Turn the per-day tallies into the process exit code.
+
+    The distinction 4 draws is the whole point of this function. A day on
+    which the provider answered, named its meetings, and none of them was
+    ours is a Monday — Australian Monday racing is country and provincial,
+    and TARGET_TRACKS is metro. Folding that into 1 is what made the 05:30
+    collect alarm on 2026-08-03 and take the 06:00, 07:00, 08:00 and 10:00
+    jobs down with it, on a day that had nothing to collect.
+
+    Only an all-quiet run earns 4. A rejected card, a listed target meeting
+    that delivered no races, or an empty answer from the provider are real
+    faults and keep the code they had.
+    """
+    if saved:
+        return EXIT_PARTIAL if (rejected or partial) else 0
+    if quiet and not blank and not rejected and not partial:
+        return EXIT_NO_TARGET_RACING
+    return EXIT_NOTHING
+
 
 def is_trial(race):
     """Check if race is trial using API flags."""
@@ -43,13 +70,20 @@ def is_trial(race):
 
 
 def fetch_racecards(provider, date_str):
-    """Fetch racecards for a date (proper races only)."""
+    """Fetch racecards for a date (proper races only).
+
+    Returns (data, expected, missing, listed). `listed` is every meeting the
+    provider named for the date, ours or not: main() needs it to tell "the
+    feed said nothing" from "the feed said Lismore, Goulburn, Fannie Bay and
+    Pakenham Synthetic", which are the same empty result and very different
+    events.
+    """
     print(f"\n  {date_str}:", end=" ", flush=True)
 
     meets = provider.fetch_meets(date_str)
     if not meets:
         print("no data")
-        return None, [], []
+        return None, [], [], []
 
     all_tracks = [m["course"] for m in meets]
     print(f"Available tracks: {', '.join(all_tracks[:10])}", end="")
@@ -107,14 +141,43 @@ def fetch_racecards(provider, date_str):
         print(f"  MEETINGS MISSING ({len(missing)}): {', '.join(missing)} "
               "- PF listed these but delivered no races", file=sys.stderr)
 
-    return (results if results else None), expected, missing
+    return (results if results else None), expected, missing, all_tracks
+
+
+def _self_test():
+    """Assert the exit-code contract. handler.py branches on these numbers,
+    so a change here that nobody notices takes the morning chain with it."""
+    D, E = ["2026-08-03"], []
+    cases = [
+        # (saved, rejected, partial, quiet, blank), expected, label
+        ((D, E, E, E, E), 0, "clean day"),
+        ((D, E, D, E, E), EXIT_PARTIAL, "saved, but a meeting delivered nothing"),
+        ((D, D, E, E, E), EXIT_PARTIAL, "saved one day, rejected another"),
+        ((E, E, E, D, E), EXIT_NO_TARGET_RACING, "quiet day: no covered track"),
+        ((E, E, E, E, D), EXIT_NOTHING, "provider named no meeting at all"),
+        ((E, D, E, E, E), EXIT_NOTHING, "card rejected on validation"),
+        ((E, E, D, E, E), EXIT_NOTHING, "target meeting delivered no races"),
+        ((E, E, E, D, D), EXIT_NOTHING, "one quiet, one blank: not all quiet"),
+        ((E, D, E, D, E), EXIT_NOTHING, "a rejection is never a quiet day"),
+        ((E, E, D, D, E), EXIT_NOTHING, "a partial is never a quiet day"),
+    ]
+    for tallies, expected, label in cases:
+        got = classify_exit(*tallies)
+        assert got == expected, f"{label}: expected {expected}, got {got}"
+    print(f"download_racecards self-test: {len(cases)} exit-code cases OK")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str)
     parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--self-test", action="store_true",
+                        help="assert the exit-code contract and exit")
     args = parser.parse_args()
+
+    if args.self_test:
+        _self_test()
+        return
 
     provider = get_provider()
 
@@ -136,10 +199,19 @@ def main():
     rejected = []
 
     partial = []
+    quiet = []    # provider listed meetings, none of them at a covered track
+    blank = []    # provider named no meeting at all for the date
     for date_str in dates:
-        data, expected, missing = fetch_racecards(provider, date_str)
+        data, expected, missing, listed = fetch_racecards(provider, date_str)
         if missing:
             partial.append(date_str)
+        if not data:
+            # Three different empty results. `partial` is already recorded
+            # above via `missing` — a target meeting that delivered no races.
+            if not listed:
+                blank.append(date_str)
+            elif not expected:
+                quiet.append(date_str)
         if data:
             # A card that fails the ingest contract must never reach disk —
             # downstream reads it blind, so a bad save poisons the pipeline.
@@ -164,14 +236,20 @@ def main():
     if partial:
         print(f"  PARTIAL {len(partial)} day(s): a listed target meeting "
               f"delivered no races: {', '.join(partial)}", file=sys.stderr)
-    if not saved:
+    if quiet:
+        print(f"  NO TARGET RACING {len(quiet)} day(s): the provider listed "
+              f"meetings, none at a covered track: {', '.join(quiet)}")
+    if blank:
+        print(f"  NO DATA {len(blank)} day(s): the provider named no meeting "
+              f"at all: {', '.join(blank)}", file=sys.stderr)
+
+    # Saved days stay on disk and are reported above; the non-zero exit is
+    # what stops a scheduler from treating incomplete output as a green day.
+    code = classify_exit(saved, rejected, partial, quiet, blank)
+    if code == EXIT_NOTHING:
         print("  WARNING: No data downloaded")
-        sys.exit(1)
-    if rejected or partial:
-        # Saved days stay on disk and are reported above; the non-zero exit
-        # is what stops a scheduler from treating partial output as a green
-        # day. 3 = partial/rejected, distinct from 1 = nothing at all.
-        sys.exit(3)
+    if code:
+        sys.exit(code)
     print()
 
 

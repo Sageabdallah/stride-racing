@@ -24,7 +24,9 @@ on:
       - "deploy-infra"            # deploy
       - "post-deploy-verify"      # deploy verification
       - "ci"                      # tests, on every push
-      - "pf-morning-racecards"    # 05:30 AEST, feeds everything downstream
+      # pf-morning-racecards is gone: the Fargate stride-racecard-0530 task
+      # is the racecard path, and a Fargate task raises no workflow_run event.
+      # Its failures alarm by SNS and are caught by the morning outcome watch.
       - "betfair-odds-snapshot"   # 07:45 and 10:45 AEST price capture
       - "pf-evening-results"      # 20:30 AEST settlement; the silent-no-op fixed in 7fae98c
     types: [completed]

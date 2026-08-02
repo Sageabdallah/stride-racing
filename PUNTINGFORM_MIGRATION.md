@@ -191,7 +191,10 @@ caret-delimited CSV service remains available as a fallback shape.
 - [x] [C] Scheduled workflows (2026-08-01, branch pf/scheduled-ingestion):
       `pf-evening-results.yml` (10:30 UTC = 20:30 AEST intent; today AND
       yesterday — late/abandoned meetings resolve next day) and
-      `pf-morning-racecards.yml` (19:30 UTC = 05:30 AEST intent). Both:
+      `pf-morning-racecards.yml` (19:30 UTC = 05:30 AEST intent; **retired
+      2026-08-03** — superseded by the Fargate `stride-racecard-0530` task,
+      which runs the same script on a DST-proof Australia/Sydney schedule).
+      Both:
       secrets from the repo, concurrency group, 30-min timeout, no
       continue-on-error, per-meeting counts to the step summary. Proof runs:
       evening push run **30647305549** green (2026-07-31 imported 48

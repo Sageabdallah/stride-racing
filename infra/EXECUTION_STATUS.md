@@ -29,7 +29,7 @@ role, the relay, or the CLI boundary — never in the scripts themselves.
 | calibrator-coverage | Lambda | 02:00 | RUN (30743756889, Fargate) | Gate-3 calibrator day count stops accruing. Recoverable: the emitter is data-driven and backfills every settled day on the next good run. |
 | late-odds-watch | Lambda | every 5 min, 11:00–18:30 | RUN (30742455791) | No late_t5 rows; ~90 alarm mails/day. Does not touch a registered gate. |
 | weekly-digest | Lambda | Mon 07:00 | RUN (30743011392) | You stop receiving the Monday summary — the failure most likely to hide other failures. |
-| racecard-collect | Fargate | 05:30 | RUN (30742455791) | **Covered:** the pf-morning-racecards GitHub cron also runs 05:30 and is Mac-free. |
+| racecard-collect | Fargate | 05:30 | RUN (30742455791) | **Sole path** since the duplicate pf-morning-racecards GitHub cron was retired (it ran the same script for the same date, on raw-UTC cron that drifts at DST, and doubled every alarm). |
 | results-collect | Fargate | 22:30, 01:00 | RUN (30743450567) | **Covered:** pf-evening-results GitHub cron runs 20:30. |
 | nightly-etl | Fargate | 00:45 | RUN (30743450567) | Sectionals/franking go stale; franking gate may trip at the next build. No registered clock stops. |
 | gap-heal | Fargate | 03:00 | RUN (30743450567) | Self-healing stops — gaps stay open instead of closing. Silent until the digest. |

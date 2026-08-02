@@ -32,6 +32,10 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 TABLE = os.environ.get("STRIDE_STATE_TABLE", "stride_run_state")
 SYD = timezone(timedelta(hours=10))  # display only; schedules own DST
 PF_WALL_DAYS = 31
+# download_racecards.py exit 4: the provider answered and named its meetings,
+# and none was at a covered track. Not an outage — a day with no racing we
+# cover, which Australian Mondays routinely are.
+NO_TARGET_RACING = 4
 
 
 def _load_secrets() -> None:
@@ -187,16 +191,53 @@ def job_racecard_collect() -> dict:
     healed = []
     for day in _missed_days("racecard-collect", PF_WALL_DAYS):
         try:
-            _run_ok("download_racecards.py", "--date", day, ok_codes=(0, 3))
+            _run_ok("download_racecards.py", "--date", day,
+                    ok_codes=(0, 3, NO_TARGET_RACING))
             _run_ok("seed_race_schedule.py", day)
             healed.append(day)
         except RuntimeError as e:
             print(f"backfill {day} failed: {e}", file=sys.stderr)
-    out = _run_ok("download_racecards.py", "--date", _today(), ok_codes=(0,))
+    # Today's collect is taken by exit code rather than through _run_ok,
+    # because 4 is neither success nor failure and the difference decides
+    # whether the rest of the morning runs or stands down.
+    proc = _run("download_racecards.py", "--date", _today())
+    print(proc.stdout[-4000:])
+    if proc.returncode == NO_TARGET_RACING:
+        # Recorded as a success with a marker, not as an error: the job did
+        # its work and there was nothing to collect. last_success_date must
+        # advance or _missed_days chases this day as a gap forever.
+        print(f"[racecard] {_today()}: no meeting at a covered track — "
+              f"the morning chain stands down")
+        return {"last_success_date": _today(), "gaps_healed": len(healed),
+                "no_racing_date": _today(), "detail": proc.stdout[-500:]}
+    if proc.returncode != 0:
+        print(proc.stderr[-4000:], file=sys.stderr)
+        raise RuntimeError(f"download_racecards.py exited {proc.returncode}")
     _run_ok("seed_race_schedule.py", _today())
     _sync_up("server/python/racecards", "racecard_*.json")
     return {"last_success_date": _today(), "gaps_healed": len(healed),
-            "detail": out[-500:]}
+            "detail": proc.stdout[-500:]}
+
+
+def _no_racing_today() -> bool:
+    """Did the 05:30 collect find no meeting at a covered track?
+
+    Read from run-state rather than re-derived: asking the provider again
+    would let a second API call answer differently from the first, and a
+    chain that stands down must stand down for one reason, recorded once.
+
+    Compared against today's date, not read as a boolean, so a stale marker
+    cannot stand the chain down on a day that does have racing — including
+    the case where the 05:30 task never starts and yesterday's row survives.
+    """
+    return _get_state("racecard-collect").get("no_racing_date") == _today()
+
+
+def _stood_down(job: str) -> dict:
+    print(f"[{job}] {_today()}: no meeting at a covered track, so there is "
+          f"nothing to do. This is not a failure — see the racecard-collect "
+          f"run-state row.")
+    return {"last_success_date": _today(), "stood_down": "no-target-racing"}
 
 
 def _db_query(sql: str, params: tuple):
@@ -233,6 +274,8 @@ def _db_now():
 
 
 def job_morning_odds() -> dict:
+    if _no_racing_today():
+        return _stood_down("morning-odds")
     _sync_down("server/python/intelligence")
     _require_racecard("morning-odds")   # odds_movement reads it for fallback odds
     t0 = _db_now()
@@ -397,6 +440,11 @@ def _require_racecard(job: str) -> None:
     non-zero exit path, so without this a failed 05:30 collect would let
     06:00, 07:00 and 10:00 each run on nothing and report success — the
     whole morning silently producing no tips.
+
+    Every caller checks _no_racing_today() before reaching here, so by this
+    point a missing card means the collect broke. A day with no meeting at
+    a covered track never gets this far, and must not: alarming for it is
+    how a routine Monday came to look like an outage.
     """
     if not _prepare_racecard():
         raise RuntimeError(
@@ -414,6 +462,8 @@ def _fresh_files(dirpath: str, suffix: str, since: float) -> list:
 
 
 def job_intelligence_build() -> dict:
+    if _no_racing_today():
+        return _stood_down("intelligence-build")
     _require_racecard("intelligence-build")
     # Timed from just before the build, so a file relayed down earlier in
     # this same task can never be mistaken for one the build produced.
@@ -429,6 +479,8 @@ def job_intelligence_build() -> dict:
 
 
 def job_consensus_agent() -> dict:
+    if _no_racing_today():
+        return _stood_down("consensus-agent")
     _sync_down("server/python/intelligence")
     _require_racecard("consensus-agent")
     _run_ok("consensus_agent.py", _today())
@@ -442,6 +494,8 @@ def job_consensus_agent() -> dict:
 
 
 def job_tips_pipeline() -> dict:
+    if _no_racing_today():
+        return _stood_down("tips-pipeline")
     _sync_down("server/python/intelligence")
     _require_racecard("tips-pipeline")
     out = _run_ok("run_tips_pipeline.py", _today())
@@ -531,9 +585,12 @@ def job_weekly_digest() -> dict:
     rows = _state().scan().get("Items", [])
     lines = ["STRIDE weekly digest", "=" * 40]
     for r in sorted(rows, key=lambda x: x.get("job_name", "")):
+        # stood_down rides along so a week of quiet days reads as quiet days
+        # rather than as a job that mysteriously stopped writing rows.
         lines.append(f"{r.get('job_name')}: last_success="
                      f"{r.get('last_success_date')} rows={r.get('rows_written', '-')} "
                      f"gaps_found={r.get('gaps_found', 0)} healed={r.get('gaps_healed', 0)} "
+                     f"{('stood_down=' + str(r.get('stood_down')) + ' ') if r.get('stood_down') else ''}"
                      f"{('preflight=' + str(r.get('preflight'))) if r.get('preflight') else ''}")
     # Gate status comes from the run-state row the (Fargate) preflight job
     # writes daily — the digest Lambda cannot run gate_status itself: gate 5
