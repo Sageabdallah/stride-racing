@@ -1,0 +1,58 @@
+# What EventBridge Scheduler ACTUALLY holds right now.
+#
+# Exists because the deploy scripts print an all-clear assembled from what
+# the running process just wrote, which is not the same thing as the state
+# of the account. A schedule disabled by hand — or by something nobody
+# remembers — is invisible to that kind of summary. This reads the account.
+#
+# A DISABLED schedule is reported as a warning, never a failure: disabling
+# one is a legitimate operator action. Silence about it is the defect.
+name: schedule-audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 04:20 Sydney, just after the preflight slot, so a schedule that went
+    # dark overnight is surfaced with the morning's other evidence.
+    - cron: "20 18 * * *"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: Report every schedule and its state
+        run: |
+          aws scheduler list-schedules \
+            --query 'sort_by(Schedules,&Name)[].[Name,State]' \
+            --output text | tee /tmp/sched.txt
+          TOTAL=$(wc -l < /tmp/sched.txt)
+          DISABLED=$(grep -c DISABLED /tmp/sched.txt || true)
+          echo
+          echo "total=$TOTAL disabled=$DISABLED"
+          {
+            echo "## EventBridge schedule state"
+            echo
+            echo '| schedule | state |'
+            echo '| --- | --- |'
+            awk '{printf "| %s | %s |\n", $1, $2}' /tmp/sched.txt
+            echo
+            echo "total=$TOTAL disabled=$DISABLED"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DISABLED" != "0" ]; then
+            grep DISABLED /tmp/sched.txt | while read -r N _; do
+              echo "::warning::$N is DISABLED — it will not fire"
+            done
+          fi
+          # Zero schedules means the deploy never ran or they were deleted;
+          # that is a real failure, unlike a deliberate disable.
+          [ "$TOTAL" -gt 0 ]
