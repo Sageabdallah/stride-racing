@@ -6,11 +6,12 @@ import sys
 import statistics
 import time
 from datetime import datetime
+from pathlib import Path
 
-PYTHON_DIR = r'c:\Users\sagea\OneDrive\Desktop\Race-Analytics\Race-Analytics\server\python'
+PYTHON_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PYTHON_DIR)
 
-ENV_PATH = r'c:\Users\sagea\OneDrive\Desktop\Race-Analytics\Race-Analytics\.env'
+ENV_PATH = str(Path(__file__).resolve().parents[2] / ".env")
 
 def _load_env(path: str) -> None:
     """Minimal .env loader — sets os.environ for KEY=VALUE lines."""
