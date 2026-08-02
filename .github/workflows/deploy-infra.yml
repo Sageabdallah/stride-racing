@@ -27,10 +27,11 @@ concurrency:
 
 jobs:
   deploy:
-    # Self-hosted: Docker for the image build lives on the syd runner box
-    # (installed as a service, so it survives reboots), and the box is on an
-    # AU IP for anything that touches Betfair's geo-blocked edge.
-    runs-on: [self-hosted]
+    # GitHub-hosted: Docker is preinstalled here and the syd runner has none
+    # (run 30740940800). Nothing in the deploy touches Betfair's geo-fenced
+    # edge — AWS and Neon are reachable from anywhere — so the AU runner
+    # stays reserved for the jobs that genuinely need an AU IP.
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       AWS_REGION: ap-southeast-2
