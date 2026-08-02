@@ -200,6 +200,7 @@ def job_racecard_collect() -> dict:
 
 def job_morning_odds() -> dict:
     _sync_down("server/python/intelligence")
+    _prepare_racecard()   # odds_movement reads the card for its fallback odds
     _run_ok("odds_movement.py", _today(), "--snapshot", "morning")
     _sync_up("server/python/intelligence")
     return {"last_success_date": _today()}
@@ -301,6 +302,7 @@ def job_bsp_settle() -> dict:
 
 
 def job_intelligence_build() -> dict:
+    _prepare_racecard()
     _run_ok("stride_build.py", _today(), "--parallel")
     _sync_up("server/python/intelligence")
     return {"last_success_date": _today()}
@@ -308,6 +310,7 @@ def job_intelligence_build() -> dict:
 
 def job_consensus_agent() -> dict:
     _sync_down("server/python/intelligence")
+    _prepare_racecard()
     _run_ok("consensus_agent.py", _today())
     _sync_up("server/python/intelligence")
     return {"last_success_date": _today()}
@@ -330,17 +333,33 @@ def job_tips_pipeline() -> dict:
     return {"last_success_date": _today(), "detail": out[-300:]}
 
 
-def _tips_prepare() -> None:
-    """Everything the tips run needs on disk: relayed artifacts plus the
-    two-location racecard copy (CLAUDE.md's recurring bug)."""
+def _prepare_racecard() -> bool:
+    """Relay the day's racecard down and place it in BOTH locations.
+
+    Not just a tips concern: the intelligence agents, the consensus agent
+    and odds_movement all resolve the card at the REPO-ROOT racecards/
+    path, so every one of them needs this. intelligence-build ran without
+    it and both agents died with "Racecard not found" — CLAUDE.md's
+    recurring copy-path bug, reappearing in the cloud because each Fargate
+    task starts with an empty filesystem.
+    """
     import shutil
-    _sync_down("server/python/intelligence")
     _sync_down("server/python/racecards")
     src = f"{_root()}/server/python/racecards/racecard_{_today()}.json"
     dst_dir = f"{_root()}/racecards"
     os.makedirs(dst_dir, exist_ok=True)
-    if os.path.exists(src):
-        shutil.copy(src, f"{dst_dir}/racecard_{_today()}.json")
+    if not os.path.exists(src):
+        print(f"[racecard] {src} absent after relay — the 05:30 collect "
+              f"either has not run or wrote nothing", file=sys.stderr)
+        return False
+    shutil.copy(src, f"{dst_dir}/racecard_{_today()}.json")
+    print(f"[racecard] staged into both locations for {_today()}")
+    return True
+
+
+def _tips_prepare() -> None:
+    _sync_down("server/python/intelligence")
+    _prepare_racecard()
 
 
 def job_tips_proof() -> dict:
