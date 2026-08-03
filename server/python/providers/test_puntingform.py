@@ -25,6 +25,7 @@ if __package__ in (None, ""):
 
 import download_racecards
 import pf_client
+import target_tracks as tt
 from pf_backfill_results import load_horse_id_bridge
 from providers import get_provider
 from providers.puntingform import PuntingFormProvider
@@ -71,6 +72,9 @@ def _wire(monkeypatch, tmp_path, meetings_fn, detail_fn, bridge_rows=BRIDGE_ROWS
     monkeypatch.setenv("PUNTINGFORM_API_KEY", "test-key")
     monkeypatch.setenv("DATABASE_URL", "postgresql://fixture/only")
     monkeypatch.delenv("RACING_DATA_PROVIDER", raising=False)
+    # Cleared so the goldens cannot be changed by whatever is set in the
+    # environment running the suite; tests that want an override set it after.
+    monkeypatch.delenv("STRIDE_TARGET_TRACKS", raising=False)
     monkeypatch.setattr(pf_client, "meetings_for_date", meetings_fn)
     monkeypatch.setattr(pf_client, "meeting_detail", detail_fn)
     monkeypatch.setattr(pf_client, "scratchings", scratchings_fn)
@@ -366,16 +370,98 @@ def test_sentinel_write_failure_exits_1(monkeypatch, tmp_path):
 
 
 def test_empty_target_list_is_config_error_not_quiet(monkeypatch, tmp_path):
-    """An empty target list would make every day quiet and the whole morning
+    """A malformed override would make every day quiet and the whole morning
     green while producing nothing. Config error, before any fetch."""
     def no_fetch(date_str):
         raise AssertionError("fetched with an empty target list")
 
     _wire(monkeypatch, tmp_path, no_fetch, lambda mid: {})
-    monkeypatch.setattr(download_racecards, "TARGET_TRACKS", [])
+    monkeypatch.setenv("STRIDE_TARGET_TRACKS", " , , ")
     with pytest.raises(SystemExit) as exc:
         _run_download(monkeypatch, "2026-08-03")
     assert exc.value.code == 2
+
+
+# ----------------------------------------------------------------------
+# STRIDE_TARGET_TRACKS override
+# ----------------------------------------------------------------------
+
+def test_override_can_turn_a_quiet_day_into_a_working_one(monkeypatch, tmp_path):
+    """The point of the env var: widen coverage by setting one AWS secret, with
+    no code change, no deploy and no image rebuild. 2026-08-03 is quiet under
+    the built-in list and is not once Pakenham is added."""
+    meetings = _fixture("pf_meetingslist_2026-08-03.json")
+    detail = _fixture("pf_meeting_detail_195431.json")
+
+    fetched = []
+
+    def detail_fn(meeting_id):
+        fetched.append(str(meeting_id))
+        return detail
+
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, detail_fn)
+    monkeypatch.setenv("STRIDE_TARGET_TRACKS", "pakenham synthetic,lismore")
+    _run_download(monkeypatch, "2026-08-03")
+
+    assert not list(out_dir.glob("quiet_*.json")), "no longer a quiet day"
+    card = json.loads((out_dir / "racecard_2026-08-03.json").read_text())
+    assert sorted(m["course"] for m in card) == ["Lismore", "Pakenham Synthetic"]
+    assert len(fetched) == 2, "only the two named meetings should be fetched"
+
+
+def test_override_all_takes_every_listed_meeting(monkeypatch, tmp_path):
+    meetings = _fixture("pf_meetingslist_2026-08-03.json")
+    detail = _fixture("pf_meeting_detail_195431.json")
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, lambda mid: detail)
+    monkeypatch.setenv("STRIDE_TARGET_TRACKS", "all")
+    _run_download(monkeypatch, "2026-08-03")
+
+    card = json.loads((out_dir / "racecard_2026-08-03.json").read_text())
+    assert len(card) == 4
+
+
+def test_unset_override_leaves_the_builtin_list_exactly_as_it_was(monkeypatch):
+    """The default must not move in this change: the goldens depend on it, and
+    widening coverage is a modelling decision taken by watching output, not by
+    editing a constant."""
+    monkeypatch.delenv("STRIDE_TARGET_TRACKS", raising=False)
+    assert tt.target_tracks() == tt.DEFAULT_TARGET_TRACKS
+    assert tt.target_source() == "builtin"
+    assert tt.DEFAULT_TARGET_TRACKS == [
+        "flemington", "caulfield", "caulfield heath", "moonee valley", "sandown",
+        "randwick", "royal randwick", "rosehill", "warwick farm", "canterbury",
+        "eagle farm", "doomben", "ascot", "belmont", "pinjarra",
+        "kensington", "randwick kensington", "gold coast", "aquis park gold coast",
+        "geelong", "ladbrokes geelong", "ballarat", "cranbourne", "ipswich",
+        "newcastle", "morphettville",
+    ]
+
+
+def test_matcher_is_unchanged_against_every_stored_card_spelling(monkeypatch):
+    """The bidirectional substring test is loose, and that looseness is
+    load-bearing. These are the distinct `course` spellings across the stored
+    racecards/*.json corpus; a canonical-key rewrite would silently drop the
+    starred ones, which is why the matcher moved without being rewritten."""
+    monkeypatch.delenv("STRIDE_TARGET_TRACKS", raising=False)
+    keeps = [
+        "Randwick", "Royal Randwick", "Rosehill Gardens", "Canterbury Park",
+        "Warwick Farm", "Flemington", "Caulfield", "Moonee Valley",
+        "Eagle Farm", "Doomben", "Ascot", "Belmont", "Morphettville Parks",
+        "Ladbrokes Geelong", "Aquis Park Gold Coast",
+        "Sportsbet-Ballarat",            # *
+        "Pinjarra Scarpside",            # *
+        "Sportsbet Sandown Hillside",    # *
+        "Sportsbet Sandown Lakeside",    # *
+        "Southside Cranbourne",          # *
+        "Aquis Park Gold Coast Poly",    # *
+        "Sandown-Lakeside",              # *
+    ]
+    for course in keeps:
+        assert tt.is_target_track(course), course
+
+    for course in ("Lismore", "Goulburn", "Fannie Bay", "Pakenham Synthetic",
+                   "Wagga", "Te Rapa", "Sunshine Coast"):
+        assert not tt.is_target_track(course), course
 
 
 # ----------------------------------------------------------------------
