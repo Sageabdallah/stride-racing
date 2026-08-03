@@ -74,7 +74,7 @@ def test_fresh_files_filters_by_suffix(handler, tmp_path):
 # -------------------------------------------------------- _require_racecard
 
 def test_require_racecard_raises_when_card_absent(handler, monkeypatch):
-    monkeypatch.setattr(handler, "_prepare_racecard", lambda: False)
+    monkeypatch.setattr(handler, "_prepare_racecard", lambda: "missing")
     with pytest.raises(RuntimeError) as e:
         handler._require_racecard("tips-pipeline")
     assert "no racecard" in str(e.value)
@@ -82,8 +82,51 @@ def test_require_racecard_raises_when_card_absent(handler, monkeypatch):
 
 
 def test_require_racecard_passes_when_card_present(handler, monkeypatch):
-    monkeypatch.setattr(handler, "_prepare_racecard", lambda: True)
-    handler._require_racecard("tips-pipeline")   # must not raise
+    monkeypatch.setattr(handler, "_prepare_racecard", lambda: "card")
+    assert handler._require_racecard("tips-pipeline") == "card"   # must not raise
+
+
+def test_require_racecard_passes_on_a_quiet_day(handler, monkeypatch, capsys):
+    """A quiet day is the one case where no card is correct: the provider was
+    healthy and listed meetings, none on the target-track list. Measured over
+    the 75 days to 2026-08-03 that was 28 of them, so raising here took four
+    jobs red about three mornings a week for a calendar fact."""
+    monkeypatch.setattr(handler, "_prepare_racecard", lambda: "quiet")
+    assert handler._require_racecard("tips-pipeline") == "quiet"
+    assert "QUIET DAY" in capsys.readouterr().out
+
+
+def test_prepare_racecard_tri_state_is_driven_by_the_filesystem(handler, monkeypatch, tmp_path):
+    """The three answers come from real files, not from a stub. "missing" and
+    "quiet" both mean "no card" and need opposite handling, so the thing that
+    tells them apart has to be exercised for real."""
+    monkeypatch.setenv("LAMBDA_TASK_ROOT", str(tmp_path))
+    monkeypatch.setattr(handler, "_sync_down", lambda *a, **k: 0)
+    src = tmp_path / "server" / "python" / "racecards"
+    src.mkdir(parents=True)
+    today = handler._today()
+
+    assert handler._prepare_racecard() == "missing"
+
+    (src / f"quiet_{today}.json").write_text('{"status": "quiet"}')
+    assert handler._prepare_racecard() == "quiet"
+    # Relayed to the repo-root location so anything resolving the card path
+    # sees the same evidence the handler did.
+    assert (tmp_path / "racecards" / f"quiet_{today}.json").exists()
+
+    # A card present alongside a stale sentinel is still a card: a leftover
+    # sentinel must never suppress a real day's work.
+    (src / f"racecard_{today}.json").write_text("[]")
+    assert handler._prepare_racecard() == "card"
+
+
+def test_a_sentinel_for_another_date_is_not_todays_quiet_day(handler, monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMBDA_TASK_ROOT", str(tmp_path))
+    monkeypatch.setattr(handler, "_sync_down", lambda *a, **k: 0)
+    src = tmp_path / "server" / "python" / "racecards"
+    src.mkdir(parents=True)
+    (src / "quiet_1999-01-01.json").write_text('{"status": "quiet"}')
+    assert handler._prepare_racecard() == "missing"
 
 
 # --------------------------------------------------- job-level no-op guards
@@ -235,10 +278,37 @@ def test_every_card_dependent_job_requires_the_card(handler, monkeypatch):
     monkeypatch.setattr(handler, "_sync_down", lambda *a, **k: None)
     monkeypatch.setattr(handler, "_sync_up", lambda *a, **k: None)
     monkeypatch.setattr(handler, "_run_ok", lambda *a, **k: "")
-    monkeypatch.setattr(handler, "_prepare_racecard", lambda: False)
+    monkeypatch.setattr(handler, "_prepare_racecard", lambda: "missing")
     for job in (handler.job_intelligence_build,
                 handler.job_consensus_agent,
-                handler.job_tips_pipeline):
+                handler.job_tips_pipeline,
+                handler.job_morning_odds):
         with pytest.raises(RuntimeError) as e:
             job()
         assert "no racecard" in str(e.value), job.__name__
+
+
+def test_every_card_dependent_job_skips_cleanly_on_a_quiet_day(handler, monkeypatch):
+    """Skipped, not run-and-tolerated.
+
+    Each of these jobs carries a post-condition that would fire on an empty
+    result — no fresh intelligence file, no consensus JSON, no tips file, no
+    MORNING_CHECK rows. Loosening those to accommodate a quiet day would blind
+    them on every day that does have racing, which is the failure they exist
+    to catch. So the job returns before running anything instead.
+    """
+    monkeypatch.setattr(handler, "_sync_down", lambda *a, **k: None)
+    monkeypatch.setattr(handler, "_sync_up", lambda *a, **k: None)
+    monkeypatch.setattr(handler, "_prepare_racecard", lambda: "quiet")
+
+    def ran(script, *a, **k):
+        raise AssertionError(f"quiet day ran {script}")
+    monkeypatch.setattr(handler, "_run_ok", ran)
+
+    for job in (handler.job_intelligence_build,
+                handler.job_consensus_agent,
+                handler.job_tips_pipeline,
+                handler.job_morning_odds):
+        out = job()
+        assert out["quiet_day"] is True, job.__name__
+        assert out["last_success_date"] == handler._today(), job.__name__
