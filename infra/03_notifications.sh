@@ -10,20 +10,40 @@ EMAIL="${1:?usage: 03_notifications.sh you@example.com [budget_usd]}"
 BUDGET_USD="${2:-20}"
 
 TOPIC_ARN=$(aws sns create-topic --name stride-alerts --query TopicArn --output text)
+# Unguarded: subscribe is idempotent for the same topic+protocol+endpoint (it
+# returns the existing subscription), so `|| true` bought nothing and hid
+# AccessDenied, a malformed address, and a missing topic.
 aws sns subscribe --topic-arn "$TOPIC_ARN" --protocol email \
-  --notification-endpoint "$EMAIL" >/dev/null 2>&1 || true
+  --notification-endpoint "$EMAIL" >/dev/null
 echo "topic=$TOPIC_ARN"
 
-# An unconfirmed subscription delivers nothing, silently — the previous version
-# printed "confirm the subscription email once" and never checked whether anyone
-# had. Say which state it is actually in.
-PENDING=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN" \
-  --query "length(Subscriptions[?SubscriptionArn=='PendingConfirmation'])" \
-  --output text)
-if [ "$PENDING" != "0" ]; then
-  echo "  WARNING: $PENDING subscription(s) on stride-alerts are still" \
+# Assert on the TOTAL, not just on how many are pending. Counting only pending
+# was the wrong check: if subscribe had failed outright the topic would hold
+# zero subscriptions, pending would be 0, no warning would fire, and silence
+# would read as health — the same shape as the budget bug, in the code written
+# to catch the budget bug.
+#
+# This topic carries the CloudWatch alarms from 05_lambda_jobs.sh. It does NOT
+# carry the budget notifications: those are Budgets-native EMAIL subscribers
+# that need no SNS confirmation, so they are unaffected by anything here.
+SUBS=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN" \
+  --query "Subscriptions[].SubscriptionArn" --output text)
+TOTAL=$(printf '%s\n' "$SUBS" | tr '\t' '\n' | grep -c . || true)
+PENDING=$(printf '%s\n' "$SUBS" | tr '\t' '\n' | grep -c '^PendingConfirmation$' || true)
+
+if [ "$TOTAL" = "0" ]; then
+  echo "FATAL: subscribe reported success but stride-alerts has no subscriptions." \
+       "Every CloudWatch alarm routed to this topic has nowhere to go." >&2
+  exit 1
+fi
+if [ "$PENDING" = "$TOTAL" ]; then
+  # Not fatal: a first deploy legitimately sits here until the human clicks.
+  # Loud, because it stays in this state forever if nobody ever does.
+  echo "  WARNING: all $TOTAL subscription(s) on stride-alerts are" \
        "PendingConfirmation — until $EMAIL clicks the AWS confirmation link," \
        "nothing published to this topic reaches anyone" >&2
+else
+  echo "  stride-alerts: $((TOTAL - PENDING)) of $TOTAL subscription(s) confirmed"
 fi
 
 # Budgets is a global service that answers only in us-east-1. Every script here
