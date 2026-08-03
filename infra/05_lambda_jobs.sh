@@ -154,19 +154,24 @@ for spec in "${JOBS[@]}"; do
   echo "$FN ready"
 done
 
-# Log groups whose Lambda this script no longer creates. calibrator-coverage
-# moved to Fargate in 5606924 because its import chain writes to the repo tree,
-# but the function and its log group were left in place, and the group still
-# holds the four failed runs from before the move. It is deliberately NOT in
-# JOBS -- putting it back would recreate a Lambda that cannot work and would
-# break both scripts/classify_runtimes.py and verify-jobs.yml. Retention is the
-# only thing asserted here; this script does not own the function's lifecycle.
-# Without this the group is the one member of the estate nothing sets retention
-# on, so it would sit at its old value while every other group moved to 60.
-# Drop the entry if the orphaned Lambda is ever deleted.
+# Log groups that outlive their Lambda. calibrator-coverage moved to Fargate in
+# 5606924 because its import chain writes to the repo tree; the Lambda itself is
+# now deleted, but its log group is kept deliberately. It holds the four failed
+# runs that diagnosed the move, and that is the evidence trail for 5606924 --
+# the reason the job runs where it runs. Do not delete the group to tidy up.
+#
+# Nothing else sets retention on it. It is not in JOBS and must not go back:
+# a recreated Lambda cannot work, and it would break scripts/classify_runtimes.py
+# and verify-jobs.yml. Without the loop below this group is the one member of the
+# estate no script owns, so it would drift to whatever it was last given while
+# every other group tracked LOG_RETENTION_DAYS.
+#
+# create-log-group is here so a group deleted by hand comes back rather than
+# silently losing retention. That means deleting the group is not enough to
+# retire it -- remove this loop in the same change, or it returns empty forever.
 for ORPHAN in calibrator-coverage; do
   aws logs create-log-group --log-group-name "/aws/lambda/stride-$ORPHAN" 2>/dev/null || true
   aws logs put-retention-policy --log-group-name "/aws/lambda/stride-$ORPHAN" \
     --retention-in-days "$(retention_days "$ORPHAN")"
-  echo "stride-$ORPHAN log group retention asserted (orphaned function)"
+  echo "stride-$ORPHAN log group retention asserted (Lambda retired, logs kept)"
 done

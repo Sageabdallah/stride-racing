@@ -6,7 +6,10 @@ set -euo pipefail
 source "$(dirname "$0")/00_prereqs.sh"
 aws lambda get-function --function-name stride-weekly-digest >/dev/null
 aws scheduler get-schedule --name stride-digest-mon >/dev/null
-# Runtime split sanity: the five Lambda jobs and the nine Fargate tasks.
+# Runtime split sanity: the four Lambda jobs and the ten Fargate tasks. The
+# fifth Lambda was calibrator-coverage, deleted once it had been on Fargate
+# since 5606924 -- an unreachable function that still listed in the console.
+# weekly-digest is the fourth; it is asserted above rather than in this loop.
 for fn in stride-tip-time-snapshot stride-late-odds-watch stride-bsp-settle; do
   aws lambda get-function --function-name "$fn" >/dev/null
 done
