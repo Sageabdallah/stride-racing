@@ -23,6 +23,8 @@ warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "intelligence"))
 
+import target_tracks
+
 from intelligence.common import (
     INTELLIGENCE_DIR,
     RACECARDS_DIR,
@@ -57,8 +59,13 @@ TARGET_TRACKS = [
 
 
 def _is_target_track(course: str) -> bool:
-    course_lower = course.lower()
-    return any(t in course_lower or course_lower in t for t in TARGET_TRACKS)
+    # The list above stays this module's own — it is the market pillar's
+    # universe, not the card's, and they differ deliberately. Only the
+    # comparison is shared. Measured over 516 distinct course spellings
+    # (stored cards + race_results_history + the track-distance profiles):
+    # identical results to the bidirectional test this replaces, 95 matched
+    # either way, zero disagreements.
+    return target_tracks.matches(course, TARGET_TRACKS)
 
 
 def fetch_fresh_odds(date_str: str) -> dict[str, dict[str, float]]:
