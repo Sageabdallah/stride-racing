@@ -1,0 +1,301 @@
+# .github/workflows/tips-watch.yml
+#
+# The 10:00 Fargate tips task has no outcome check. infra/EXECUTION_STATUS.md
+# calls it "worst case in the stack" and it is the only one of the three
+# chained morning jobs with nothing watching what it produced — consensus has
+# morning-watch, the racecard has its own exit contract, tips has neither.
+#
+# Same shape as morning-watch.yml deliberately: connectivity is probed on its
+# own before anything schema-dependent, so a broken query can never report
+# itself as a network problem. That separation is not decoration — collapsing
+# the two is what let a wrong column name make that watcher permanently blind
+# while still running nightly and filing issues.
+#
+# WHAT IS COUNTED, and what is not:
+#
+#   prediction_audit  — one row per runner the pipeline scored. This is the
+#                       question "did the pipeline produce anything at all".
+#   selection_ledger  — one row per actual bet. NOT used here. A day where
+#                       every runner gates to NO_BET is a legitimate outcome,
+#                       not a failure; infra/jobs/handler.py says so at the
+#                       tips job and declines to assert a bet count for the
+#                       same reason. Watching it would file an issue for a
+#                       correctly cautious day.
+#
+#   rows > 0        -> silent
+#   rows == 0, quiet-> silent. No racecard means no runners to score.
+#   rows == 0, card -> @claude issue. The pipeline had races and produced
+#                      nothing: the silent no-op class.
+#   rows == 0, none -> @claude issue aimed at the racecard path.
+#   query broken    -> @claude issue. The watcher's own SQL.
+#   unreachable     -> plain issue, no @claude. An agent cannot fix a network path.
+
+name: Tips outcome watch
+
+on:
+  schedule:
+    # 00:30 UTC == 10:30 AEST. The 10:00 Fargate task gets 30 minutes; the tips
+    # pipeline is the longest of the morning chain (~2-5 min per track, and it
+    # runs after a consensus load), so it gets more slack than morning-watch's
+    # 20. Revisit in October when AEDT starts and this drifts an hour.
+    - cron: "30 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read        # to read the pf-morning-racecards artifact
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Query prediction_audit for today
+        id: q
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set +e
+          TODAY=$(TZ=Australia/Sydney date +%F)
+          echo "target_date=$TODAY" >> "$GITHUB_OUTPUT"
+
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "status=query_broken" >> "$GITHUB_OUTPUT"
+            {
+              echo "err<<STRIDE_ERR_EOF"
+              echo "psql is not on the runner, so no check ran. This is not a network"
+              echo "problem and the tips outcome is unverified."
+              echo "STRIDE_ERR_EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          psql "$DATABASE_URL" -tAc "select 1;" >/dev/null 2>conn_err.txt
+          if [ $? -ne 0 ]; then
+            echo "status=unreachable" >> "$GITHUB_OUTPUT"
+            {
+              echo "err<<STRIDE_ERR_EOF"
+              head -c 2000 conn_err.txt
+              echo ""
+              echo "STRIDE_ERR_EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ROWS=$(psql "$DATABASE_URL" -tAc \
+            "select count(*) from prediction_audit where race_date = '$TODAY';" 2>q_err.txt)
+          if [ $? -ne 0 ]; then
+            echo "status=query_broken" >> "$GITHUB_OUTPUT"
+            {
+              echo "err<<STRIDE_ERR_EOF"
+              head -c 2000 q_err.txt
+              echo ""
+              echo "STRIDE_ERR_EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # psql exited 0 but a non-numeric answer means this is not counting
+          # what it claims to. Broken, not zero — reading it as zero would file
+          # a false silent-no-op report.
+          case "$ROWS" in
+            ''|*[!0-9]*)
+              echo "status=query_broken" >> "$GITHUB_OUTPUT"
+              {
+                echo "err<<STRIDE_ERR_EOF"
+                echo "psql exited 0 but returned a non-numeric count: '${ROWS}'"
+                echo "STRIDE_ERR_EOF"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          echo "rows=$ROWS" >> "$GITHUB_OUTPUT"
+          if [ "$ROWS" -gt 0 ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=empty" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Was there anything to tip?
+        # Self-validating by filename: if the most recent racecard run is stale,
+        # neither file carries today's date and the verdict is racecard_dead,
+        # which is the correct reading of "today's 05:30 produced nothing".
+        id: card
+        if: steps.q.outputs.status == 'empty'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TODAY: ${{ steps.q.outputs.target_date }}
+        run: |
+          set +e
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow pf-morning-racecards.yml --limit 1 \
+            --json databaseId --jq '.[0].databaseId')
+          rm -rf card_art && mkdir -p card_art
+          if [ -n "$RUN_ID" ]; then
+            gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              -n racecard -D card_art >/dev/null 2>&1
+          fi
+          if [ -f "card_art/quiet_$TODAY.json" ]; then
+            echo "verdict=quiet" >> "$GITHUB_OUTPUT"
+          elif [ -f "card_art/racecard_$TODAY.json" ]; then
+            echo "verdict=card" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=racecard_dead" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Quiet day — nothing to report
+        if: steps.q.outputs.status == 'empty' && steps.card.outputs.verdict == 'quiet'
+        env:
+          TODAY: ${{ steps.q.outputs.target_date }}
+        run: |
+          {
+            echo "## Tips watch — $TODAY"
+            echo
+            echo "**Quiet day.** No target-track racing, so there were no runners to"
+            echo "score and \`prediction_audit\` is correctly empty. No issue filed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tips produced nothing — escalate to Claude
+        if: >-
+          steps.q.outputs.status == 'empty'
+          && steps.card.outputs.verdict != 'quiet'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_DATE: ${{ steps.q.outputs.target_date }}
+          VERDICT: ${{ steps.card.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          TITLE="Tips watch: no predictions for ${TARGET_DATE}"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label auto-triage --search "\"$TITLE\" in:title" \
+            --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then
+            echo "Already filed for ${TARGET_DATE}."
+            exit 0
+          fi
+
+          if [ "$VERDICT" = "racecard_dead" ]; then
+            START="the 05:30 \`pf-morning-racecards\` run produced neither a racecard nor a
+          quiet-day sentinel for this date, so the pipeline had nothing to work from.
+          Start at the racecard path, not the tips path."
+          else
+            START="a racecard WAS built for this date, so there were races to score. This is
+          the silent no-op class: the 10:00 tips task exited without producing output.
+          Start at \`run_tips_pipeline.py\` and the Fargate task logs."
+          fi
+
+          cat > body.md <<EOF
+          \`prediction_audit\` has zero rows for \`${TARGET_DATE}\`.
+
+          Racecard verdict for the date: \`${VERDICT:-unknown}\` — ${START}
+
+          Note this counts \`prediction_audit\` (runners scored), not \`selection_ledger\`
+          (bets placed). A day where every runner gates to NO_BET is a legitimate outcome
+          and would not reach here; zero scored runners is not.
+
+          @claude Investigate and open a pull request if the cause is clear.
+
+          Rules for this task:
+          - Open a PR against \`main\`. Never commit to \`main\` directly.
+          - Do not touch anything under \`infra/*.sh\`.
+          - Do not backfill or insert rows to make the check pass. The empty table is the
+            symptom; find what upstream of it returned nothing.
+          - If the cause is not clear from the logs, comment with findings and open no PR.
+          EOF
+
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+            --label auto-triage --body-file body.md
+
+      - name: Watcher query broken — escalate to Claude
+        if: steps.q.outputs.status == 'query_broken'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ERR: ${{ steps.q.outputs.err }}
+        run: |
+          set -euo pipefail
+          TITLE="Tips watch query is broken"
+          # Date-free title, like morning-watch's: a wrong query fails identically
+          # every day until someone merges a fix, and every issue wakes an agent.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label auto-triage --search "\"$TITLE\" in:title" \
+            --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then
+            echo "Already an open issue for the broken watcher query."
+            exit 0
+          fi
+          cat > body.md <<EOF
+          The database answered \`select 1\`, so the warehouse is reachable and the
+          credential is good. This watcher's own query then failed, which means the tips
+          outcome has been unverified since it started failing.
+
+          \`\`\`
+          ${ERR}
+          \`\`\`
+
+          @claude Fix the watcher query in \`.github/workflows/tips-watch.yml\`.
+
+          Rules for this task:
+          - Open a PR against \`main\`. Never commit to \`main\` directly.
+          - Do not touch anything under \`infra/*.sh\`.
+          - Do not delete or weaken the check to make it pass.
+          EOF
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+            --label auto-triage --body-file body.md
+
+      - name: Watcher blind — notify, do not escalate
+        if: steps.q.outputs.status == 'unreachable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ERR: ${{ steps.q.outputs.err }}
+        run: |
+          set -euo pipefail
+          TITLE="Tips watch cannot reach the database"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label watcher-health --search "\"$TITLE\" in:title" \
+            --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then
+            echo "Already an open issue for watcher connectivity."
+            exit 0
+          fi
+          cat > body.md <<EOF
+          The tips watcher could not connect to the warehouse, so today's tips outcome is
+          unverified. This is not a claim that tips failed — it is a claim that nobody
+          checked.
+
+          \`\`\`
+          ${ERR}
+          \`\`\`
+
+          No agent tagged: an agent cannot fix a network path or a rotated credential from
+          a runner, and pointing one at an unreachable database spends turns to conclude
+          the same thing.
+          EOF
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+            --label watcher-health --body-file body.md
+
+      - name: Clear the query-broken suppressor
+        # Runs whenever the query demonstrably executed — `empty` proves that as
+        # well as `ok` does, and a run of quiet days must not keep a stale
+        # suppressor alive, which would silently hide the next genuine break.
+        if: steps.q.outputs.status == 'ok' || steps.q.outputs.status == 'empty'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Tips watch query is broken"
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label auto-triage --search "\"$TITLE\" in:title" \
+            --json number --jq '.[].number' > stale.txt
+          [ -s stale.txt ] || { echo "Nothing to clear."; exit 0; }
+          TODAY=$(TZ=Australia/Sydney date +%F)
+          while read -r n; do
+            [ -n "$n" ] || continue
+            gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
+              --comment "Closed automatically: the watcher query executed successfully on ${TODAY}. The next failure files a fresh issue; this one must not sit open suppressing it."
+          done < stale.txt
+
+      - name: Report
+        run: |
+          echo "status=${{ steps.q.outputs.status }} rows=${{ steps.q.outputs.rows }} racecard=${{ steps.card.outputs.verdict }}"

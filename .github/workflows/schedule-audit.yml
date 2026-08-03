@@ -19,6 +19,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  issues: write
 
 jobs:
   audit:
@@ -31,6 +32,7 @@ jobs:
           aws-region: ap-southeast-2
 
       - name: Report every schedule and its state
+        id: audit
         run: |
           aws scheduler list-schedules \
             --query 'sort_by(Schedules,&Name)[].[Name,State]' \
@@ -52,7 +54,70 @@ jobs:
             grep DISABLED /tmp/sched.txt | while read -r N _; do
               echo "::warning::$N is DISABLED — it will not fire"
             done
+            grep DISABLED /tmp/sched.txt | awk '{print $1}' > /tmp/disabled.txt
+            echo "disabled_names<<STRIDE_EOF" >> "$GITHUB_OUTPUT"
+            cat /tmp/disabled.txt >> "$GITHUB_OUTPUT"
+            echo "STRIDE_EOF" >> "$GITHUB_OUTPUT"
           fi
+          echo "disabled=$DISABLED" >> "$GITHUB_OUTPUT"
           # Zero schedules means the deploy never ran or they were deleted;
           # that is a real failure, unlike a deliberate disable.
           [ "$TOTAL" -gt 0 ]
+
+      - name: A disabled schedule gets an issue, not just a warning
+        # The header of this file says a DISABLED schedule is a warning and
+        # never a failure, and that stays true — this job does not go red for
+        # one. But the warning was the whole report, and a ::warning:: sits
+        # inside the run summary of a workflow nobody opens: schedule-audit was
+        # not even in auto-triage's watch list until now. A schedule silently
+        # not firing is precisely what this audit exists to catch, so the
+        # finding has to leave the run.
+        #
+        # Deduped on a date-free title. A schedule stays disabled until someone
+        # acts, and this runs daily; without the dedupe it files every morning.
+        if: steps.audit.outputs.disabled != '0' && steps.audit.outputs.disabled != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NAMES: ${{ steps.audit.outputs.disabled_names }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="EventBridge schedules are DISABLED"
+
+          EXISTING=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label auto-triage \
+            --search "\"$TITLE\" in:title" \
+            --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then
+            echo "Already an open issue for disabled schedules. Not filing again."
+            exit 0
+          fi
+
+          {
+            echo "The daily schedule audit found EventBridge schedules in state \`DISABLED\`."
+            echo "A disabled schedule does not fire, and nothing else in the system notices:"
+            echo "there is no failed run to trace, because there is no run."
+            echo
+            echo '```'
+            echo "$NAMES"
+            echo '```'
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "This may well be deliberate — a hand-disable during an incident, or a"
+            echo "schedule intentionally parked. It is filed so that the decision is visible"
+            echo "rather than assumed. Re-enable it, or close this issue to record that the"
+            echo "disable is intended."
+            echo
+            echo "Not tagging an agent: whether a schedule should be running is an operator"
+            echo "judgement, and \`infra/*.sh\` re-enabling is off limits to unattended runs"
+            echo "because \`update-schedule\` is full-replacement."
+          } > body.md
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --label auto-triage \
+            --body-file body.md

@@ -12,9 +12,10 @@ on:
   workflow_run:
     # Names match the `name:` field inside each workflow file, not the filename.
     #
-    # Deliberately excludes the three workflows added alongside this one
-    # (Auto-triage CI failure, Claude, Morning outcome watch) — watching itself
-    # or the responder turns one failure into a loop.
+    # Deliberately excludes this workflow, the responder (Claude), and the two
+    # outcome watchers (Morning outcome watch, Tips outcome watch) — watching
+    # itself or the responder turns one failure into a loop, and the watchers
+    # already file their own issues with far better diagnostics than a log tail.
     #
     # Also excludes the push-triggered probes (pf-verify, puntingform-probe,
     # racing-com-probe, pf-backfill) and the manual-dispatch analysis jobs. Those
@@ -27,6 +28,9 @@ on:
       - "pf-morning-racecards"    # 05:30 AEST, feeds everything downstream
       - "betfair-odds-snapshot"   # 07:45 and 10:45 AEST price capture
       - "pf-evening-results"      # 20:30 AEST settlement; the silent-no-op fixed in 7fae98c
+      - "sectional-schedules"     # Sun/Wed 21:00 AEST; three collectors with row gates
+      - "schedule-audit"          # 04:20 AEST; fails only when the account has ZERO schedules
+      - "evidence-audit"          # 04:25 AEST; fails when the evidence store is unreadable
     types: [completed]
 
 permissions:
@@ -35,6 +39,61 @@ permissions:
   actions: read
 
 jobs:
+  resolved:
+    # A success closes the open issue for the same workflow.
+    #
+    # Without this, a fixed problem leaves its issue open forever. That is not
+    # just untidy: the dedupe above keys on workflow + commit, so a stale open
+    # issue for a workflow that has since been fixed and has since failed again
+    # on a NEW commit does file a fresh issue — but the backlog of resolved-yet-
+    # open issues makes the label useless for telling what is actually broken
+    # right now. morning-watch.yml already does exactly this for its own
+    # suppressor, with the same reasoning; this is that pattern applied here.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Close triage issues for a workflow that now passes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WF_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          # Title prefix only — the sha differs per issue, so this closes every
+          # open report for this workflow, not just the most recent commit's.
+          gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label auto-triage \
+            --search "\"Auto-triage: ${WF_NAME} failed on\" in:title" \
+            --json number,title --jq '.[] | select(.title | startswith("Auto-triage: '"${WF_NAME}"' failed on")) | .number' > resolved.txt
+
+          if [ ! -s resolved.txt ]; then
+            echo "No open triage issue for ${WF_NAME}."
+            exit 0
+          fi
+
+          cat > closed.md <<EOF
+          Closed automatically: \`${WF_NAME}\` passed on \`main\`.
+
+          Run: ${RUN_URL}
+
+          If the underlying cause was not actually fixed, the next failure files a fresh
+          issue. This one should not sit open in the meantime — a backlog of
+          resolved-but-open reports makes the \`auto-triage\` label stop meaning
+          "currently broken", which is the only thing it is useful for.
+          EOF
+
+          while read -r n; do
+            [ -n "$n" ] || continue
+            echo "Closing #$n — ${WF_NAME} passed."
+            gh issue close "$n" --repo "$GITHUB_REPOSITORY" --comment "$(cat closed.md)"
+          done < resolved.txt
+
   triage:
     # Only main. Feature-branch failures are yours to look at, not the agent's.
     if: >
