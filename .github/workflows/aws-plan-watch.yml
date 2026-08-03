@@ -1,0 +1,177 @@
+# .github/workflows/aws-plan-watch.yml
+#
+# The account is on the AWS Free Plan. That is already a harder spending cap
+# than anything we could build — credits cover usage and AWS ends access when
+# they run out, so the out-of-pocket ceiling is $0. The risk is therefore not a
+# bill. It is an OUTAGE, and an outage here is worse than a bill: gate 1's clock
+# has been accruing since 2 Aug and the retrain gate needs unbroken snapshot
+# odds, so a cutoff stops collecting evidence rather than costing money, and the
+# first symptom would be a hole in the data.
+#
+# Two things end access, and only one of them is spending:
+#   credits depleted     -> needs ~28x the current burn rate to happen at all
+#   free period expires   -> 01 Feb 2027, regardless of how little is spent
+#
+# The second is the binding constraint and it arrives on a fixed date, so this
+# watches the calendar as much as the money.
+#
+# The budget email in infra/03_notifications.sh covers burn rate too, but its
+# SNS subscription has never been confirmed working — this path files a GitHub
+# issue instead, which needs nobody to have clicked a confirmation link in
+# August to still work in January.
+
+name: aws-plan-watch
+
+on:
+  schedule:
+    # Weekly, Mondays 21:30 UTC (07:30 AEST Tue). Nothing here changes fast;
+    # the point is that it cannot go unnoticed for a whole month.
+    - cron: "30 21 * * 1"
+  workflow_dispatch:
+
+permissions:
+  id-token: write     # OIDC assume-role
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # Free Tier and Cost Explorer are global services that answer in
+      # us-east-1. The deploy's ap-southeast-2 default is what made the budget
+      # call in 03_notifications.sh fail silently on every run since the account
+      # opened — do not repeat it here.
+      AWS_REGION: us-east-1
+      FREE_PERIOD_END: "2027-02-01"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: us-east-1
+
+      - name: Read plan state and month-to-date spend
+        id: q
+        run: |
+          set +e
+          # Field names in get-account-plan-state are not pinned by anything we
+          # control, so key the decision off a value we can see and dump the raw
+          # JSON into the issue rather than asserting a shape that may drift.
+          PLAN_JSON=$(aws freetier get-account-plan-state --output json 2>plan_err.txt)
+          if [ $? -ne 0 ]; then
+            echo "status=unreadable" >> "$GITHUB_OUTPUT"
+            {
+              echo "err<<EOF"; head -c 2000 plan_err.txt; echo ""; echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$PLAN_JSON" > plan.json
+          PLAN_TYPE=$(jq -r '.accountPlanType // "UNKNOWN"' plan.json)
+          echo "plan_type=$PLAN_TYPE" >> "$GITHUB_OUTPUT"
+
+          TODAY=$(date -u +%F)
+          MONTH_START=$(date -u +%Y-%m-01)
+          # End is exclusive; tomorrow captures everything booked so far today.
+          TOMORROW=$(date -u -d "+1 day" +%F)
+          MTD=$(aws ce get-cost-and-usage \
+            --time-period Start=$MONTH_START,End=$TOMORROW \
+            --granularity MONTHLY --metrics UnblendedCost \
+            --query 'ResultsByTime[0].Total.UnblendedCost.Amount' \
+            --output text 2>ce_err.txt)
+          [ $? -ne 0 ] && MTD="unknown"
+          echo "mtd=$MTD" >> "$GITHUB_OUTPUT"
+
+          DAYS_LEFT=$(( ( $(date -u -d "$FREE_PERIOD_END" +%s) - $(date -u -d "$TODAY" +%s) ) / 86400 ))
+          echo "days_left=$DAYS_LEFT" >> "$GITHUB_OUTPUT"
+
+          # Ordered by how much they change what you would do. Losing the plan
+          # means the $0 ceiling is gone entirely, which matters more than any
+          # number; the cliff is next because it is unavoidable; spend last
+          # because at the current rate it is the least likely of the three.
+          if [ "$PLAN_TYPE" != "FREE" ]; then
+            echo "status=plan_changed" >> "$GITHUB_OUTPUT"
+          elif [ "$DAYS_LEFT" -lt 45 ]; then
+            echo "status=expiring" >> "$GITHUB_OUTPUT"
+          elif [ "$MTD" != "unknown" ] && awk "BEGIN{exit !($MTD > 20)}"; then
+            echo "status=burn_high" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: File or refresh the issue
+        if: steps.q.outputs.status != 'ok'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATUS: ${{ steps.q.outputs.status }}
+          PLAN_TYPE: ${{ steps.q.outputs.plan_type }}
+          MTD: ${{ steps.q.outputs.mtd }}
+          DAYS_LEFT: ${{ steps.q.outputs.days_left }}
+          ERR: ${{ steps.q.outputs.err }}
+        run: |
+          set -euo pipefail
+          TITLE="AWS plan watch: $STATUS"
+
+          # Date-free title, deduped like the morning-watch query-broken branch:
+          # every one of these conditions persists until a human acts, so filing
+          # weekly would bury the first report under fifty copies of itself.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label watcher-health --search "\"$TITLE\" in:title" \
+            --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then
+            echo "Already open for $STATUS. Not filing again."
+            exit 0
+          fi
+
+          {
+            case "$STATUS" in
+              plan_changed)
+                echo "The account is no longer reporting \`accountPlanType: FREE\` — it now reads \`$PLAN_TYPE\`."
+                echo ""
+                echo "**The \$0 ceiling is gone.** On the Free Plan, AWS ends access when credits"
+                echo "run out and never charges. Off it, usage past the remaining credits is billed"
+                echo "with no cap. If this was deliberate, close this issue and build a real spend"
+                echo "guard. If nobody pressed Upgrade plan, find out what did."
+                ;;
+              expiring)
+                echo "The AWS free period ends on \`${FREE_PERIOD_END}\` — **${DAYS_LEFT} days**."
+                echo ""
+                echo "This arrives on a fixed date no matter how little is spent, and when it"
+                echo "does, access to AWS services ends. Every scheduled job in this repo stops:"
+                echo "the tips chain, the odds snapshots, the gate clocks. Decide now whether to"
+                echo "upgrade to the Paid Plan or to move the workload."
+                ;;
+              burn_high)
+                echo "Month-to-date spend is **\$${MTD}**, over the \$20 tripwire."
+                echo ""
+                echo "Steady state is around \$0.03/day, so this is roughly 25x normal and means"
+                echo "something is looping rather than that the system got busy. Credits still"
+                echo "cover it — this costs nothing today — but at this rate they deplete before"
+                echo "the free period ends, and depletion ends access."
+                echo ""
+                echo "Find the service that moved: \`aws ce get-cost-and-usage --group-by Type=DIMENSION,Key=SERVICE\`."
+                ;;
+              unreadable)
+                echo "Could not read the account plan state, so the free-plan status and the"
+                echo "distance to the credit cliff are both **unknown** this week."
+                echo ""
+                echo '```'
+                echo "${ERR}"
+                echo '```'
+                ;;
+            esac
+            echo ""
+            echo "_No @claude tag: every branch here is a decision about money and account"
+            echo "state, not a code defect an agent should act on unattended._"
+          } > body.md
+
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+            --label watcher-health --body-file body.md
+
+      - name: Report
+        run: |
+          echo "status=${{ steps.q.outputs.status }} plan=${{ steps.q.outputs.plan_type }}" \
+               "mtd=${{ steps.q.outputs.mtd }} days_left=${{ steps.q.outputs.days_left }}"
