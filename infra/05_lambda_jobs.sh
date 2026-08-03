@@ -94,8 +94,17 @@ for spec in "${JOBS[@]}"; do
   fi
   aws lambda put-function-event-invoke-config --function-name "$FN" \
     --maximum-retry-attempts 2 >/dev/null
+  # Same defect 07_fargate_heavy.sh already fixed, still live on this side:
+  # Lambda creates its log group on first INVOCATION, not at create-function,
+  # so on a fresh account put-retention-policy hit a group that did not exist
+  # yet and `2>/dev/null || true` swallowed the failure. Functions that have
+  # never run — tip-time-snapshot until today — therefore create their group
+  # with unlimited retention and keep it until some later deploy happens to
+  # land after their first invocation. Create the group first, and let the
+  # retention call fail loudly if it fails.
+  aws logs create-log-group --log-group-name "/aws/lambda/$FN" 2>/dev/null || true
   aws logs put-retention-policy --log-group-name "/aws/lambda/$FN" \
-    --retention-in-days 14 2>/dev/null || true
+    --retention-in-days 14
   aws cloudwatch put-metric-alarm --alarm-name "$FN-errors" \
     --namespace AWS/Lambda --metric-name Errors \
     --dimensions Name=FunctionName,Value="$FN" \
