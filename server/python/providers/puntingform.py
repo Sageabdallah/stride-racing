@@ -61,6 +61,7 @@ class PuntingFormProvider(RacingDataProvider):
         self._bridge_map: Optional[Dict[str, str]] = None
         self._scratch_map: Optional[Dict] = None
         self._noted = set()
+        self._last_discovery: Optional[Dict] = None
 
     def has_credentials(self) -> bool:
         return bool((os.environ.get("PUNTINGFORM_API_KEY") or "").strip())
@@ -125,29 +126,57 @@ class PuntingFormProvider(RacingDataProvider):
     # ------------------------------------------------------------------
 
     def fetch_meets(self, date_str: str) -> List[Dict]:
+        # Reset first so discovery_stats() can never describe a previous call.
+        self._last_discovery = {"raw": None, "country_kept": 0,
+                                "country_missing": 0, "error": None, "listed": []}
         try:
             meetings = pf_client.meetings_for_date(date_str)
         except pf_client.PFError as e:
             # Contract: empty list on upstream failure. download_racecards
             # then exits 1 on the empty day, so the failure stays loud.
+            # raw stays None, which is what marks this as "we never found out"
+            # rather than "we asked and the calendar was empty".
+            self._last_discovery["error"] = str(e)
             print(f"  [{self.name}] meetings fetch failed: {e}", file=sys.stderr)
             return []
 
+        meetings = meetings or []
+        self._last_discovery["raw"] = len(meetings)
+
         meets = []
-        for meeting in meetings or []:
+        for meeting in meetings:
             track = meeting.get("track") or {}
+            country = track.get("country")
+            if country is None:
+                # Counted, not just skipped. If PF ever renames or drops this
+                # field, every meeting silently fails the filter below and the
+                # day reads as "no racing in Australia" — which is never true.
+                # The count is what lets the caller say so out loud.
+                self._last_discovery["country_missing"] += 1
             # AUS-only mirrors the retired /v1/australia endpoint; barrier-trial
             # meetings stay in so races get tagged, not dropped (the
             # TARGET_TRACKS filter downstream is unchanged).
-            if track.get("country") != "AUS":
+            if country != "AUS":
                 continue
+            self._last_discovery["country_kept"] += 1
             meeting_id = meeting.get("meetingId")
             course = track.get("name") or ""
             if meeting_id is None or not course:
                 continue
+            self._last_discovery["listed"].append({
+                "course": course,
+                "state": track.get("state"),
+                "location": track.get("location"),
+                "surface": track.get("surface"),
+                "tab_meeting": meeting.get("tabMeeting"),
+                "is_trial": bool(meeting.get("isBarrierTrial")),
+            })
             self._meet_info[str(meeting_id)] = meeting
             meets.append({"meet_id": str(meeting_id), "course": course})
         return meets
+
+    def discovery_stats(self) -> Optional[Dict]:
+        return self._last_discovery
 
     def _scratchings(self) -> Dict:
         """(meetingId, raceNo, tabNo) -> deduction for every upcoming

@@ -260,6 +260,125 @@ def test_empty_meetings_list_exits_1_and_writes_nothing(monkeypatch, tmp_path):
 
 
 # ----------------------------------------------------------------------
+# quiet day vs outage
+#
+# 2026-08-03 is the real day this contract was written for: Punting Form
+# answered normally with four meetings (Lismore, Goulburn, Fannie Bay,
+# Pakenham Synthetic), none on TARGET_TRACKS, and the old code exited 1 with
+# "No data downloaded" — indistinguishable from a dead feed. Measured against
+# race_results_history, 28 of the 75 days to that date had no target-track
+# racing, so this was a red about three mornings a week.
+#
+# The track names and states in pf_meetingslist_2026-08-03.json are the real
+# ones, taken from the failing run (actions/runs/30765698361). The meetingIds
+# and rail/condition values are shape-accurate stand-ins: the live payload was
+# not capturable offline, and nothing here depends on those values.
+# ----------------------------------------------------------------------
+
+def test_quiet_day_writes_sentinel_and_exits_0(monkeypatch, tmp_path):
+    """The whole point. No card, no exception, no red — and a file on disk so
+    the zero is evidence-backed rather than silent."""
+    meetings = _fixture("pf_meetingslist_2026-08-03.json")
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, lambda mid: {})
+
+    _run_download(monkeypatch, "2026-08-03")   # must not raise SystemExit
+
+    assert not list(out_dir.glob("racecard_*.json")), "a quiet day writes no card"
+    sentinel = out_dir / "quiet_2026-08-03.json"
+    assert sentinel.exists()
+
+    body = json.loads(sentinel.read_text())
+    assert body["status"] == "quiet"
+    assert body["meetings_listed"] == 4
+    assert body["meetings_after_country_filter"] == 4
+    assert body["meetings_matched"] == 0
+    assert body["target_count"] == len(download_racecards.TARGET_TRACKS)
+
+
+def test_quiet_day_sentinel_names_every_listed_meeting(monkeypatch, tmp_path):
+    """A count alone would not answer 'should the target list widen?'. The
+    sentinel carries the metadata that question needs."""
+    meetings = _fixture("pf_meetingslist_2026-08-03.json")
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, lambda mid: {})
+    _run_download(monkeypatch, "2026-08-03")
+
+    listed = json.loads((out_dir / "quiet_2026-08-03.json").read_text())["listed"]
+    assert [m["course"] for m in listed] == [
+        "Lismore", "Goulburn", "Fannie Bay", "Pakenham Synthetic"]
+    assert [m["state"] for m in listed] == ["NSW", "NSW", "NT", "VIC"]
+    assert listed[3]["surface"] == "Synthetic"
+    assert all(m["tab_meeting"] is True for m in listed)
+    assert all(m["is_trial"] is False for m in listed)
+
+
+def test_quiet_day_makes_no_detail_calls(monkeypatch, tmp_path):
+    """A quiet day costs one API call, not one per meeting. Mirrors the
+    filtering guard the golden test makes on the target-meeting path."""
+    def detail_fn(meeting_id):
+        raise AssertionError(f"quiet day fetched meeting_detail({meeting_id})")
+
+    meetings = _fixture("pf_meetingslist_2026-08-03.json")
+    _wire(monkeypatch, tmp_path, lambda d: meetings, detail_fn)
+    _run_download(monkeypatch, "2026-08-03")
+
+
+def test_country_field_dropped_exits_1_not_quiet(monkeypatch, tmp_path):
+    """The degenerate case with no live rehearsal: if PF stops sending
+    track.country, every meeting fails the AUS filter and the day looks
+    exactly like a quiet one. It is an outage, and the pre-filter count is
+    what proves it."""
+    meetings = _fixture("pf_meetingslist_2026-08-03.json")
+    for m in meetings:
+        m["track"].pop("country")
+
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, lambda mid: {})
+    with pytest.raises(SystemExit) as exc:
+        _run_download(monkeypatch, "2026-08-03")
+    assert exc.value.code == 1
+    assert not list(out_dir.glob("quiet_*.json")), "an outage is not a quiet day"
+    assert not list(out_dir.glob("racecard_*.json"))
+
+
+def test_all_target_meetings_deliver_no_races_exits_3(monkeypatch, tmp_path):
+    """A target meeting that delivers nothing is partial data, not a quiet
+    day — `expected` is what separates them."""
+    meetings = _fixture("pf_meetingslist_2026-08-01.json")   # includes Randwick
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, lambda mid: [])
+    with pytest.raises(SystemExit) as exc:
+        _run_download(monkeypatch, "2026-08-01")
+    assert exc.value.code == 3
+    assert not list(out_dir.glob("quiet_*.json"))
+    assert not list(out_dir.glob("racecard_*.json"))
+
+
+def test_sentinel_write_failure_exits_1(monkeypatch, tmp_path):
+    """The one hole a quiet day could still fall through: exit 0 having
+    written nothing. Blocking the write must go red, not quiet."""
+    meetings = _fixture("pf_meetingslist_2026-08-03.json")
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, lambda mid: {})
+    # A directory where the sentinel wants to be: open(..., "w") raises
+    # IsADirectoryError, an OSError, without needing filesystem permissions.
+    (out_dir / "quiet_2026-08-03.json").mkdir(parents=True)
+
+    with pytest.raises(SystemExit) as exc:
+        _run_download(monkeypatch, "2026-08-03")
+    assert exc.value.code == 1
+
+
+def test_empty_target_list_is_config_error_not_quiet(monkeypatch, tmp_path):
+    """An empty target list would make every day quiet and the whole morning
+    green while producing nothing. Config error, before any fetch."""
+    def no_fetch(date_str):
+        raise AssertionError("fetched with an empty target list")
+
+    _wire(monkeypatch, tmp_path, no_fetch, lambda mid: {})
+    monkeypatch.setattr(download_racecards, "TARGET_TRACKS", [])
+    with pytest.raises(SystemExit) as exc:
+        _run_download(monkeypatch, "2026-08-03")
+    assert exc.value.code == 2
+
+
+# ----------------------------------------------------------------------
 # factory
 # ----------------------------------------------------------------------
 
