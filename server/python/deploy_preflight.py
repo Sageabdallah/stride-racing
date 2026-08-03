@@ -6,21 +6,29 @@ deploy session. It *reports* state — it never blindly re-applies a migration
 (prediction_audit_unique_key.sql and final_prob_audit.sql are already applied in
 prod; re-running them is noise, not signal).
 
-  SCHEMA board   — do the objects the writers require exist yet?
-  LIVENESS board — is each pipeline actually PRODUCING rows, or frozen?
+  DEPLOYMENT board — are the running bytes built from current main?
+  SCHEMA board     — do the objects the writers require exist yet?
+  LIVENESS board   — is each pipeline actually PRODUCING rows, or frozen?
 
-The liveness board is the one that matters. Schema can be all-green while the
-tips pipeline has been dead for months: the 2026-04-19 freeze (selections /
-stride_tip_results / race_schedule all stop) happened *before* the audit-index
-fix landed in July, so "deploy HEAD -> self-heal -> rows land" does NOT restart
-it. The single highest-value check here is "did tipping run for the latest race
-day?" — max(race_date) on selections vs the race calendar. That is what a
-schema-only check would have shown green while nothing tipped for three months.
+The liveness board is the one that matters. Schema can be all-green while
+nothing has tipped for months: selections / stride_tip_results / race_schedule
+all stop at 2026-04-19 and do not resume until 2026-08-02. That particular stop
+was the operator pausing the pipeline deliberately, not a fault — recorded in
+infra/EXECUTION_STATUS.md, and not worth re-investigating — but it is the exact
+shape a real freeze would have, which is the point: only a liveness check can
+tell the two apart, and only by asking a human. The single highest-value probe
+here is "did tipping run for the latest race day?" — max(race_date) on
+selections vs the race calendar. A schema-only check reads green throughout.
+
+The deployment board answers a different question that used to have no owner:
+main can move without AWS moving, because deploy-infra is dispatch-only. See
+check_deployment for what it compares and why it is path-scoped.
 
 Usage:
   python deploy_preflight.py                  # full board; exit 1 if any RED
   python deploy_preflight.py --stale-days 3   # freshness tolerance (default 3)
   python deploy_preflight.py --json           # machine-readable board
+  python deploy_preflight.py --skip-deployment  # offline; skips the github call
 """
 
 from __future__ import annotations
@@ -28,11 +36,34 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 GREEN, RED, AMBER, UNKNOWN = "GREEN", "RED", "AMBER", "UNKNOWN"
 SYM = {GREEN: "OK  ", RED: "FAIL", AMBER: "PEND", UNKNOWN: "??  "}
+
+# Exactly the paths infra/Dockerfile COPYs into the image, plus the Dockerfile
+# itself. Anything outside this set can move on main without changing a single
+# byte of what the jobs run, and must not raise an alarm — CLAUDE.md-only
+# commits are routine and a SHA-equality check would fire on every one of them.
+# Keep in step with infra/Dockerfile; test_deploy_freshness asserts they match.
+IMAGE_PATHS = (
+    "requirements.txt",
+    "server/python/",
+    "migrations/",
+    "infra/jobs/",
+    "infra/entrypoint.sh",
+    "infra/Dockerfile",
+)
+
+DEFAULT_REPO = "Sageabdallah/stride-racing"
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# The compare API caps its file list. Past the cap we cannot prove the drift is
+# irrelevant, so the answer is RED, not a guess.
+_COMPARE_FILE_CAP = 300
 
 
 def _connect():
@@ -65,6 +96,100 @@ def _scalar(conn, sql, params=None):
 
 def _row(name, status, detail=""):
     return {"name": name, "status": status, "detail": detail}
+
+
+# ---------------------------------------------------------------------------
+# DEPLOYMENT board — do the running bytes match main?
+# ---------------------------------------------------------------------------
+#
+# deploy-infra is dispatch-only and deliberately stays that way, so a merge
+# that changes job behaviour does not reach AWS until someone runs it. Nothing
+# noticed the gap. On 2026-08-03 the quiet-day work sat on main for an hour
+# while Fargate ran the previous image: the GitHub crons had the fix and the
+# Fargate jobs did not, so the two monitors disagreed about the same morning
+# and neither was wrong. This is the check that would have said so.
+#
+# It runs inside the container, against the image's own stamp, and asks GitHub
+# what changed between that commit and main. Two deliberate choices:
+#
+#   Path-scoped, not SHA-equality. Only the Dockerfile COPY set can change
+#   behaviour. A docs commit must not alarm, or the alarm gets ignored.
+#
+#   Unreachable is AMBER, unstamped is RED. A network blip is not evidence of
+#   staleness and must not cry wolf; an image with no stamp cannot be checked
+#   at all, which is itself a deployment defect and self-clears on redeploy.
+
+def _image_relevant(filename: str) -> bool:
+    return any(filename == p or filename.startswith(p) for p in IMAGE_PATHS)
+
+
+def _fetch_compare(repo, base, head, timeout):
+    """GitHub's compare API. Public repo, so unauthenticated is fine — one
+    call a day against a 60/hour limit. GITHUB_TOKEN is used when present so
+    the same code works if the repo is ever made private."""
+    url = f"https://api.github.com/repos/{repo}/compare/{base}...{head}"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "stride-deploy-preflight",
+    })
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def check_deployment(branch="main", timeout=15, fetch=None):
+    """Is the image these bytes are running from built from current main?"""
+    name = "deployed image carries current main (image-relevant paths)"
+    sha = (os.environ.get("STRIDE_IMAGE_SHA") or "").strip()
+    repo = (os.environ.get("STRIDE_REPO") or DEFAULT_REPO).strip()
+    fetch = fetch or _fetch_compare
+
+    if not sha:
+        return [_row(name, RED,
+                     "STRIDE_IMAGE_SHA is unset — this image was built before "
+                     "the freshness stamp existed, so it cannot be checked at "
+                     "all. Run deploy-infra.")]
+    if not _SHA_RE.match(sha):
+        return [_row(name, AMBER,
+                     f"image stamped {sha!r}, which is not a clean commit "
+                     "(a dirty tree, or a hand build). Cannot compare — "
+                     "redeploy from a clean checkout to restore the check.")]
+
+    try:
+        data = fetch(repo, sha, branch, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return [_row(name, AMBER,
+                         f"GitHub cannot compare {sha[:7]}...{branch} (404) — "
+                         "the commit is not on this repo, likely a force-push "
+                         "or a build from a fork. Redeploy to resolve.")]
+        return [_row(name, AMBER, f"GitHub compare failed: HTTP {e.code} — "
+                                  "staleness unknown, not assumed")]
+    except Exception as e:
+        return [_row(name, AMBER, f"GitHub compare unreachable ({type(e).__name__}) — "
+                                  "staleness unknown, not assumed")]
+
+    files = data.get("files") or []
+    behind = data.get("ahead_by") or 0        # main ahead of the image
+    if len(files) >= _COMPARE_FILE_CAP:
+        return [_row(name, RED,
+                     f"{behind} commit(s) behind main and the compare hit its "
+                     f"{_COMPARE_FILE_CAP}-file cap, so the drift cannot be "
+                     "shown to be irrelevant. Run deploy-infra.")]
+
+    changed = sorted({f.get("filename", "") for f in files if _image_relevant(f.get("filename", ""))})
+    if not changed:
+        detail = (f"{sha[:7]}, {behind} commit(s) behind main, none touching "
+                  "the image") if behind else f"{sha[:7]}, current with main"
+        return [_row(name, GREEN, detail)]
+
+    shown = ", ".join(changed[:4]) + (f" (+{len(changed) - 4} more)" if len(changed) > 4 else "")
+    return [_row(name, RED,
+                 f"image is {sha[:7]}; main has changed {len(changed)} "
+                 f"image-relevant file(s) since — {shown}. The jobs are "
+                 "running different code from main. Run deploy-infra.")]
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +339,21 @@ def main() -> int:
     ap.add_argument("--stale-days", type=int, default=3,
                     help="Max days a pipeline may be behind before it counts as frozen (default 3)")
     ap.add_argument("--json", action="store_true", help="Machine-readable output")
+    ap.add_argument("--skip-deployment", action="store_true",
+                    help="Omit the image-freshness board (offline or local runs; "
+                         "it needs github.com)")
     args = ap.parse_args()
+
+    # Before the DB, and reported even when the DB is down: a stale image is a
+    # finding in its own right, and letting a Neon outage swallow it is exactly
+    # how the two-monitor disagreement went unnoticed in the first place.
+    deployment = [] if args.skip_deployment else check_deployment()
 
     try:
         conn = _connect()
     except Exception as e:
+        if deployment:
+            _print_board("DEPLOYMENT (do the running bytes match main?)", deployment)
         print(f"PREFLIGHT: cannot connect — {e}", file=sys.stderr)
         return 2
 
@@ -228,12 +363,15 @@ def main() -> int:
     finally:
         conn.close()
 
-    reds = [r for r in schema + liveness if r["status"] == RED]
+    reds = [r for r in deployment + schema + liveness if r["status"] == RED]
     verdict = "RED" if reds else "GREEN"
 
     if args.json:
-        print(json.dumps({"verdict": verdict, "schema": schema, "liveness": liveness}, default=str, indent=2))
+        print(json.dumps({"verdict": verdict, "deployment": deployment,
+                          "schema": schema, "liveness": liveness}, default=str, indent=2))
     else:
+        if deployment:
+            _print_board("DEPLOYMENT (do the running bytes match main?)", deployment)
         _print_board("SCHEMA (presence — PEND is expected)", schema)
         _print_board("LIVENESS (is it producing rows?)", liveness)
         print(f"\nVERDICT: {verdict}" + (f" — {len(reds)} blocking: "
