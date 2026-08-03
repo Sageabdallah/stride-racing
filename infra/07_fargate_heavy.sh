@@ -6,6 +6,39 @@
 set -euo pipefail
 source "$(dirname "$0")/00_prereqs.sh"
 IMAGE="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/stride-jobs:latest"
+
+# CloudWatch log retention, in days. One place to change it for every group
+# this script owns. 60 rather than 14 because two windows outlast a fortnight:
+# WP-7's disappear-for-two-months-and-return-to-a-healthy-system test (at 14
+# days you come back to logs covering only the final fortnight, so any failure
+# earlier in the absence is undiagnosable), and the 42-day VR-002 validation
+# window, whose evidence trail has to stay intact for its full length.
+# Retention moves storage only. Ingestion is billed on arrival however long the
+# logs are then kept, so this multiplies the smaller line item: at roughly
+# 200 KB/day across all fifteen groups, 14 -> 60 costs about a third of a cent
+# per year at the Sydney rate of 0.033 USD per GB-month. Not a cost decision at
+# this size.
+LOG_RETENTION_DAYS=60
+
+# Per-job retention exceptions, space-separated, each written as job:days.
+# Empty, and that is a measured result rather than an oversight. late-odds-watch
+# was the obvious candidate because it fires every five minutes through the
+# racing window, but frequency turned out to be the wrong metric. Over the 24h
+# to 2026-08-03 it ingested 16.4 KB, 8% of the estate's 203 KB/day, while the
+# once-daily results-collect and preflight tasks ingested 36.5 KB and 33.1 KB.
+# The expensive groups are the ones that print a lot per run, not the ones that
+# run often. Measure IncomingBytes per group before adding an entry here.
+LOG_RETENTION_EXCEPTIONS=""
+
+# Days to keep $1's logs: its exception if it has one, otherwise the default.
+retention_days() {
+  local pair
+  for pair in $LOG_RETENTION_EXCEPTIONS; do
+    if [ "${pair%%:*}" = "$1" ]; then echo "${pair##*:}"; return; fi
+  done
+  echo "$LOG_RETENTION_DAYS"
+}
+
 aws ecs describe-clusters --clusters stride --query 'clusters[0].status' \
   --output text 2>/dev/null | grep -q ACTIVE || \
   aws ecs create-cluster --cluster-name stride >/dev/null
@@ -52,8 +85,8 @@ for spec in "intelligence-build 2048 4096" "consensus-agent 1024 2048" \
 JSON
   aws ecs register-task-definition --cli-input-json file:///tmp/stride-task-$NAME.json >/dev/null
   # Create the group BEFORE setting retention: put-retention-policy on a
-  # non-existent group fails, and the `|| true` meant the 14-day cost
-  # guardrail had never actually been applied to any group.
+  # non-existent group fails, and the `|| true` meant the retention guardrail
+  # had never actually been applied to any group.
   #
   # The `|| true` below is safe ONLY because put-retention-policy on the line
   # after it is unguarded. create-log-group returns ResourceAlreadyExistsException
@@ -63,7 +96,7 @@ JSON
   # goes silent again. Do not add `|| true` to it.
   aws logs create-log-group --log-group-name "/ecs/stride-$NAME" 2>/dev/null || true
   aws logs put-retention-policy --log-group-name "/ecs/stride-$NAME" \
-    --retention-in-days 14
+    --retention-in-days "$(retention_days "$NAME")"
   echo "task stride-$NAME registered"
 done
 echo "NOTE: wire the four ECS schedules (06:00 intelligence, 07:00 consensus,"

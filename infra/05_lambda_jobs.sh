@@ -1,10 +1,43 @@
 #!/usr/bin/env bash
 # Container Lambdas from the single stride-jobs image. Per function: an SQS
 # DLQ, two async retries with backoff, a CloudWatch error alarm to SNS, and
-# 14-day log retention (cost guardrail).
+# 60-day log retention.
 set -euo pipefail
 source "$(dirname "$0")/00_prereqs.sh"
 IMAGE="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/stride-jobs:latest"
+
+# CloudWatch log retention, in days. One place to change it for every group
+# this script owns. 60 rather than 14 because two windows outlast a fortnight:
+# WP-7's disappear-for-two-months-and-return-to-a-healthy-system test (at 14
+# days you come back to logs covering only the final fortnight, so any failure
+# earlier in the absence is undiagnosable), and the 42-day VR-002 validation
+# window, whose evidence trail has to stay intact for its full length.
+# Retention moves storage only. Ingestion is billed on arrival however long the
+# logs are then kept, so this multiplies the smaller line item: at roughly
+# 200 KB/day across all fifteen groups, 14 -> 60 costs about a third of a cent
+# per year at the Sydney rate of 0.033 USD per GB-month. Not a cost decision at
+# this size.
+LOG_RETENTION_DAYS=60
+
+# Per-job retention exceptions, space-separated, each written as job:days.
+# Empty, and that is a measured result rather than an oversight. late-odds-watch
+# was the obvious candidate because it fires every five minutes through the
+# racing window, but frequency turned out to be the wrong metric. Over the 24h
+# to 2026-08-03 it ingested 16.4 KB, 8% of the estate's 203 KB/day, while the
+# once-daily results-collect and preflight tasks ingested 36.5 KB and 33.1 KB.
+# The expensive groups are the ones that print a lot per run, not the ones that
+# run often. Measure IncomingBytes per group before adding an entry here.
+LOG_RETENTION_EXCEPTIONS=""
+
+# Days to keep $1's logs: its exception if it has one, otherwise the default.
+retention_days() {
+  local pair
+  for pair in $LOG_RETENTION_EXCEPTIONS; do
+    if [ "${pair%%:*}" = "$1" ]; then echo "${pair##*:}"; return; fi
+  done
+  echo "$LOG_RETENTION_DAYS"
+}
+
 TOPIC_ARN=$(aws sns create-topic --name stride-alerts --query TopicArn --output text)
 ROLE_NAME=stride-jobs-role
 # This role is BOTH the Lambda execution role and the ECS task role, so
@@ -111,7 +144,7 @@ for spec in "${JOBS[@]}"; do
   # goes silent again. Do not add `|| true` to it.
   aws logs create-log-group --log-group-name "/aws/lambda/$FN" 2>/dev/null || true
   aws logs put-retention-policy --log-group-name "/aws/lambda/$FN" \
-    --retention-in-days 14
+    --retention-in-days "$(retention_days "$NAME")"
   aws cloudwatch put-metric-alarm --alarm-name "$FN-errors" \
     --namespace AWS/Lambda --metric-name Errors \
     --dimensions Name=FunctionName,Value="$FN" \
@@ -119,4 +152,21 @@ for spec in "${JOBS[@]}"; do
     --comparison-operator GreaterThanOrEqualToThreshold \
     --treat-missing-data notBreaching --alarm-actions "$TOPIC_ARN" >/dev/null
   echo "$FN ready"
+done
+
+# Log groups whose Lambda this script no longer creates. calibrator-coverage
+# moved to Fargate in 5606924 because its import chain writes to the repo tree,
+# but the function and its log group were left in place, and the group still
+# holds the four failed runs from before the move. It is deliberately NOT in
+# JOBS -- putting it back would recreate a Lambda that cannot work and would
+# break both scripts/classify_runtimes.py and verify-jobs.yml. Retention is the
+# only thing asserted here; this script does not own the function's lifecycle.
+# Without this the group is the one member of the estate nothing sets retention
+# on, so it would sit at its old value while every other group moved to 60.
+# Drop the entry if the orphaned Lambda is ever deleted.
+for ORPHAN in calibrator-coverage; do
+  aws logs create-log-group --log-group-name "/aws/lambda/stride-$ORPHAN" 2>/dev/null || true
+  aws logs put-retention-policy --log-group-name "/aws/lambda/stride-$ORPHAN" \
+    --retention-in-days "$(retention_days "$ORPHAN")"
+  echo "stride-$ORPHAN log group retention asserted (orphaned function)"
 done
