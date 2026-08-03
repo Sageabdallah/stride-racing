@@ -169,3 +169,64 @@ tomorrow wants, so nothing is currently wrong. Left unfixed deliberately
 before first live run, and the defect makes schedules more enabled, never
 less. Fix is to read current state and pass `--state` explicitly, logging
 loudly when preserving a `DISABLED` so a forgotten disable cannot hide.
+
+## Recorded: the 2026-04-19 → 2026-08-01 data gap is a deliberate pause
+
+**If you are here because a table looks empty across April, May, June or
+July 2026 — this is the answer. Stop looking. Nothing broke.** The
+operator stopped running the pipeline and took a break. It was resumed
+2026-08-02.
+
+Recorded because the gap is large, it is visible from any query over that
+window, and every property it has is also a property of a silent no-op —
+which is the defect class this repository is most alert to. Without this
+note it invites a re-investigation that has already been done.
+
+What the shape looks like, and why each part is consistent with a pause
+rather than a fault:
+
+| Table | Dates present | Reading |
+|---|---|---|
+| `consensus_mentions` | 6 April dates: 04-04, 04-06, 04-10, 04-11, 04-15, 04-18 | last pipeline run before the pause |
+| `consensus_scores` | the same 6, plus 2026-08-02 | 08-02 is the resumption run |
+| `tipster_panel_log` | the same 6, plus 2026-08-02 | ditto |
+| `prediction_audit` | 2026-03-06, 03-07, 03-14, 2026-08-02 | tips stopped earlier than consensus did |
+| `race_results_history` | all 106 days in the window | **not** a contradiction — see below |
+
+All three consensus tables stopping on the *identical* six dates is the
+tell. A broken write path breaks one table, or one column, or one code
+path; it does not stop three tables that are written by three different
+statements on exactly the same day and then restart them together on
+exactly the same later day. A pause does.
+
+`race_results_history` having full coverage across the gap is the part
+most likely to be misread as proof that something was running. It was
+not. Results ingestion is a separate path (`fetch_and_import_date.py` /
+the evening cron) and much of that window was backfilled. Results
+arriving says nothing about whether the morning pipeline ran.
+
+**63 of those 106 days had target-track racing** (matched with
+`download_racecards.TARGET_TRACKS` against the `track` column). So 63
+days would have produced consensus and tips had anything been running.
+That number is the reason the gap looks alarming and it is not evidence
+of a fault — it is the size of the pause, measured.
+
+### What this note does *not* cover
+
+A genuine silent no-op also existed inside this window, and the two must
+not be conflated: `claude-sonnet-4-20250514` was retired 2026-06-15 and
+the consensus agent called it until 2026-08-02, 404ing on every
+extraction while exiting 0. That is recorded in full at
+[`docs/validation/VR-001-invalidation.md`](../docs/validation/VR-001-invalidation.md)
+and repaired on `main`.
+
+The two overlap in time and are independent. The pause is why there are
+no rows from 2026-04-19; the retired model is why the one run that *did*
+happen in the window — 2026-08-02, a real target-track day — wrote 53
+`consensus_scores` rows with `sum(total_mentions) = 0` and every runner
+on the flat neutral default of 35.0. Compare 2026-04-18: 437 mentions,
+max score 67.0, mean 29.41.
+
+So: **empty across the gap = the pause. Present but all-zero on
+2026-08-02 = the retired model.** Different causes, different fixes, one
+already applied to each.
