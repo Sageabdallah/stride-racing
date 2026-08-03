@@ -75,6 +75,23 @@ candidates (top 3 per race) and forces every other pick to
 default-on the crowd cannot create a bet, but it does veto. So from 2026-06-15
 the crowd gate was vetoing against an all-zero vector on every race.
 
+**How many races that actually was.** Appended 2026-08-03, and it does not
+change the conclusion above. Between 2026-04-19 and 2026-08-01 the pipeline was
+not run at all — the operator paused it deliberately and resumed 2026-08-02. So
+"every race" from 2026-06-15 resolves to the races of a single day, 2026-08-02:
+53 `consensus_scores` rows, `sum(total_mentions) = 0`, every runner on the flat
+neutral default of 35.0. The full record of the pause, and how to tell it apart
+from this defect when reading the same tables, is in
+[`infra/EXECUTION_STATUS.md`](../../infra/EXECUTION_STATUS.md) under *"the
+2026-04-19 → 2026-08-01 data gap is a deliberate pause"*.
+
+The invalidation stands unchanged and for the reason already given: the defect
+was live on the registration date and on the window-B open date, both 2026-08-02.
+Neither the count of affected races nor the pause bears on that. Recorded only
+so a later reader does not mistake the empty months for a second fault, or infer
+from the sentence above that a degraded pipeline was running daily through June
+and July. It was not running.
+
 ## The arithmetic
 
 The model retired **2026-06-15**. VR-001 was registered **2026-08-02** — 48 days
