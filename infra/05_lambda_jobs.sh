@@ -102,6 +102,13 @@ for spec in "${JOBS[@]}"; do
   # with unlimited retention and keep it until some later deploy happens to
   # land after their first invocation. Create the group first, and let the
   # retention call fail loudly if it fails.
+  #
+  # The `|| true` below is safe ONLY because put-retention-policy on the line
+  # after it is unguarded. create-log-group returns ResourceAlreadyExistsException
+  # on a re-run, so it has to be tolerated — but it would equally swallow
+  # AccessDenied or an invalid name. What catches that is the retention call
+  # failing loudly on a group that does not exist. Guard that call and this one
+  # goes silent again. Do not add `|| true` to it.
   aws logs create-log-group --log-group-name "/aws/lambda/$FN" 2>/dev/null || true
   aws logs put-retention-policy --log-group-name "/aws/lambda/$FN" \
     --retention-in-days 14

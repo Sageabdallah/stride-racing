@@ -40,8 +40,30 @@ fi
 # The deploy creates the whole stack (IAM roles, Lambdas, ECS, schedules,
 # secrets, S3, SNS/SQS, DynamoDB, ECR, alarms) — broad by necessity. The
 # trust policy above is the lock: only this repo's workflows can assume it.
-aws iam attach-role-policy --role-name $ROLE \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess 2>/dev/null || true
+# attach-role-policy is already idempotent — re-attaching an attached policy
+# succeeds — so `2>/dev/null || true` bought nothing and hid NoSuchEntity,
+# AccessDenied and LimitExceeded. A failure here leaves the deploy role with NO
+# permissions while this script still prints "OIDC deploy role ready"; the next
+# deploy then fails somewhere else entirely and you debug the wrong script.
+# The one genuine transient is IAM propagation right after create-role above,
+# so retry that specifically, the way 05_lambda_jobs.sh already does.
+for attempt in $(seq 1 12); do
+  if aws iam attach-role-policy --role-name $ROLE \
+     --policy-arn arn:aws:iam::aws:policy/AdministratorAccess 2>/tmp/attach_err; then
+    break
+  fi
+  grep -q "NoSuchEntity" /tmp/attach_err || { cat /tmp/attach_err >&2; exit 1; }
+  echo "  $ROLE: waiting for IAM propagation (attempt $attempt)"
+  sleep 5
+  [ "$attempt" = "12" ] && { cat /tmp/attach_err >&2; exit 1; }
+done
+# Verify the attachment rather than trusting the call: this role is the only
+# thing standing between the deploy workflow and a permission wall.
+aws iam list-attached-role-policies --role-name $ROLE \
+  --query 'AttachedPolicies[?PolicyName==`AdministratorAccess`]' --output text \
+  | grep -q AdministratorAccess || {
+    echo "FATAL: AdministratorAccess is not attached to $ROLE after attach reported success" >&2
+    exit 1; }
 
 # Default-VPC network for the Fargate schedules (07b) — discovered once here
 # so the workflow never needs interactive input.
