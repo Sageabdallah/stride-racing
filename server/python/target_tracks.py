@@ -48,15 +48,30 @@ GitHub runner, server/python on Fargate, and the Mac).
 
 Matching
 --------
-Unchanged from the original, deliberately. The bidirectional substring test is
-loose — "ascot" also matches "Ascot WA", "sandown" matches "Sandown Hillside",
-"kensington" matches "Randwick Kensington" — and replacing it with canonical-key
-matching was measured against the 95 stored cards in racecards/: it would
-silently drop seven spellings across 19 of those card-days, including both
-Sandown Lakeside spellings (because "sandown" canonicalises to "sandownhillside"
-via the alias map). A card that quietly contains fewer meetings is worse than
-the bug this work started from, because it still looks green. Changing the
-matcher needs its own change and its own differential test.
+A target name must appear inside the course name. The test is deliberately
+loose in that direction — "ascot" also matches "Ascot WA", "sandown" matches
+"Sandown Hillside", "kensington" matches "Randwick Kensington" — because the
+provider sponsors, abbreviates and re-spells course names constantly, and a
+card that quietly contains fewer meetings is worse than one that contains too
+many: it still looks green.
+
+Replacing this with canonical-key matching was measured against the 95 stored
+cards in racecards/ and rejected: it would silently drop seven spellings across
+19 of those card-days, including both Sandown Lakeside spellings (because
+"sandown" canonicalises to "sandownhillside" via the alias map).
+
+What it does NOT do is match in reverse. The original tested
+`t in course or course in t`, and the second half admits any course whose name
+is a prefix of a target — Punting Form's 2026-08-04 card listed `Warwick`, the
+Queensland country track, which matched the Sydney metro target `warwick farm`
+and had nine races built against it. Removing that direction was measured over
+312 distinct course spellings (every `course` in the stored cards plus every
+distinct `track` in race_results_history) and changes nothing else: 40 matched
+before, 40 after, zero disagreements. All seven canonical-key casualties above
+survive, because each contains its target rather than being contained by it.
+
+See test_a_course_that_is_a_prefix_of_a_target_is_not_a_target, which asserts
+the direction rather than the single name.
 """
 
 from __future__ import annotations
@@ -109,8 +124,34 @@ def target_source() -> str:
 
 
 def is_target_track(course: str) -> bool:
-    """The original matcher, moved not rewritten — see the module docstring."""
+    """Substring match in one direction only: a target name must appear inside
+    the course name.
+
+    The original matcher tested both directions — `t in course or course in t`.
+    The second half admits any course whose name is a *prefix* of a target, and
+    the tracks it lets in are not the tracks it looks like it lets in. Punting
+    Form's card for 2026-08-04 listed a meeting named exactly `Warwick`. That is
+    the Queensland country track (its results-side spelling is
+    `Picklebet Park Warwick`); `warwick` is a substring of the target
+    `warwick farm`, which is Sydney metro. Nine races were built and seeded
+    under a target the course has nothing to do with.
+
+    Removing the reversed direction was measured before it was applied, over
+    312 distinct course spellings — every `course` in the stored
+    `racecards/racecard_*.json` plus every distinct `track` in
+    `race_results_history`. **The two matchers disagree on none of them**: 40
+    matched before, 40 after. It keeps all seven spellings a canonical-key
+    rewrite was previously measured to drop (`Sportsbet-Ballarat`,
+    `Pinjarra Scarpside`, both Sandown spellings, `Southside Cranbourne`,
+    `Aquis Park Gold Coast Poly`, `Sandown-Lakeside`), because those all
+    *contain* their target rather than being contained by it.
+
+    So the reversed direction earned nothing on real data and cost one wrong
+    track. The five other courses that match by containment — Caulfield,
+    Geelong, Gold Coast, Kensington, Randwick — are all target entries in their
+    own right and match on the forward direction regardless.
+    """
     if collect_all():
         return True
     course_lower = (course or "").lower()
-    return any(t in course_lower or course_lower in t for t in target_tracks())
+    return any(t in course_lower for t in target_tracks())
