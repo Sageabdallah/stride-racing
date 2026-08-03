@@ -48,15 +48,30 @@ GitHub runner, server/python on Fargate, and the Mac).
 
 Matching
 --------
-Unchanged from the original, deliberately. The bidirectional substring test is
-loose — "ascot" also matches "Ascot WA", "sandown" matches "Sandown Hillside",
-"kensington" matches "Randwick Kensington" — and replacing it with canonical-key
-matching was measured against the 95 stored cards in racecards/: it would
-silently drop seven spellings across 19 of those card-days, including both
-Sandown Lakeside spellings (because "sandown" canonicalises to "sandownhillside"
-via the alias map). A card that quietly contains fewer meetings is worse than
-the bug this work started from, because it still looks green. Changing the
-matcher needs its own change and its own differential test.
+A target name must appear inside the course name. The test is deliberately
+loose in that direction — "ascot" also matches "Ascot WA", "sandown" matches
+"Sandown Hillside", "kensington" matches "Randwick Kensington" — because the
+provider sponsors, abbreviates and re-spells course names constantly, and a
+card that quietly contains fewer meetings is worse than one that contains too
+many: it still looks green.
+
+Replacing this with canonical-key matching was measured against the 95 stored
+cards in racecards/ and rejected: it would silently drop seven spellings across
+19 of those card-days, including both Sandown Lakeside spellings (because
+"sandown" canonicalises to "sandownhillside" via the alias map).
+
+What it does NOT do is match in reverse. The original tested
+`t in course or course in t`, and the second half admits any course whose name
+is a prefix of a target — Punting Form's 2026-08-04 card listed `Warwick`, the
+Queensland country track, which matched the Sydney metro target `warwick farm`
+and had nine races built against it. Removing that direction was measured over
+312 distinct course spellings (every `course` in the stored cards plus every
+distinct `track` in race_results_history) and changes nothing else: 40 matched
+before, 40 after, zero disagreements. All seven canonical-key casualties above
+survive, because each contains its target rather than being contained by it.
+
+See test_a_course_that_is_a_prefix_of_a_target_is_not_a_target, which asserts
+the direction rather than the single name.
 """
 
 from __future__ import annotations
