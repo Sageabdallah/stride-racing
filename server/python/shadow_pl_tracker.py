@@ -15,9 +15,6 @@ from datetime import datetime
 from glob import glob
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
-import roi_stats  # noqa: E402  (must follow the sys.path setup)
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 RACECARDS_DIR = PROJECT_ROOT / "racecards"
@@ -56,7 +53,6 @@ ALTER TABLE stride_tip_results ADD COLUMN IF NOT EXISTS convergence_score REAL;
 ALTER TABLE stride_tip_results ADD COLUMN IF NOT EXISTS selection_score REAL;
 ALTER TABLE stride_tip_results ADD COLUMN IF NOT EXISTS pillars_strong INTEGER;
 ALTER TABLE stride_tip_results ADD COLUMN IF NOT EXISTS is_shadow BOOLEAN DEFAULT FALSE;
-ALTER TABLE stride_tip_results ADD COLUMN IF NOT EXISTS settled_at_sp_fallback BOOLEAN DEFAULT FALSE;
 
 -- Relax the result CHECK constraint to allow PENDING for shadow rows
 ALTER TABLE stride_tip_results DROP CONSTRAINT IF EXISTS stride_tip_results_result_check;
@@ -233,80 +229,6 @@ def cmd_record(race_date, conn=None):
 
 
 
-def _commission_rate():
-    """Commission on net winnings (roi-roadmap 01). NSW/ACT tote MBR is 10%."""
-    return float(os.environ.get("STRIDE_COMMISSION_RATE", "0.08"))
-
-
-def settle_shadow_row(pos, sp, tipped_odds, won, placed, dh=False,
-                      commission_rate=None):
-    """Single settlement contract for shadow rows (roi-roadmap task 01).
-
-    Settles at the tipped (taken) price when present; SP is used only when no
-    taken price exists, and then settled_at_sp_fallback comes back True — this
-    replaces the silent `res.sp or tipped_odds` fallback. Net of commission:
-    win = (price - 1) * (1 - commission), loss = -1.
-
-    Returns (result, profit_loss, settled_at_sp_fallback), or None when the row
-    must not settle: a dead-heated winner never settles at full SP, because the
-    payout depends on the number of tied runners, which the row does not carry.
-    Scratched rows settle at 0 and are never flagged as SP fallbacks.
-    """
-    if commission_rate is None:
-        commission_rate = _commission_rate()
-    if pos is None:
-        return "SCRATCHED", 0, False
-    if won and dh:
-        return None
-    price = float(tipped_odds) if tipped_odds else (float(sp) if sp else 0.0)
-    sp_fallback = bool(not tipped_odds and sp)
-    if won:
-        pl = round((price - 1.0) * (1.0 - commission_rate), 2) if price else 0
-        return "WIN", pl, sp_fallback
-    if placed:
-        return "PLACE", -1, sp_fallback
-    return "LOSS", -1, sp_fallback
-
-
-def fetch_results_map(conn, race_date):
-    """Results for race_date keyed by (track, race_number, horse), normalised.
-
-    prediction_audit (tipped horses, carrying won/placed flags) first, then
-    race_results_history fills in the rest of the field — prediction_audit only
-    contains tipped horses. This is the single results source for BOTH the
-    shadow tracker (cmd_results) and the selection-ledger settle pass
-    (selection_ledger.settle_pending_rows): the two settlement paths must
-    never disagree about what the result was.
-    """
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT track, race_number, horse_name, actual_position, starting_price, won, placed
-            FROM prediction_audit
-            WHERE race_date = %s AND result_status = 'resulted'
-        """, (race_date,))
-        results_rows = cur.fetchall()
-
-        results_map = {}
-        if results_rows:
-            for track, rnum, horse, pos, sp, won, placed in results_rows:
-                key = (_normalize_name(track), rnum, _normalize_name(horse))
-                results_map[key] = {"position": pos, "sp": sp, "won": won, "placed": placed}
-
-        cur.execute("""
-            SELECT track, race_number, horse_name, position, sp_odds
-            FROM race_results_history
-            WHERE race_date = %s
-        """, (race_date,))
-        for track, rnum, horse, pos, sp in cur.fetchall():
-            key = (_normalize_name(track), rnum, _normalize_name(horse))
-            if key not in results_map:
-                results_map[key] = {"position": pos, "sp": sp}
-    finally:
-        cur.close()
-    return results_map
-
-
 def cmd_results(race_date):
     conn = _get_connection()
     ensure_schema(conn)
@@ -324,10 +246,31 @@ def cmd_results(race_date):
         cur.close()
         conn.close()
         return 0
-    cur.close()
 
-    results_map = fetch_results_map(conn, race_date)
-    cur = conn.cursor()
+    cur.execute("""
+        SELECT track, race_number, horse_name, actual_position, starting_price, won, placed
+        FROM prediction_audit
+        WHERE race_date = %s AND result_status = 'resulted'
+    """, (race_date,))
+    results_rows = cur.fetchall()
+
+    results_map = {}
+    if results_rows:
+        for track, rnum, horse, pos, sp, won, placed in results_rows:
+            key = (_normalize_name(track), rnum, _normalize_name(horse))
+            results_map[key] = {"position": pos, "sp": sp, "won": won, "placed": placed}
+
+    # Always supplement with race_results_history for horses not in prediction_audit
+    # (prediction_audit only contains tipped horses, not the full field)
+    cur.execute("""
+        SELECT track, race_number, horse_name, position, sp_odds
+        FROM race_results_history
+        WHERE race_date = %s
+    """, (race_date,))
+    for track, rnum, horse, pos, sp in cur.fetchall():
+        key = (_normalize_name(track), rnum, _normalize_name(horse))
+        if key not in results_map:
+            results_map[key] = {"position": pos, "sp": sp}
 
     if not results_map:
         print(f"  [SHADOW] 0 results matched — has results_collector run for {race_date}?",
@@ -344,27 +287,30 @@ def cmd_results(race_date):
             continue
 
         pos = res.get("position")
-        actual_sp = res.get("sp")
+        sp = res.get("sp") or tipped_odds or 0
         won = res.get("won") or (pos == 1)
         placed = res.get("placed") or (pos is not None and pos <= 3)
-        dh = bool(res.get("dh")) or (isinstance(pos, str) and "dh" in pos.lower())
 
-        settled_row = settle_shadow_row(pos, actual_sp, tipped_odds, won, placed, dh=dh)
-        if settled_row is None:
-            print(f"  [SHADOW] {track} R{rnum} {horse}: dead-heated winner left "
-                  "PENDING — never settles at full SP", file=sys.stderr)
-            continue
-        result, pl, sp_fallback = settled_row
+        if pos is None:
+            result = "SCRATCHED"
+            pl = 0
+        elif won:
+            result = "WIN"
+            pl = round(float(sp) - 1, 2) if sp else 0
+        elif placed:
+            result = "PLACE"
+            pl = -1
+        else:
+            result = "LOSS"
+            pl = -1
 
         cur.execute("""
             UPDATE stride_tip_results
             SET result = %s, actual_position = %s, profit_loss = %s,
-                api_sp = %s, tipped_horse_sp = %s, settled_at_sp_fallback = %s,
-                collected_at = NOW()
+                api_sp = %s, tipped_horse_sp = %s, collected_at = NOW()
             WHERE race_date = %s AND track = %s AND race_number = %s
               AND horse_name = %s AND tip_type = %s AND result = 'PENDING'
-        """, (result, pos, pl, actual_sp, actual_sp, sp_fallback,
-             race_date, track, rnum, horse, tip_type))
+        """, (result, pos, pl, sp, sp, race_date, track, rnum, horse, tip_type))
         matched += 1
 
     cur.close()
@@ -374,7 +320,7 @@ def cmd_results(race_date):
 
 
 
-MIN_BETS_REPORTABLE = roi_stats.MIN_BETS_REPORTABLE  # single source (roi_stats, task 02)
+MIN_BETS_REPORTABLE = 200
 
 def cmd_report():
     conn = _get_connection()

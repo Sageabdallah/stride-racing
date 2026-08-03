@@ -39,13 +39,7 @@ concurrency:
 
 jobs:
   smoke:
-    # Self-hosted Mac runner on an AU IP — Betfair's edge serves HTML 403 to
-    # GitHub's US datacenter runners, so this job is untestable there.
-    # GATED 2026-08-01: no self-hosted runner is registered on this repo yet;
-    # do not merge until one shows online in Settings -> Actions -> Runners.
-    # If the runner is registered with an extra label, append it, e.g.:
-    #   runs-on: [self-hosted, macOS, <operator-label>]
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

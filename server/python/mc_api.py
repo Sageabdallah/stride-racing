@@ -60,23 +60,6 @@ try:
 except ImportError:
     ML_MODEL_AVAILABLE = False
 
-# Task 03: single shared serve-time feature builder + movement-column gate.
-# serve_features/nan_contract are stdlib-only, but keep the guarded-import
-# convention so mc_api still loads if the file layout changes.
-try:
-    from serve_features import (
-        MOVEMENT_FEATURES as _SHARED_MOVEMENT_FEATURES,
-        movement_features_live as _movement_features_live,
-        overlay_shared_columns as _overlay_shared_columns,
-        log_movement_inert_once as _log_movement_inert_once,
-    )
-    SERVE_FEATURES_AVAILABLE = True
-except ImportError:
-    SERVE_FEATURES_AVAILABLE = False
-    _SHARED_MOVEMENT_FEATURES = ()
-    def _movement_features_live():
-        return os.environ.get("STRIDE_MOVEMENT_FEATURES_LIVE", "false").strip().lower() in ("true", "1", "yes")
-
 try:
     from advanced_features import (
         extract_advanced_features as extract_db_features,
@@ -1421,10 +1404,7 @@ def extract_ml_features(runner: dict, race_data: dict, all_runners: list = None)
     features['is_middle'] = 1 if 1800 < distance_m < 2200 else 0
     
     horse_name = runner.get('horse', runner.get('name', ''))
-    # Task 03: market-movement columns are 0 in training and in the shared
-    # serve builder — real values are sourced post-tip-time (see task 14).
-    # Only populate them when STRIDE_MOVEMENT_FEATURES_LIVE=1.
-    if horse_name and _movement_features_live():
+    if horse_name:
         market_diff = get_last_start_market_differential(horse_name)
         features['last_start_market_diff'] = market_diff['last_start_differential']
         features['avg_market_diff_3runs'] = market_diff['avg_differential_3runs']
@@ -2061,9 +2041,7 @@ def extract_market_intelligence_features(runner: dict, all_runners: list, race_d
     
     features['opening_odds'] = opening_odds
     
-    # Task 03: gated by STRIDE_MOVEMENT_FEATURES_LIVE — served as 0 by default
-    # (0 in training; real movement is post-tip-time data, see task 14).
-    if opening_odds > 0 and current_odds > 0 and _movement_features_live():
+    if opening_odds > 0 and current_odds > 0:
         odds_movement = (opening_odds - current_odds) / opening_odds * 100
         features['odds_movement_pct'] = odds_movement
         
@@ -5976,9 +5954,7 @@ def extract_all_sophisticated_features(runner: dict, all_runners: list, race_dat
         except Exception as e:
             log_debug(f"Temporal staleness error: {e}")
     
-    # Task 03: real movement only under STRIDE_MOVEMENT_FEATURES_LIVE
-    # (default OFF — both inference paths serve 0, matching training).
-    if MARKET_VELOCITY_AVAILABLE and _movement_features_live():
+    if MARKET_VELOCITY_AVAILABLE:
         try:
             mv_features = compute_market_velocity_features(runner, all_runners)
             features['steam_velocity'] = mv_features.get('steam_velocity', 0.0)
@@ -5993,29 +5969,6 @@ def extract_all_sophisticated_features(runner: dict, all_runners: list, race_dat
             features['field_market_agreement'] = mv_features.get('field_market_agreement', 0.5)
         except Exception as e:
             log_debug(f"Market velocity error: {e}")
-    
-    # Task 03: run the ONE shared feature builder over the shared columns so
-    # this path serves exactly what run_tips_pipeline serves. The builder
-    # explicitly zeroes the market-movement columns — sourced post-tip-time,
-    # see task 14 — unless STRIDE_MOVEMENT_FEATURES_LIVE=1. Extracted values
-    # already in `features` win over raw runner keys inside the overlay.
-    if SERVE_FEATURES_AVAILABLE:
-        try:
-            _sf_dist_str = str(race_data.get('distance', '0'))
-            try:
-                _sf_distance_m = int(_sf_dist_str.replace('m', '').strip())
-            except ValueError:
-                _sf_distance_m = 1400
-            _sf_field_size = len(all_runners) if all_runners else features.get('field_size', 0)
-            _log_movement_inert_once(race_data.get('raceDate', race_data.get('date')))
-            _overlay_shared_columns(
-                features, runner,
-                market_odds=features.get('current_odds'),
-                distance_m=_sf_distance_m,
-                field_size=_sf_field_size,
-            )
-        except Exception as e:
-            log_debug(f"Shared feature builder error: {e}")
     
     return features
 
@@ -7670,18 +7623,6 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                     _norm_place = max(0.0, float(r.get('_rawPlaceProb', 0.0))) * _place_sum_target / _raw_place_total
                     r['placePercentage'] = round(min(100.0, _norm_place), 2)
 
-            # Task 05: shared overround-corrected market probability for the
-            # standalone edge (STRIDE_SHARED_MARKET_PROB, default OFF — the
-            # legacy raw-implied edge below is byte-identical when off).
-            _shared_market_prob = os.environ.get("STRIDE_SHARED_MARKET_PROB", "false").strip().lower() in ("true", "1", "yes")
-            _mkt_overround = 1.0
-            if _shared_market_prob:
-                try:
-                    from market_prob import overround as _mp_overround, true_market_prob_pct as _mp_true_market
-                    _mkt_overround = _mp_overround([r.get('marketOdds') for r in results])
-                except Exception:
-                    _shared_market_prob = False
-
             for r in results:
                 _m_odds = r.get('marketOdds')
                 try:
@@ -7691,10 +7632,7 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 r['marketOdds'] = _m_odds
 
                 if _m_odds and _m_odds > 1:
-                    if _shared_market_prob:
-                        _implied = _mp_true_market(_m_odds, _mkt_overround)
-                    else:
-                        _implied = 100.0 / _m_odds
+                    _implied = 100.0 / _m_odds
                     _edge = r['winPercentage'] - _implied
                     _ev = ((r['winPercentage'] / 100.0) * _m_odds) - 1.0
                     r['marketImpliedWinPct'] = round(_implied, 2)

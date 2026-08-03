@@ -20,9 +20,8 @@ expected_value = calibrated_prob / fair_market_prob − 1
 A runner is only actionable with positive edge, and even then it must pass price-band
 guardrails, a confidence ladder, and an independent crowd cross-check. The recent
 backtest illustrates why: the model's top pick wins 33.7% of races but *loses* 4.2%
-at favourite prices, while the selective "edge ≥ 3%, $2–$15" filter shows +12.3% gross
-ROI on far fewer bets — though with a 95% CI of [−45, +62]% it is NOT_REPORTABLE
-([backtesting doc](10-backtesting-and-learning.md#7-reading-the-recent-results-readme-numbers)).
+at favourite prices, while the selective "edge ≥ 3%, $2–$15" filter makes +12.3% ROI
+on far fewer bets ([backtesting doc](10-backtesting-and-learning.md#7-reading-the-recent-results-readme-numbers)).
 
 Three independent pillars converge on every runner:
 

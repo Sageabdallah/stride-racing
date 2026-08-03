@@ -7,16 +7,11 @@ were fully verified working on 2026-07-31 from an Australian IP — see
 ## 1. Update the repo
 
 ```bash
-git checkout main
-git fetch origin
-git reset --hard origin/main
+git checkout main && git pull
 ```
 
-Use reset, not pull: main's recent history was rewritten on 2026-07-31
-(commit metadata cleanup), so a plain pull would tangle the old and new
-histories. The Desktop checkout has no local commits to lose, but stash any
-uncommitted edits first. Do not commit the untracked `CLAUDE.md` or `claude/`
-directory if they are still there.
+The Desktop checkout is known to be behind. Do not commit the untracked
+`CLAUDE.md` or `claude/` directory if they are still there.
 
 ## 2. Purge the OLD Betfair password everywhere on this machine
 

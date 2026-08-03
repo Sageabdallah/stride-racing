@@ -41,8 +41,7 @@ system does not try to 'pick winners' — it hunts for **disagreements with the 
 survive calibration." The evidence that justifies that stance is the system's own backtest
 over 352 metro races (2026-03-04 → 2026-04-18, `README.md:109-121`): the model's **top pick
 wins 33.7% of races but returns −4.2%** at the prices, while the selective `edge ≥ 3%, $2–$15`
-band **wins only 9.9% of its bets at +12.3% gross ROI** (95% CI [−45, +62]%,
-NOT_REPORTABLE — the band is within noise). Hit rate and profit are therefore treated
+band **wins only 9.9% of its bets at +12.3% ROI**. Hit rate and profit are therefore treated
 as separable — and often opposed — objectives, and the promotion bar (`docs/12-hit-rate-research.md:435-438`)
 forbids buying one with the other: any change "must raise top-pick hit rate on the holdout
 **without** degrading the calibration Brier or the Value-Edge band's ROI — hit rate paid for
@@ -353,7 +352,7 @@ only meaningful if something scores the result, and today nothing does.
 price-independent; a genuinely better ranking raises hit rate *and* ROI.
 *Anchoring and gating* (`mw` ladder, `evaluate_bet_candidate`, `crowd_bet_decision`, de-vig
 method) trade the two directly — toward the market means higher strike and worse ROI
-(33.7% / −4.2%), toward the model means lower strike and better ROI (9.9% / +12.3% gross — 95% CI [−45, +62]%, NOT_REPORTABLE).
+(33.7% / −4.2%), toward the model means lower strike and better ROI (9.9% / +12.3%).
 *Staking* (`compute_staking`, `portfolio_risk`) moves ROI **with zero effect on hit rate** —
 the only free lunch in the system, and it is entirely unexploited today.
 

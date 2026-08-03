@@ -25,7 +25,6 @@ Run `python selection_ledger.py` for the self-test.
 """
 
 import os
-import roi_stats
 import sys
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
@@ -41,17 +40,6 @@ STAKE_UNITS = {"2u": 2.0, "1u": 1.0, "0u": 0.0}
 def _stride_flag(name: str) -> bool:
     """Default-off env flag, Variant B idiom (see run_tips_pipeline.py:591)."""
     return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
-
-
-def default_commission_rate() -> float:
-    """Commission on net winnings, from env. Default 8% MBR.
-
-    NSW/ACT tote deduction is 10% — set STRIDE_COMMISSION_RATE=0.10 when
-    settling at tote prices in those states. EV and settlement must use the
-    same rate so a gross-tuned edge is never booked (roi-roadmap task 01:
-    +12.3% gross is ~+4.1% at 8% and ~+2.1% at 10%).
-    """
-    return float(os.environ.get("STRIDE_COMMISSION_RATE", "0.08"))
 
 
 # ---------------------------------------------------------------------------
@@ -126,24 +114,15 @@ def rolling_window_before(rows: Sequence[Dict[str, Any]], race_date: Any,
 
 def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
                      result: Optional[Dict[str, Any]] = None,
-                     commission_rate: Optional[float] = None,
-                     bankroll: float = 10000.0,
-                     refused: bool = False) -> Dict[str, Any]:
+                     commission_rate: float = 0.0,
+                     bankroll: float = 10000.0) -> Dict[str, Any]:
     """One settled-or-pending record per published selection.
 
     `pick` follows the live contract (examples/sample_race.json): `win_pct`,
     `raw_model_pct` and `edge_pct` are 0-100, `odds` is decimal.
     `result` is {'won': bool, 'placed': bool, 'starting_price': float} once the
-    race is settled, or None while pending. A truthy 'scratched' marks a
-    non-runner; a truthy 'dh'/'dead_heat' marks a dead heat.
-
-    `refused=True` records a NO_BET set the EV gate rejected (with the
-    would-be price), so gate quality becomes measurable. `commission_rate`
-    defaults to STRIDE_COMMISSION_RATE (0.08) — never silently gross.
+    race is settled, or None while pending.
     """
-    if commission_rate is None:
-        commission_rate = default_commission_rate()
-
     win_pct = pick.get("win_pct")
     raw_pct = pick.get("raw_model_pct")
     price_taken = pick.get("odds")
@@ -152,11 +131,8 @@ def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
     calibrated_prob = (win_pct / 100.0) if win_pct is not None else None
     raw_prob = (raw_pct / 100.0) if raw_pct is not None else None
 
-    res = result or {}
-    price_close = res.get("starting_price")
-    won = res.get("won")
-    scratched = bool(res.get("scratched"))
-    dead_heat = bool(res.get("dh") or res.get("dead_heat"))
+    price_close = (result or {}).get("starting_price")
+    won = (result or {}).get("won")
 
     units = STAKE_UNITS.get(str(staking), 0.0)
     stake = bankroll * units / 100.0
@@ -188,9 +164,6 @@ def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
 
         "commission_rate": commission_rate,
         "settled": result is not None,
-        "refused": bool(refused),
-        "settled_at_sp_fallback": False,
-        "sp": price_close,
     }
 
     row["ev_at_taken"] = (
@@ -199,48 +172,17 @@ def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
     row["clv_pct"] = (round(closing_line_value(price_taken, price_close), 4)
                       if price_taken and price_close else None)
 
-    # Single settlement contract (roi-roadmap 01): the taken price settles.
-    # SP is used only when no taken price exists, and that is always marked
-    # explicitly — the shadow tracker's silent `sp or tipped_odds` fallback is
-    # the defect this replaces. Net P&L: win = (price-1)*(1-commission), loss = -1.
-    settle_price = price_taken if price_taken else price_close
-
     if result is None:
         row["won"] = None
         row["pnl"] = None
-        row["gross_pnl"] = None
-    elif scratched:
-        # Stake is returned; a scratching is never booked as a result.
-        row["settled"] = False
-        row["won"] = None
-        row["pnl"] = 0.0
-        row["gross_pnl"] = 0.0
-        row["result_note"] = "scratched"
-    elif won and dead_heat:
-        # A dead heat does NOT pay (price-1) in full — the payout depends on
-        # the number of tied runners, which this row does not carry. Refuse to
-        # settle at full SP rather than book a flattered win.
-        row["settled"] = False
-        row["won"] = bool(won)
-        row["pnl"] = None
-        row["gross_pnl"] = None
-        row["result_note"] = "dead_heat_unsettled"
     else:
         row["won"] = bool(won)
-        row["settled_at_sp_fallback"] = bool(
-            stake > 0 and not price_taken and price_close)
-        if stake <= 0 or not settle_price:
+        if stake <= 0 or not price_taken:
             row["pnl"] = 0.0
-            row["gross_pnl"] = 0.0
         elif won:
-            row["gross_pnl"] = round(stake * (float(settle_price) - 1.0), 2)
-            row["pnl"] = round(
-                stake * (float(settle_price) - 1.0) * (1.0 - commission_rate), 2)
+            row["pnl"] = round(stake * (float(price_taken) - 1.0) * (1.0 - commission_rate), 2)
         else:
             row["pnl"] = round(-stake, 2)
-            row["gross_pnl"] = round(-stake, 2)
-
-    row["settled_pnl"] = row["pnl"]
 
     if _stride_flag("STRIDE_SHADOW_KELLY") and calibrated_prob is not None and price_taken:
         row["shadow_kelly"] = shadow_stake_plan(
@@ -250,23 +192,12 @@ def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
     return row
 
 
-# Same floor as shadow_pl_tracker.MIN_BETS_REPORTABLE: a 30-bet week is
-# never read as a result. Headline ROI/CLV metrics print INSUFFICIENT_SAMPLE
-# below the floor, not numbers (roi-roadmap 01, step 5).
-MIN_BETS_REPORTABLE = roi_stats.MIN_BETS_REPORTABLE
-INSUFFICIENT_SAMPLE = "INSUFFICIENT_SAMPLE"
-
-
 def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
                    bootstrap_seed: int = 42) -> Dict[str, Any]:
     """Summarise settled ledger rows using the harness's own metric functions.
 
     Imports from `walk_forward_backtest` rather than recomputing, so the weekly
     report and the backtest can never drift apart (guardrail 3).
-
-    Emits n bets, mean CLV, % CLV>0, net ROI and gross ROI. Headline metrics
-    are gated on the >=200-bet reportability floor: below it they are the
-    string INSUFFICIENT_SAMPLE, not a flattering small-sample number.
     """
     import numpy as np
     from walk_forward_backtest import (bootstrap_roi_ci, compute_max_drawdown,
@@ -278,9 +209,6 @@ def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
                 "reason": "no settled rows with a stake"}
 
     pnl = np.array([float(r["pnl"]) for r in settled], dtype=float)
-    gross = np.array([
-        float(r["gross_pnl"]) if r.get("gross_pnl") is not None else float(r["pnl"])
-        for r in settled], dtype=float)
     staked = float(sum(float(r["stake"]) for r in settled))
     wins = sum(1 for r in settled if r.get("won"))
 
@@ -292,27 +220,15 @@ def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
     clvs = [r["clv_pct"] for r in settled if r.get("clv_pct") is not None]
     n = len(settled)
 
-    def _gated(value: Any) -> Any:
-        """Headline numbers only exist at or above the reportability floor."""
-        return value if n >= MIN_BETS_REPORTABLE else INSUFFICIENT_SAMPLE
-
-    roi_net = round(float(pnl.sum()) / staked * 100.0, 2) if staked else 0.0
-    roi_gross = round(float(gross.sum()) / staked * 100.0, 2) if staked else 0.0
-    mean_clv = round(float(np.mean(clvs)), 4) if clvs else None
-    pct_clv_pos = (round(sum(1 for c in clvs if c > 0) / len(clvs) * 100.0, 2)
-                   if clvs else None)
-
     return {
         "n_bets": n,
-        "reportable": n >= roi_stats.MIN_BETS_REPORTABLE,
+        # MIN_BETS_REPORTABLE = 200 in shadow_pl_tracker; the same floor applies
+        # here so a 30-bet week is never read as a result.
+        "reportable": n >= 200,
         "strike_rate": round(wins / n, 4),
         "total_staked": round(staked, 2),
         "profit": round(float(pnl.sum()), 2),
-        "profit_gross": round(float(gross.sum()), 2),
-        # Net of commission — the only ROI staking decisions may ever use.
-        "roi_pct": _gated(roi_net),
-        "roi_net_pct": _gated(roi_net),
-        "roi_gross_pct": _gated(roi_gross),
+        "roi_pct": round(float(pnl.sum()) / staked * 100.0, 2) if staked else 0.0,
         "roi_ci95_bootstrap": ci,
         "max_drawdown": round(dd, 2),
         "max_drawdown_pct": round(dd_pct, 2),
@@ -321,8 +237,7 @@ def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
         "avg_price_taken": round(
             float(np.mean([float(r["price_taken"]) for r in settled
                            if r.get("price_taken")])), 2),
-        "mean_clv_pct": _gated(mean_clv),
-        "pct_clv_positive": _gated(pct_clv_pos),
+        "mean_clv_pct": round(float(np.mean(clvs)), 4) if clvs else None,
         "n_with_clv": len(clvs),
     }
 
@@ -338,7 +253,6 @@ LEDGER_COLUMNS = (
     "fair_odds", "price_taken", "price_close", "clv_pct",
     "has_real_market_odds", "stake_rule", "stake_units", "stake",
     "commission_rate", "settled", "won", "pnl", "shadow_kelly_json",
-    "refused", "settled_at_sp_fallback", "sp", "settled_pnl",
 )
 
 # The upsert names uq_selection_ledger_race_horse, which the migration creates
@@ -365,10 +279,6 @@ def _row_to_tuple(row: Dict[str, Any]) -> tuple:
         elif col == "shadow_kelly_json":
             plan = row.get("shadow_kelly")
             out.append(json.dumps(plan) if plan is not None else None)
-        elif col == "sp":
-            out.append(row.get("sp", row.get("price_close")))
-        elif col == "settled_pnl":
-            out.append(row.get("settled_pnl", row.get("pnl")))
         else:
             out.append(row.get(col))
     return tuple(out)
@@ -410,127 +320,6 @@ def persist_rows(conn, rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     return {"written": int(written), "skipped": 0, "reason": None}
 
 
-# Pending = written at tip time and not yet touched by a settle pass. Rows
-# the settle pass has seen always carry sp (even dead-heated/scratched ones),
-# so this predicate never re-picks them; rows whose result simply is not
-# collected yet stay pending for the next run.
-_SETTLE_PENDING_SQL = """
-    SELECT race_date, track, race_number, horse_name, selection_origin,
-           should_bet, confidence, raw_model_prob, calibrated_prob,
-           model_edge_pp, fair_odds, price_taken, has_real_market_odds,
-           stake_rule, stake, commission_rate, refused
-    FROM selection_ledger
-    WHERE race_date = %s AND settled = FALSE AND pnl IS NULL AND sp IS NULL
-"""
-
-
-def settle_pending_rows(conn, race_date, results_map: Optional[Dict] = None) -> Dict[str, Any]:
-    """Settle pending ledger rows for race_date against collected results.
-
-    The missing half of the measurement spine (roi-roadmap 01, acceptance #1):
-    rows are written pending at tip time; this pass fills sp / clv_pct /
-    settled_pnl once results exist. It uses the SAME results source as the
-    shadow tracker (shadow_pl_tracker.fetch_results_map) and the SAME
-    settlement contract (build_ledger_row) — no third path.
-
-    Settlement uses the commission_rate recorded on the row at tip time, never
-    a re-read of today's env: historical truth is not rewritten.
-
-    Idempotent: only still-pending rows are touched, and the rebuild is a pure
-    function of the stored row plus the result, so re-running rewrites
-    identical values. Flag-gated exactly like persist_rows.
-    """
-    if not _stride_flag("STRIDE_LEDGER_WRITE"):
-        return {"settled": 0, "unmatched": 0, "pending": 0,
-                "reason": "STRIDE_LEDGER_WRITE is off"}
-
-    # Fail LOUD, not silent, when the net-settlement migration is missing.
-    # Callers wrap this pass in non-fatal try/except so it can never break
-    # results collection — but without these columns every settle run would be
-    # a quiet no-op and tip-time rows would never get SP/CLV: the same
-    # silent-non-settlement class as the bug this pass exists to fix.
-    probe = conn.cursor()
-    try:
-        probe.execute(
-            "SELECT sp, settled_pnl, refused, settled_at_sp_fallback "
-            "FROM selection_ledger LIMIT 0")
-    except Exception as _schema_err:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        msg = ("selection_ledger is missing the net-settlement columns — "
-               "apply migrations/selection_ledger_net_settlement.sql")
-        print(f"  [LEDGER] *** WARNING: {msg} ({_schema_err}). Settlement "
-              "skipped; tip-time rows will NOT get SP/CLV until this is fixed.",
-              file=sys.stderr)
-        return {"settled": 0, "unmatched": 0, "pending": 0, "reason": msg}
-    finally:
-        try:
-            probe.close()
-        except Exception:
-            pass
-
-    from shadow_pl_tracker import _normalize_name
-    if results_map is None:
-        from shadow_pl_tracker import fetch_results_map
-        results_map = fetch_results_map(conn, race_date)
-
-    cur = conn.cursor()
-    try:
-        cur.execute(_SETTLE_PENDING_SQL, (race_date,))
-        cols = [d[0] for d in cur.description]
-        pending = [dict(zip(cols, r)) for r in cur.fetchall()]
-    finally:
-        cur.close()
-
-    rebuilt, unmatched = [], 0
-    for row in pending:
-        key = (_normalize_name(row["track"]), row["race_number"],
-               _normalize_name(row["horse_name"]))
-        res = results_map.get(key)
-        if not res:
-            unmatched += 1
-            continue
-        pos = res.get("position")
-        result = {
-            "won": bool(res.get("won")) or pos == 1,
-            "placed": bool(res.get("placed")) or (isinstance(pos, int) and pos <= 3),
-            "starting_price": res.get("sp"),
-            "scratched": pos is None,
-            "dh": isinstance(pos, str) and "dh" in pos.lower(),
-        }
-        cal, raw = row.get("calibrated_prob"), row.get("raw_model_prob")
-        pick = {
-            "horse": row.get("horse_name"),
-            "win_pct": cal * 100.0 if cal is not None else None,
-            "raw_model_pct": raw * 100.0 if raw is not None else None,
-            "edge_pct": row.get("model_edge_pp"),
-            "odds": row.get("price_taken"),
-            "fair_odds": row.get("fair_odds"),
-            "staking": row.get("stake_rule"),
-            "should_bet": row.get("should_bet"),
-            "confidence": row.get("confidence"),
-            "has_real_market_odds": row.get("has_real_market_odds"),
-            "selection_origin": row.get("selection_origin"),
-        }
-        race = {"race_date": row.get("race_date"), "track": row.get("track"),
-                "race_number": row.get("race_number")}
-        units = STAKE_UNITS.get(str(row.get("stake_rule")), 0.0)
-        bankroll = (float(row["stake"]) * 100.0 / units) if units else 10000.0
-        commission = (float(row["commission_rate"])
-                      if row.get("commission_rate") is not None else None)
-        rebuilt.append(build_ledger_row(
-            pick, race, result=result, commission_rate=commission,
-            bankroll=bankroll, refused=bool(row.get("refused"))))
-
-    out = {"settled": 0, "unmatched": unmatched, "pending": len(pending),
-           "reason": None}
-    if rebuilt:
-        out["settled"] = persist_rows(conn, rebuilt)["written"]
-    return out
-
-
 def _self_test():
     print("selection_ledger self-test")
 
@@ -565,62 +354,25 @@ def _self_test():
             "edge_pct": 5.0, "odds": 5.0, "fair_odds": 4.0, "staking": "2u",
             "confidence": "high", "should_bet": True, "has_real_market_odds": True}
 
-    prev_c = os.environ.pop("STRIDE_COMMISSION_RATE", None)
-    try:
-        pending = build_ledger_row(pick, race)
-        assert pending["settled"] is False and pending["pnl"] is None and pending["won"] is None
-        assert pending["clv_pct"] is None, "no close yet ⇒ no CLV"
-        # Default commission is 8% net: 0.25*(5-1)*0.92 - 0.75 = 0.17.
-        assert pending["commission_rate"] == 0.08, pending["commission_rate"]
-        assert abs(pending["ev_at_taken"] - 0.17) < 1e-9, pending["ev_at_taken"]
-        assert pending["stake"] == 200.0, pending["stake"]
+    pending = build_ledger_row(pick, race)
+    assert pending["settled"] is False and pending["pnl"] is None and pending["won"] is None
+    assert pending["clv_pct"] is None, "no close yet ⇒ no CLV"
+    assert abs(pending["ev_at_taken"] - 0.25) < 1e-9, pending["ev_at_taken"]
+    assert pending["stake"] == 200.0, pending["stake"]
 
-        winner = build_ledger_row(pick, race, result={"won": True, "starting_price": 4.0})
-        assert winner["pnl"] == 736.0 and winner["gross_pnl"] == 800.0, winner["pnl"]
-        assert winner["settled_pnl"] == winner["pnl"]
-        assert winner["settled_at_sp_fallback"] is False
-        assert abs(winner["clv_pct"] - 25.0) < 1e-9, winner["clv_pct"]
-        loser = build_ledger_row(pick, race, result={"won": False, "starting_price": 6.0})
-        assert loser["pnl"] == -200.0 and loser["gross_pnl"] == -200.0 and loser["clv_pct"] < 0
-        gross = build_ledger_row(pick, race, result={"won": True, "starting_price": 4.0},
-                                 commission_rate=0.0)
-        assert gross["pnl"] == 800.0, "explicit 0.0 still reproduces gross"
-        nsw = build_ledger_row(pick, race, result={"won": True, "starting_price": 4.0},
-                               commission_rate=0.10)
-        assert abs(nsw["pnl"] - 720.0) < 1e-9, "NSW/ACT 10% MBR case"
-        no_bet = build_ledger_row({**pick, "staking": "0u"}, race,
-                                  result={"won": True, "starting_price": 4.0})
-        assert no_bet["stake"] == 0.0 and no_bet["pnl"] == 0.0, "0u must never book P&L"
-        assert no_bet["settled_at_sp_fallback"] is False
-
-        # SP fallback is explicit; CLV is NULL without a real taken price.
-        fb = build_ledger_row({**pick, "odds": None}, race,
+    winner = build_ledger_row(pick, race, result={"won": True, "starting_price": 4.0})
+    assert winner["pnl"] == 800.0, winner["pnl"]
+    assert abs(winner["clv_pct"] - 25.0) < 1e-9, winner["clv_pct"]
+    loser = build_ledger_row(pick, race, result={"won": False, "starting_price": 6.0})
+    assert loser["pnl"] == -200.0 and loser["clv_pct"] < 0
+    comm = build_ledger_row(pick, race, result={"won": True, "starting_price": 4.0},
+                            commission_rate=0.08)
+    assert abs(comm["pnl"] - 736.0) < 1e-9, comm["pnl"]
+    no_bet = build_ledger_row({**pick, "staking": "0u"}, race,
                               result={"won": True, "starting_price": 4.0})
-        assert fb["settled_at_sp_fallback"] is True and fb["pnl"] == 552.0  # 200*(4-1)*0.92
-        assert fb["clv_pct"] is None, "clv_pct must be NULL when price_taken is NULL"
-
-        # Dead heats and scratchings never settle at full SP.
-        dh = build_ledger_row(pick, race, result={"won": True, "starting_price": 4.0, "dh": True})
-        assert dh["settled"] is False and dh["pnl"] is None and dh["won"] is True
-        scr = build_ledger_row(pick, race, result={"won": None, "starting_price": 4.0,
-                                                   "scratched": True})
-        assert scr["settled"] is False and scr["pnl"] == 0.0 and scr["won"] is None
-        assert scr["settled_at_sp_fallback"] is False
-
-        refused = build_ledger_row({**pick, "staking": "0u", "should_bet": False},
-                                   race, refused=True)
-        assert refused["refused"] is True and refused["price_taken"] == 5.0
-
-        os.environ["STRIDE_COMMISSION_RATE"] = "0.10"
-        env_c = build_ledger_row(pick, race)
-        assert env_c["commission_rate"] == 0.10, "env must drive the default rate"
-    finally:
-        os.environ.pop("STRIDE_COMMISSION_RATE", None)
-        if prev_c is not None:
-            os.environ["STRIDE_COMMISSION_RATE"] = prev_c
-    print(f"  ledger: win +{winner['pnl']:.0f} net / loss {loser['pnl']:.0f} / "
-          f"gross +{gross['pnl']:.0f} / SP fallback explicit / dh+scratched never full SP; "
-          f"CLV +{winner['clv_pct']:.0f}%")
+    assert no_bet["stake"] == 0.0 and no_bet["pnl"] == 0.0, "0u must never book P&L"
+    print(f"  ledger: win +{winner['pnl']:.0f} / loss {loser['pnl']:.0f} / "
+          f"8% commission +{comm['pnl']:.0f} / 0u books nothing; CLV +{winner['clv_pct']:.0f}%")
 
     prev = os.environ.pop("STRIDE_SHADOW_KELLY", None)
     try:
@@ -643,35 +395,17 @@ def _self_test():
         won = (i % 5 == 0)
         rows.append(build_ledger_row(
             {**pick, "horse": f"H{i}"}, race,
-            result={"won": won, "starting_price": 4.5},
-            commission_rate=0.0))
+            result={"won": won, "starting_price": 4.5}))
     wm = weekly_metrics(rows, bootstrap_n=300)
     assert wm["n_bets"] == 120
     assert wm["reportable"] is False, "120 bets is below the 200 reportability floor"
     assert abs(wm["strike_rate"] - 0.2) < 1e-9, wm["strike_rate"]
     assert wm["roi_ci95_bootstrap"]["n_boot"] == 300
+    assert wm["mean_clv_pct"] is not None and wm["n_with_clv"] == 120
     assert wm["profit_factor"] is not None and wm["max_drawdown"] > 0
-    # Below the floor the headline metrics are INSUFFICIENT_SAMPLE, not numbers.
-    for key in ("roi_pct", "roi_net_pct", "roi_gross_pct", "mean_clv_pct",
-                "pct_clv_positive"):
-        assert wm[key] == "INSUFFICIENT_SAMPLE", (key, wm[key])
-    assert wm["n_with_clv"] == 120
-
-    big_rows = list(rows)
-    for i in range(120, 220):
-        big_rows.append(build_ledger_row(
-            {**pick, "horse": f"H{i}"}, race,
-            result={"won": (i % 5 == 0), "starting_price": 4.5},
-            commission_rate=0.0))
-    wm2 = weekly_metrics(big_rows, bootstrap_n=300)
-    assert wm2["reportable"] is True and wm2["n_bets"] == 220
-    assert isinstance(wm2["mean_clv_pct"], float) and isinstance(wm2["pct_clv_positive"], float)
-    assert wm2["roi_net_pct"] == wm2["roi_gross_pct"] == wm2["roi_pct"], \
-        "at 0% commission net and gross coincide"
-    assert wm2["pct_clv_positive"] == 100.0, "5.0 taken vs 4.5 close is always positive CLV"
-    print(f"  weekly_metrics: 120 bets -> INSUFFICIENT_SAMPLE; "
-          f"220 bets -> ROI {wm2['roi_net_pct']:.1f}% net / {wm2['roi_gross_pct']:.1f}% gross, "
-          f"CLV {wm2['mean_clv_pct']:+.2f}% ({wm2['pct_clv_positive']:.0f}% >0)")
+    print(f"  weekly_metrics: {wm['n_bets']} bets, SR {wm['strike_rate']:.1%}, "
+          f"ROI {wm['roi_pct']:.1f}%, CI {wm['roi_ci95_bootstrap']['ci_95']}, "
+          f"reportable={wm['reportable']}")
 
     # --- persistence: SQL shape and the write flag, without a database ---
     import json as _json
@@ -686,11 +420,7 @@ def _self_test():
     tup = _row_to_tuple(winner)
     assert len(tup) == len(LEDGER_COLUMNS)
     assert tup[LEDGER_COLUMNS.index("horse_name")] == "Alpha", "horse -> horse_name mapping"
-    assert tup[LEDGER_COLUMNS.index("pnl")] == 736.0
-    assert tup[LEDGER_COLUMNS.index("settled_pnl")] == 736.0
-    assert tup[LEDGER_COLUMNS.index("sp")] == 4.0
-    assert tup[LEDGER_COLUMNS.index("refused")] is False
-    assert tup[LEDGER_COLUMNS.index("settled_at_sp_fallback")] is False
+    assert tup[LEDGER_COLUMNS.index("pnl")] == 800.0
     assert tup[LEDGER_COLUMNS.index("shadow_kelly_json")] is None
 
     os.environ["STRIDE_SHADOW_KELLY"] = "true"
@@ -750,18 +480,4 @@ def _self_test():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "settle":
-        # Settle pending rows against collected results, e.g.:
-        #   STRIDE_LEDGER_WRITE=true python selection_ledger.py settle 2026-03-28
-        from shadow_pl_tracker import _get_connection
-        conn = _get_connection()
-        try:
-            for _date in sys.argv[2:]:
-                _out = settle_pending_rows(conn, _date)
-                print(f"  [LEDGER] {_date}: settled={_out['settled']} "
-                      f"unmatched={_out['unmatched']} pending={_out['pending']}"
-                      + (f" ({_out['reason']})" if _out.get("reason") else ""))
-        finally:
-            conn.close()
-    else:
-        _self_test()
+    _self_test()

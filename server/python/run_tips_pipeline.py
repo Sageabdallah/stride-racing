@@ -43,7 +43,6 @@ from tips_day_aggregates import (
     select_value_plays,
 )
 from validate_tips import validate_file as validate_tips_file
-from market_prob import renormalise_probs, true_market_prob_pct
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
@@ -430,11 +429,6 @@ def run_mc_simulation(race_input):
         return None
 
 
-def _flag_enabled(name):
-    """Env-flag convention: default OFF unless explicitly true/1/yes."""
-    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
-
-
 def calculate_overround(runners):
     total_implied = 0
     valid = 0
@@ -676,9 +670,8 @@ def calibrate_and_score(horses, overround, race_class=""):
         h["rawModelProb"] = raw
 
         if odds and odds > 1:
-            # Shared overround-corrected market probability (task 05) —
-            # identical to the legacy (100 / odds) / overround formula.
-            true_market = true_market_prob_pct(odds, overround)
+            raw_implied = 100 / odds
+            true_market = raw_implied / overround
 
             # Model weight by odds band — trust model MORE at short prices
             # Kelly audit: $1-3 horses win 41%, model predicts 17% after blend.
@@ -706,15 +699,6 @@ def calibrate_and_score(horses, overround, race_class=""):
             h["trueMarketProb"] = 0
             h["fairOdds"] = None
             h["modelEdge"] = 0
-
-    # Task 05: per-race renormalisation after the mw market anchor
-    # (STRIDE_RENORMALISE_FIELD, default OFF — legacy byte-identical when
-    # off). The anchor leaves published winPercentage values that do not sum
-    # to 100 within a race, so edge/EV are compared on inconsistent scales.
-    # When on, edge and EV consume the renormalised probability and tier
-    # transitions are logged, never silently dropped.
-    if _flag_enabled("STRIDE_RENORMALISE_FIELD"):
-        _renormalise_field(horses)
 
     raw_probs = [h.get("rawModelProb", 0) for h in horses]
     mc_spread = (max(raw_probs) - min(raw_probs)) if len(raw_probs) > 1 else 0
@@ -813,45 +797,6 @@ def calibrate_and_score(horses, overround, race_class=""):
         print(f"    [MC_FLAT] gap={confidence_gap:.1f}pp, penalty={penalty_mult:.2f}", file=sys.stderr)
 
     return horses
-
-
-def _renormalise_field(horses):
-    """Per-race normalisation: winPercentage_i /= sum(field) (task 05).
-
-    Runs after the mw market anchor, behind STRIDE_RENORMALISE_FIELD. Edge
-    (modelEdge) and EV (compute_confidence, downstream) consume the
-    renormalised probability; trueMarketProb is unchanged. Runners whose
-    confidence tier would change are logged via a structured
-    [RENORM_TIER_TRANSITION] line — never silently dropped (guardrail).
-    """
-    new_probs = renormalise_probs([h.get("winPercentage", 0) for h in horses])
-    if sum(new_probs) <= 0:
-        return
-    transitions = 0
-    for h, new_win in zip(horses, new_probs):
-        pre_win = h.get("winPercentage", 0)
-        pre_edge = h.get("modelEdge", 0)
-        true_market = h.get("trueMarketProb", 0) or 0
-        new_edge = round(new_win - true_market, 2) if true_market > 0 else pre_edge
-        pre_tier = compute_confidence({**h, "winPercentage": pre_win, "modelEdge": pre_edge})
-        post_tier = compute_confidence({**h, "winPercentage": new_win, "modelEdge": new_edge})
-        h["_winPctBeforeRenorm"] = pre_win
-        h["winPercentage"] = new_win
-        h["modelEdge"] = new_edge
-        if pre_tier != post_tier:
-            transitions += 1
-            print("    [RENORM_TIER_TRANSITION] " + json.dumps({
-                "horse": h.get("horse", "?"),
-                "tier_before": pre_tier,
-                "tier_after": post_tier,
-                "win_pct_before": pre_win,
-                "win_pct_after": new_win,
-                "edge_before": pre_edge,
-                "edge_after": new_edge,
-            }), file=sys.stderr)
-    field_sum = sum(h.get("winPercentage", 0) for h in horses)
-    print(f"    [RENORM] field sum -> {field_sum:.6f} "
-          f"({transitions} tier transition(s))", file=sys.stderr)
 
 
 def apply_safety_filters(scored_horses, race_class=""):
@@ -1068,80 +1013,6 @@ def compute_staking(h):
     if conf == "medium":
         return "1u"
     return "0u"
-
-
-def fetch_prior_sectionals(horse_names, race_date):
-    """Batch-fetch the latest PRIOR-start sectional features for a field
-    (serve-time liveness plumbing, STRIDE_SERVE_LIVE_FEATURES).
-
-    One query per race. Pre-race only: st.race_date < race_date (the same
-    as-of rule as the training view's LATERAL in refresh_training_view_v2).
-    Returns {lower(horse_name): {z_200m: ..., z_400m: ..., z_600m: ...,
-    z_800m: ..., lambda_decay: ..., svi: ..., rsi: ...,
-    trip_cost_seconds: ...}} with FEATURE_COLUMNS names (the view's prior_*
-    prefix maps away per retrain_v2.VIEW_TO_FEATURE_MAP). Horses with no
-    prior sectional row are simply absent — the builder serves NaN (never 0)
-    for them.
-    """
-    from serve_features import SECTIONAL_LIVE_FEATURES
-    out = {}
-    names = sorted({(n or "").strip().lower() for n in horse_names if (n or "").strip()})
-    if not names:
-        return out
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT DISTINCT ON (LOWER(horse_name))
-                LOWER(horse_name), z_200m, z_400m, z_600m, z_800m,
-                lambda_decay, svi, rsi, trip_cost_seconds
-            FROM sectional_times
-            WHERE LOWER(horse_name) = ANY(%s)
-              AND race_date < %s
-              AND (lambda_decay IS NOT NULL OR z_200m IS NOT NULL)
-            ORDER BY LOWER(horse_name), race_date DESC
-        """, (names, race_date))
-        for row in cur.fetchall():
-            out[row[0]] = {k: v for k, v in zip(SECTIONAL_LIVE_FEATURES, row[1:])}
-    finally:
-        conn.close()
-    return out
-
-
-def _write_serve_liveness_shadow(race_date, track, race_num, entries):
-    """Append one race's shadow-liveness comparison to
-    logs/serve_liveness_shadow_<date>.json (STRIDE_SERVE_LIVE_FEATURES_SHADOW).
-
-    Each entry: horse, legacy_prob_pct (published), live_prob_pct (would-be),
-    delta_pp, plus field ranks under each variant. tier_change = the would-be
-    top-3 in/out flip (the tiers the ML prob feeds). Never raises.
-    """
-    try:
-        legacy_rank = {e["horse"]: i + 1 for i, e in enumerate(
-            sorted(entries, key=lambda x: -x["legacy_prob_pct"]))}
-        live_rank = {e["horse"]: i + 1 for i, e in enumerate(
-            sorted(entries, key=lambda x: -x["live_prob_pct"]))}
-        for e in entries:
-            e["delta_pp"] = round(e["live_prob_pct"] - e["legacy_prob_pct"], 2)
-            e["legacy_rank"] = legacy_rank[e["horse"]]
-            e["live_rank"] = live_rank[e["horse"]]
-            e["tier_change"] = (legacy_rank[e["horse"]] <= 3) != (live_rank[e["horse"]] <= 3)
-        log_dir = PROJECT_ROOT / "logs"
-        os.makedirs(log_dir, exist_ok=True)
-        path = log_dir / f"serve_liveness_shadow_{race_date}.json"
-        blocks = []
-        if path.exists():
-            try:
-                with open(path) as f:
-                    blocks = json.load(f)
-            except Exception:
-                blocks = []
-        blocks.append({"track": track, "race_number": race_num,
-                       "runners": entries})
-        with open(path, "w") as f:
-            json.dump(blocks, f, indent=2, default=str)
-    except Exception as e:
-        print(f"    [FEATURES] shadow log write failed (non-fatal): {e}", file=sys.stderr)
 
 
 def enrich_with_db(horses, track, race_date, all_field_names=None):
@@ -1369,99 +1240,6 @@ def _safe_json(val):
         return json.dumps(val, default=str)
     except Exception:
         return None
-
-
-def launch_late_odds_watcher(date_str):
-    """ROI task 04 (G1): start the day's T-5min late-odds watcher, detached.
-
-    The tips run is the one step every real invocation path shares — the
-    /stride-full runbook and the Node scheduler both reach run_tips_pipeline
-    without ever running run_full_pipeline.py, so a watcher wired only into
-    that orchestrator leaves the odds clock dead under automation. Launching
-    here (fire-and-forget, start_new_session) covers every path;
-    capture_late_odds deduplicates via a per-date pidfile, so a second launch
-    from run_full_pipeline is a no-op. Gated by the same
-    STRIDE_ODDS_SNAPSHOT_WRITE switch as the tip_time hook
-    (STRIDE_SKIP_ODDS_WATCH=true also skips), and a launch failure must never
-    break tipping.
-    """
-    try:
-        if os.environ.get("STRIDE_SKIP_ODDS_WATCH", "false").strip().lower() in ("true", "1", "yes"):
-            print("  [LATE_ODDS] watcher skipped (STRIDE_SKIP_ODDS_WATCH)", file=sys.stderr)
-            return
-        from odds_snapshots import snapshot_write_enabled
-        if not snapshot_write_enabled():
-            print("  [LATE_ODDS] watcher skipped (STRIDE_ODDS_SNAPSHOT_WRITE off)", file=sys.stderr)
-            return
-        script_dir = Path(__file__).resolve().parent
-        log_path = script_dir / "logs" / f"late_odds_{date_str}.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "ab") as logf:
-            proc = subprocess.Popen(
-                [sys.executable, str(script_dir / "capture_late_odds.py"),
-                 "--watch", "--date", date_str],
-                cwd=str(script_dir), stdout=logf, stderr=logf,
-                start_new_session=True)
-        print(f"  [LATE_ODDS] watcher launched (pid {proc.pid}) -> {log_path.name}",
-              file=sys.stderr)
-    except Exception as e:  # a monitoring miss must never fail tipping
-        print(f"  [LATE_ODDS] watcher launch failed (non-fatal): {e}", file=sys.stderr)
-
-
-def persist_selection_ledger(race_tips, date_str):
-    """Write one selection-ledger row per race — bet or refused (roi-roadmap 01).
-
-    Measurement only: a no-op unless STRIDE_LEDGER_WRITE=true (default off),
-    and every failure is logged and swallowed — this must never delay or break
-    the tips pipeline. Refused rows carry the would-be price so EV-gate
-    quality becomes measurable; they are staked 0u and can never book P&L.
-    """
-    try:
-        from selection_ledger import _stride_flag, build_ledger_row, persist_rows
-    except Exception as _imp_err:
-        print(f"  [LEDGER] selection_ledger unavailable: {_imp_err}", file=sys.stderr)
-        return
-    if not _stride_flag("STRIDE_LEDGER_WRITE"):
-        return
-
-    rows = []
-    for race in race_tips:
-        if race.get("error"):
-            continue
-        race_key = {"race_date": date_str, "track": race.get("track"),
-                    "race_number": race.get("race_number")}
-        bet_pick = race.get("bet_pick")
-        if isinstance(bet_pick, dict) and bet_pick.get("should_bet"):
-            rows.append(build_ledger_row(bet_pick, race_key, refused=False))
-            continue
-        leader = race.get("raw_model_leader")
-        if not isinstance(leader, dict) or not leader.get("horse"):
-            continue
-        refused_pick = dict(leader)
-        refused_pick["should_bet"] = False
-        refused_pick["staking"] = "0u"  # a refused row must never book P&L
-        refused_pick["selection_origin"] = (
-            leader.get("selection_origin") or "ev_gate_refused")
-        rows.append(build_ledger_row(refused_pick, race_key, refused=True))
-
-    if not rows:
-        return
-    try:
-        conn = db_connect()
-    except Exception as _db_err:
-        print(f"  [LEDGER] DB unavailable — {len(rows)} row(s) not written: {_db_err}",
-              file=sys.stderr)
-        return
-    try:
-        persist_rows(conn, rows)
-    except Exception as _write_err:
-        print(f"  [LEDGER] write failed (pipeline unaffected): {_write_err}",
-              file=sys.stderr)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 def store_selections_in_db(race_tips, date_str):
@@ -2377,19 +2155,6 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             field_size = len(runners)
             print(f"\n  {track} R{race_num} — {race_name} {distance} ({going}) | {field_size} runners", file=sys.stderr)
 
-            # ROI task 04: persist the odds actually knowable at prediction
-            # time — one tip_time row per runner per bookmaker. Measurement
-            # only: fire-and-forget, degrades to a no-op without a DB, and
-            # must never delay or break tipping (STRIDE_ODDS_SNAPSHOT_WRITE=0
-            # disables).
-            try:
-                from odds_snapshots import capture_tip_time_snapshots
-                capture_tip_time_snapshots(
-                    track=track, race_number=race_num, date_str=date_str,
-                    runners=runners, race=race)
-            except Exception:
-                pass
-
             try:
                 from race_normaliser import normalise_race as norm_race
                 race["course"] = track
@@ -2483,37 +2248,6 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 _ml = RacingMLModel()
                 if _ml.is_trained:
                     import pandas as _pd
-                    # Task 03: single shared feature builder (serve_features.py) —
-                    # one assembly used by BOTH inference paths. NaN-preserve
-                    # contract (nan_contract.py) and interaction parity
-                    # (STRIDE_INTERACTION_PARITY, default off) are applied there.
-                    from serve_features import build_feature_row, log_movement_inert_once
-                    from serve_features import (compute_race_pace,
-                                                serve_live_features_enabled,
-                                                serve_live_features_shadow_enabled)
-                    log_movement_inert_once(date_str)
-                    # Serve-feature liveness (FEATURE_PROVENANCE.md finding 1):
-                    # 15 trained features carrying 25.45% of importance mass
-                    # are plumbed only under STRIDE_SERVE_LIVE_FEATURES
-                    # (default OFF). Shadow mode scores both ways, publishes
-                    # LEGACY, logs deltas. Any error degrades to legacy.
-                    _live_on = serve_live_features_enabled()
-                    _shadow_on = serve_live_features_shadow_enabled() and not _live_on
-                    _live_pace = None
-                    _live_sect = {}
-                    if _live_on or _shadow_on:
-                        try:
-                            _live_pace = compute_race_pace(runners)
-                        except Exception as _pace_err:
-                            print(f"    [FEATURES] pace liveness failed (legacy kept): {_pace_err}", file=sys.stderr)
-                            _live_pace = None
-                        try:
-                            _live_sect = fetch_prior_sectionals(
-                                [r.get("horse", "") for r in runners], date_str)
-                        except Exception as _sect_err:
-                            print(f"    [FEATURES] sectional liveness fetch failed (legacy kept): {_sect_err}", file=sys.stderr)
-                            _live_sect = {}
-                    _shadow_entries = []
                     # Phase 5: within-race relative market position (favourite ladder)
                     try:
                         from relative_market import compute_field_relative_market
@@ -2521,46 +2255,90 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     except Exception:
                         _rel_mkt = [{"fair_implied_prob": 0.0, "odds_rank": 0.0, "odds_rank_pct": 0.0}] * len(runners)
                     for _ri, runner in enumerate(runners):
-                        _sect_row = _live_sect.get((runner.get("horse") or "").strip().lower())
-                        feat = build_feature_row(
-                            runner,
-                            market_odds=extract_odds(runner),
-                            distance_m=distance_m,
-                            field_size=field_size,
-                            rel_market=_rel_mkt[_ri],
-                            pace=(_live_pace[_ri] if _live_pace else None),
-                            sectionals=_sect_row,
-                        )
+                        feat = {}
+                        feat["market_odds"] = extract_odds(runner) or 0
+                        feat.update(_rel_mkt[_ri])
+                        feat["barrier_draw"] = int(runner.get("draw") or runner.get("barrier") or 0)
+                        wt = str(runner.get("weight", "0")).replace("kg", "").strip()
+                        feat["weight_kg"] = float(wt) if wt else 0
+                        feat["distance"] = distance_m
+                        feat["field_size"] = field_size
+                        feat["class_level"] = runner.get("class_level") or 0
+                        for k in ["days_since_run", "is_first_up", "is_second_up", "course_strike_rate",
+                                   "distance_strike_rate", "weighted_form_score", "class_movement",
+                                   "is_class_drop", "is_class_rise", "improvement_score", "is_improving",
+                                   "is_in_form_cycle", "has_dominant_win", "is_winning_combo",
+                                   "jockey_trainer_strike_rate", "is_first_time_stakes",
+                                   "form_direction_slope", "speed_rating_trajectory",
+                                   "sectional_trajectory", "campaign_run_number",
+                                   "weight_change", "jockey_booking_change",
+                                   "fresh_x_trajectory", "first_up_win_rate",
+                                   "second_up_win_rate", "consistency_score",
+                                   "going_suitability",
+                                   "dist_sectional_slope",
+                                   "distance_direction_flag",
+                                   "dist_sectional_recency_weighted",
+                                   "sectional_rank_at_distance",
+                                   "sectional_result_divergence",
+                                   "first_at_distance_sectional_quality",
+                                   "is_bounce_candidate",
+                                   "bounce_severity",
+                                   "trial_recency",
+                                   "trial_count_60d",
+                                   "trial_x_experience",
+                                   "trainer_trial_pattern",
+                                   "trial_quality_score"]:
+                            feat[k] = runner.get(k, 0)
+                        # Explicit binary — data availability flag, [0,1] enforced
+                        feat["has_sectional_data"] = int(bool(runner.get("has_sectional_data", 0)))
+                        # runs_since_peak: NaN-preserving (tree models handle missingness)
+                        feat["runs_since_peak"] = runner.get("runs_since_peak", float("nan"))
+                        feat["trainer_momentum_score"] = runner.get("trainer_momentum_score", 50)
+                        for k in ["pace_pressure_score", "leader_advantage",
+                                   "closer_advantage", "barrier_relevance_score",
+                                   "field_size_context", "market_efficiency_flag",
+                                   "pace_clarity_score"]:
+                            feat[k] = runner.get(k, 0.5)
+                        feat["td_pace_bias"] = runner.get("td_pace_bias", 0.5)
+                        feat["td_upset_rate"] = runner.get("td_upset_rate", 0.2)
+                        feat["td_barrier_style_edge"] = runner.get("td_barrier_style_edge", 0)
+                        feat["td_closing_speed_bias"] = runner.get("td_closing_speed_bias", 0)
+                        # STRIDE_INTERACTION_PARITY: compute the five interaction
+                        # features from the same definitions training used
+                        # (feature_interactions.py) instead of restating them
+                        # here. barrier_x_pace_inv is inverted between the two —
+                        # training fits barrier_advantage * pace_pressure_score,
+                        # the inline version below serves
+                        # barrier_advantage * (1 - pace_pressure_score) — and the
+                        # two agree only at 0.5, which is the default used when
+                        # pace data is missing. Default OFF: enabling changes
+                        # which horses are tipped, so it needs a backtest first.
+                        if os.environ.get("STRIDE_INTERACTION_PARITY", "false").strip().lower() in ("true", "1", "yes"):
+                            from feature_interactions import compute_interactions
+                            _src = dict(feat)
+                            for _k in ("pace_pressure_score", "barrier_advantage", "z_200m"):
+                                if runner.get(_k) is not None:
+                                    _src[_k] = runner.get(_k)
+                            feat.update(compute_interactions(_src))
+                        else:
+                            _crn = feat.get("campaign_run_number", 1)
+                            _fp = max(0, 1 - abs(_crn - 3) * 0.15)
+                            feat["fitness_x_distance"] = _fp * feat.get("distance_strike_rate", 0)
+                            _pps = runner.get("pace_pressure_score", 0.5)
+                            feat["barrier_x_pace_inv"] = runner.get("barrier_advantage", 0) * (1 - _pps)
+                            feat["sectional_x_going"] = runner.get("z_200m", 0) * feat.get("going_suitability", 0.5)
+                            feat["class_drop_x_trajectory"] = feat.get("is_class_drop", 0) * feat.get("form_direction_slope", 0)
+                            _cf = max(0, 1 - max(0, _crn - 5) * 0.2)
+                            feat["campaign_run_x_fitness"] = _crn * _cf
+                        import math as _math
+                        _ddir = max(0, feat.get("distance_direction_flag", 0))
+                        _dslope = feat.get("dist_sectional_slope", 0)
+                        _dslope = 0 if (_dslope is None or (isinstance(_dslope, float) and _math.isnan(_dslope))) else _dslope
+                        feat["step_up_x_dist_slope"] = round(_ddir * max(0, _dslope), 4)
                         df = _pd.DataFrame([feat])
                         X = _ml.prepare_features(df)
                         ml_prob = float(_ml.predict_proba(X, distance_m=distance_m)[0])
                         runner["mlPredictedProb"] = round(ml_prob * 100, 2)
-                        if _shadow_on:
-                            # Shadow: score the PLUMBED dict too, publish the
-                            # legacy one above, log the delta.
-                            try:
-                                feat_live = build_feature_row(
-                                    runner,
-                                    market_odds=extract_odds(runner),
-                                    distance_m=distance_m,
-                                    field_size=field_size,
-                                    rel_market=_rel_mkt[_ri],
-                                    pace=(_live_pace[_ri] if _live_pace else None),
-                                    sectionals=_sect_row,
-                                    force_live=True,
-                                )
-                                X_live = _ml.prepare_features(_pd.DataFrame([feat_live]))
-                                ml_prob_live = float(_ml.predict_proba(X_live, distance_m=distance_m)[0])
-                                _shadow_entries.append({
-                                    "horse": runner.get("horse", ""),
-                                    "legacy_prob_pct": round(ml_prob * 100, 2),
-                                    "live_prob_pct": round(ml_prob_live * 100, 2),
-                                })
-                            except Exception as _sh_err:
-                                print(f"    [FEATURES] shadow score failed for {runner.get('horse','?')} (non-fatal): {_sh_err}", file=sys.stderr)
-                    if _shadow_on and _shadow_entries:
-                        _write_serve_liveness_shadow(date_str, track, race_num, _shadow_entries)
-                        print(f"    [FEATURES] shadow liveness logged {len(_shadow_entries)} runners (legacy published)", file=sys.stderr)
                     n_ml = sum(1 for r in runners if r.get("mlPredictedProb", 0) > 0)
                     avg_ml = sum(r.get("mlPredictedProb", 0) for r in runners) / max(len(runners), 1)
                     print(f"    [ML] {n_ml}/{len(runners)} runners scored (avg {avg_ml:.1f}%)", file=sys.stderr)
@@ -3110,16 +2888,9 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             except Exception as _conv_db_err:
                 print(f"  [BLENDER] Convergence DB write failed: {_conv_db_err}", file=sys.stderr)
 
-    # roi-roadmap 01: ledger capture is measurement-only and must never block
-    # the pipeline; it no-ops unless STRIDE_LEDGER_WRITE=true.
-    persist_selection_ledger(all_race_tips, date_str)
-
     if store_in_db:
         store_selections_in_db(all_race_tips, date_str)
         store_final_probs_in_audit(all_race_tips, date_str)
-        # ROI task 04 (G1): tips is the invocation point every real path
-        # shares — the odds clock starts here, or it does not start at all.
-        launch_late_odds_watcher(date_str)
     else:
         print("  [DB] Skipping selection storage by request", file=sys.stderr)
 

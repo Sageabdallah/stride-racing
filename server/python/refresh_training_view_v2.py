@@ -197,30 +197,6 @@ DDL_TRAINING_VIEW = dedent(
             stride_norm_name(r.horse_name) AS horse_name_norm
         FROM race_results_history r
         WHERE r.position IS NOT NULL
-    ),
-    -- ROI task 04 (additive): tip_time odds snapshots, one aggregate row per
-    -- runner. tip_time_odds is the cross-bookmaker median at capture time.
-    -- Requires migrations/runner_odds_snapshots.sql to have been applied.
-    -- Only provably pre-jump captures qualify: the table is append-only and
-    -- capture fires on every run_tips invocation, so a post-race rerun of a
-    -- past date would otherwise median post-jump prices into training odds.
-    -- NULL seconds_to_jump (no advertised jump on the card) is excluded for
-    -- the same reason — unknowable timing cannot be trusted as-of tip time.
-    odds_snap AS (
-        SELECT
-            s.race_date,
-            stride_norm_track(s.track) AS track_norm,
-            s.race_number,
-            s.horse_name_norm,
-            percentile_cont(0.5) WITHIN GROUP (ORDER BY s.decimal_odds)::double precision AS tip_time_odds,
-            (ARRAY_AGG(s.seconds_to_jump ORDER BY s.captured_at ASC))[1] AS seconds_to_jump
-        FROM runner_odds_snapshots s
-        WHERE s.snapshot_kind = 'tip_time'
-          AND s.race_date IS NOT NULL
-          AND s.horse_name_norm IS NOT NULL
-          AND s.seconds_to_jump IS NOT NULL
-          AND s.seconds_to_jump <= 0
-        GROUP BY 1, 2, 3, 4
     )
     SELECT
         r.id AS result_id,
@@ -257,21 +233,6 @@ DDL_TRAINING_VIEW = dedent(
         p.prediction_source,
         p.prediction_quality,
         p.selection_id AS prediction_selection_id,
-        -- ROI task 04 (additive only): the odds actually knowable at
-        -- prediction time. The existing market_odds / sp_odds mapping above
-        -- is deliberately untouched (retrain switch is task 12). odds_source
-        -- mirrors the has_real_market_odds semantics at inference
-        -- (run_tips_pipeline.evaluate_bet_candidate): 'snapshot' = captured
-        -- tip_time quote exists, 'racecard' = live market quote carried by
-        -- the prediction join, 'sp_fallback' = only SP available.
-        osn.tip_time_odds,
-        CASE
-            WHEN osn.tip_time_odds IS NOT NULL THEN 'snapshot'
-            WHEN p.market_odds IS NOT NULL THEN 'racecard'
-            WHEN r.sp_odds IS NOT NULL THEN 'sp_fallback'
-            ELSE NULL
-        END AS odds_source,
-        osn.seconds_to_jump,
         ls.z_200m AS prior_z_200m,
         ls.z_400m AS prior_z_400m,
         ls.z_600m AS prior_z_600m,
@@ -288,11 +249,6 @@ DDL_TRAINING_VIEW = dedent(
      AND p.race_number = r.race_number
      AND p.horse_name_norm = r.horse_name_norm
      AND p.track_norm = r.track_norm
-    LEFT JOIN odds_snap osn
-      ON osn.race_date = r.race_date::date
-     AND osn.race_number = r.race_number
-     AND osn.track_norm = r.track_norm
-     AND osn.horse_name_norm = r.horse_name_norm
     LEFT JOIN LATERAL (
         SELECT
             st.race_date AS sectional_date,
@@ -358,8 +314,7 @@ def refresh_training_view_v2(db_url: str) -> dict[str, object]:
                         COUNT(model_probability) AS model_probability_rows,
                         COUNT(predicted_win_prob) AS predicted_win_prob_rows,
                         COUNT(expected_value) AS expected_value_rows,
-                        COUNT(market_odds) AS market_odds_rows,
-                        COUNT(tip_time_odds) AS tip_time_odds_rows
+                        COUNT(market_odds) AS market_odds_rows
                     FROM training_view_v2
                     """
                 )
@@ -370,7 +325,6 @@ def refresh_training_view_v2(db_url: str) -> dict[str, object]:
                     "predicted_win_prob_rows": row[2],
                     "expected_value_rows": row[3],
                     "market_odds_rows": row[4],
-                    "tip_time_odds_rows": row[5],
                 }
                 cur.execute(
                     """
@@ -390,7 +344,6 @@ def refresh_training_view_v2(db_url: str) -> dict[str, object]:
         "predicted_win_prob_rows": counts["predicted_win_prob_rows"],
         "expected_value_rows": counts["expected_value_rows"],
         "market_odds_rows": counts["market_odds_rows"],
-        "tip_time_odds_rows": counts["tip_time_odds_rows"],
         "prediction_quality_breakdown": quality,
     }
 
@@ -410,7 +363,6 @@ def main() -> int:
             "predicted_win_prob_rows": result["predicted_win_prob_rows"],
             "expected_value_rows": result["expected_value_rows"],
             "market_odds_rows": result["market_odds_rows"],
-            "tip_time_odds_rows": result["tip_time_odds_rows"],
         }
     )
     print("prediction_quality_breakdown", result["prediction_quality_breakdown"])
