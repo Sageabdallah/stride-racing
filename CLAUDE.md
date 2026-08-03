@@ -25,6 +25,34 @@ Connection: use `DATABASE_URL` from `.env` — never hardcode credentials
 - backfill_tips_contract.py MUST run after run_tips_pipeline.py — frontend
   cannot display tips without it
 
+## Working tree discipline (every session, interactive included)
+
+More than one agent session works in this repository at the same time. The
+shared checkout at `Race-Analytics/` does not belong to any one of them, and
+two sessions editing it have already destroyed each other's uncommitted work
+twice — once mid-edit, with four files reverted before they could be committed.
+
+**Work in your own git worktree. Never in the shared checkout.**
+
+    git fetch origin
+    git worktree add ../wt-<short-name> -b <branch> origin/main
+
+**Cut every branch from `origin/main` explicitly — never from whatever HEAD
+happens to be.** `git checkout -b <branch>` inherits the current HEAD, and the
+current HEAD may be another session's feature branch. This failure is silent:
+the branch name looks right, the diff looks right, and the base is wrong. It is
+only visible if you check. So check, before making any changes:
+
+    git rev-parse HEAD origin/main    # these must match
+
+**Re-read `origin/main` before you open a PR and again before you merge.** It
+moves under you during a long task; the other session merges PRs while you
+work. A base that was current when you started often is not by the time you
+finish.
+
+Remove the worktree once its branch is merged and you no longer need it:
+`git worktree remove ../wt-<short-name>`.
+
 ## Key Files
 The full pipeline reference lives under `.claude/skills/` — `stride-full` for the
 system reference and model baselines, `stride-health` for health gates and retrain
