@@ -438,10 +438,10 @@ def test_unset_override_leaves_the_builtin_list_exactly_as_it_was(monkeypatch):
 
 
 def test_matcher_is_unchanged_against_every_stored_card_spelling(monkeypatch):
-    """The bidirectional substring test is loose, and that looseness is
-    load-bearing. These are the distinct `course` spellings across the stored
-    racecards/*.json corpus; a canonical-key rewrite would silently drop the
-    starred ones, which is why the matcher moved without being rewritten."""
+    """The forward substring test is loose, and that looseness is load-bearing.
+    These are the distinct `course` spellings across the stored racecards/*.json
+    corpus; a canonical-key rewrite would silently drop the starred ones, which
+    is why the matcher moved without being rewritten."""
     monkeypatch.delenv("STRIDE_TARGET_TRACKS", raising=False)
     keeps = [
         "Randwick", "Royal Randwick", "Rosehill Gardens", "Canterbury Park",
@@ -462,6 +462,34 @@ def test_matcher_is_unchanged_against_every_stored_card_spelling(monkeypatch):
     for course in ("Lismore", "Goulburn", "Fannie Bay", "Pakenham Synthetic",
                    "Wagga", "Te Rapa", "Sunshine Coast"):
         assert not tt.is_target_track(course), course
+
+
+def test_a_course_that_is_a_prefix_of_a_target_is_not_a_target(monkeypatch):
+    """`Warwick` is not `Warwick Farm`.
+
+    Punting Form's card for 2026-08-04 listed a meeting spelled exactly
+    `Warwick` — the Queensland country track, whose results-side spelling is
+    `Picklebet Park Warwick`. Under the old bidirectional matcher `warwick` was
+    a substring of the target `warwick farm` (Sydney metro), so nine races were
+    built and seeded against a track the meeting has nothing to do with. The
+    reversed direction was measured to change nothing across 312 distinct
+    course spellings, so it is gone.
+
+    This asserts the direction, not just the one name: containment must run
+    target-inside-course and never the reverse.
+    """
+    monkeypatch.delenv("STRIDE_TARGET_TRACKS", raising=False)
+    assert not tt.is_target_track("Warwick")
+    assert not tt.is_target_track("Picklebet Park Warwick")
+    assert tt.is_target_track("Warwick Farm")
+
+    # Every target is a prefix of itself plus a space — none of those truncated
+    # forms may match, or the same class of error returns under another name.
+    for target in tt.DEFAULT_TARGET_TRACKS:
+        head = target.split()[0]
+        if head != target and head not in tt.DEFAULT_TARGET_TRACKS:
+            assert not tt.is_target_track(head), (
+                f"{head!r} matched via the target {target!r}")
 
 
 # ----------------------------------------------------------------------

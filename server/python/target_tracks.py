@@ -109,8 +109,34 @@ def target_source() -> str:
 
 
 def is_target_track(course: str) -> bool:
-    """The original matcher, moved not rewritten — see the module docstring."""
+    """Substring match in one direction only: a target name must appear inside
+    the course name.
+
+    The original matcher tested both directions — `t in course or course in t`.
+    The second half admits any course whose name is a *prefix* of a target, and
+    the tracks it lets in are not the tracks it looks like it lets in. Punting
+    Form's card for 2026-08-04 listed a meeting named exactly `Warwick`. That is
+    the Queensland country track (its results-side spelling is
+    `Picklebet Park Warwick`); `warwick` is a substring of the target
+    `warwick farm`, which is Sydney metro. Nine races were built and seeded
+    under a target the course has nothing to do with.
+
+    Removing the reversed direction was measured before it was applied, over
+    312 distinct course spellings — every `course` in the stored
+    `racecards/racecard_*.json` plus every distinct `track` in
+    `race_results_history`. **The two matchers disagree on none of them**: 40
+    matched before, 40 after. It keeps all seven spellings a canonical-key
+    rewrite was previously measured to drop (`Sportsbet-Ballarat`,
+    `Pinjarra Scarpside`, both Sandown spellings, `Southside Cranbourne`,
+    `Aquis Park Gold Coast Poly`, `Sandown-Lakeside`), because those all
+    *contain* their target rather than being contained by it.
+
+    So the reversed direction earned nothing on real data and cost one wrong
+    track. The five other courses that match by containment — Caulfield,
+    Geelong, Gold Coast, Kensington, Randwick — are all target entries in their
+    own right and match on the forward direction regardless.
+    """
     if collect_all():
         return True
     course_lower = (course or "").lower()
-    return any(t in course_lower or course_lower in t for t in target_tracks())
+    return any(t in course_lower for t in target_tracks())
