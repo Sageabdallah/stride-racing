@@ -464,6 +464,44 @@ def test_matcher_is_unchanged_against_every_stored_card_spelling(monkeypatch):
         assert not tt.is_target_track(course), course
 
 
+def test_warwick_does_not_reach_the_card_through_the_downloader(monkeypatch,
+                                                                tmp_path):
+    """The one that would have caught it. Runs the real download path.
+
+    The sibling test below asserts target_tracks.is_target_track rejects
+    `Warwick`. That was not enough: download_racecards carried its own inline
+    copy of the matcher and never called the helper, so correcting the helper
+    left the card being built from the unfixed copy and the suite stayed green.
+    A unit test on a function nothing calls proves nothing about the path.
+
+    So this drives fetch_racecards -> main() over the real 2026-08-04 meeting
+    list (Gundagai, Quirindi, Warwick, Bairnsdale — the four Punting Form
+    returned) and asserts on what lands on disk. detail_fn raises, so any
+    meeting that survives the filter fails the test loudly rather than
+    silently producing a card.
+    """
+    meetings = _fixture("pf_meetingslist_2026-08-04.json")
+
+    def detail_fn(meeting_id):
+        raise AssertionError(
+            f"meeting_detail({meeting_id}) called — a non-target meeting "
+            "survived the filter and would have been built into the card")
+
+    out_dir = _wire(monkeypatch, tmp_path, lambda d: meetings, detail_fn)
+    _run_download(monkeypatch, "2026-08-04")   # must not raise SystemExit
+
+    assert not list(out_dir.glob("racecard_*.json")), (
+        "Warwick is the QLD country track; it must not produce a card by "
+        "matching the Sydney metro target 'warwick farm'")
+
+    body = json.loads((out_dir / "quiet_2026-08-04.json").read_text())
+    assert body["status"] == "quiet"
+    assert body["meetings_matched"] == 0
+    assert [m["course"] for m in body["listed"]] == [
+        "Gundagai", "Quirindi", "Warwick", "Bairnsdale"]
+    assert body["listed"][2]["state"] == "QLD"
+
+
 def test_a_course_that_is_a_prefix_of_a_target_is_not_a_target(monkeypatch):
     """`Warwick` is not `Warwick Farm`.
 

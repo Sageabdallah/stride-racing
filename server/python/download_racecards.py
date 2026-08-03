@@ -113,10 +113,14 @@ def fetch_racecards(provider, date_str):
 
     for meet in meets:
         course = meet["course"]
-        course_lower = course.lower()
-        if not (tt.collect_all()
-                or any(t in course_lower or course_lower in t
-                       for t in TARGET_TRACKS)):
+        # Delegated rather than inlined. This was a second copy of the matcher
+        # living beside target_tracks.is_target_track, and the two drifted the
+        # first time one of them was corrected: the reversed-substring fix that
+        # stopped `Warwick` (QLD country) matching the target `warwick farm`
+        # (Sydney metro) landed in the helper, which nothing on this path
+        # called, so the card kept being built from the unfixed copy. One
+        # matcher, one place.
+        if not tt.is_target_track(course):
             continue
         expected.append(course)
 
