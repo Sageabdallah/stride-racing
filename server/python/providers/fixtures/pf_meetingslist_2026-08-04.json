@@ -1,0 +1,74 @@
+[
+  {
+    "meetingId": 195710,
+    "meetingDate": "2026-08-04T00:00:00",
+    "track": {
+      "name": "Gundagai",
+      "trackId": 118,
+      "location": "Gundagai",
+      "state": "NSW",
+      "country": "AUS",
+      "surface": "Turf"
+    },
+    "isBarrierTrial": false,
+    "isJumps": false,
+    "tabMeeting": true,
+    "resultsUpdated": null,
+    "railPosition": "True Position",
+    "expectedCondition": "Good 4"
+  },
+  {
+    "meetingId": 195711,
+    "meetingDate": "2026-08-04T00:00:00",
+    "track": {
+      "name": "Quirindi",
+      "trackId": 174,
+      "location": "Quirindi",
+      "state": "NSW",
+      "country": "AUS",
+      "surface": "Turf"
+    },
+    "isBarrierTrial": false,
+    "isJumps": false,
+    "tabMeeting": true,
+    "resultsUpdated": null,
+    "railPosition": "True Position",
+    "expectedCondition": "Good 4"
+  },
+  {
+    "meetingId": 195712,
+    "meetingDate": "2026-08-04T00:00:00",
+    "track": {
+      "name": "Warwick",
+      "trackId": 205,
+      "location": "Warwick",
+      "state": "QLD",
+      "country": "AUS",
+      "surface": "Turf"
+    },
+    "isBarrierTrial": false,
+    "isJumps": false,
+    "tabMeeting": true,
+    "resultsUpdated": null,
+    "railPosition": "True Position",
+    "expectedCondition": "Good 4"
+  },
+  {
+    "meetingId": 195713,
+    "meetingDate": "2026-08-04T00:00:00",
+    "track": {
+      "name": "Bairnsdale",
+      "trackId": 22,
+      "location": "Bairnsdale",
+      "state": "VIC",
+      "country": "AUS",
+      "surface": "Turf"
+    },
+    "isBarrierTrial": false,
+    "isJumps": false,
+    "tabMeeting": true,
+    "resultsUpdated": null,
+    "railPosition": "True Position",
+    "expectedCondition": "Soft 5"
+  }
+]
