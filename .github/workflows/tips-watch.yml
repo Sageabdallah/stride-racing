@@ -319,8 +319,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-            --label auto-triage --limit 1 --json number --jq '.[0].number // ""')
+          # Wake only for an issue this run filed — see the matching comment in
+          # morning-watch.yml. A persistent fault dedupes to one issue but the
+          # status-based wake condition would keep firing nightly against a
+          # suppressed thread.
+          read -r ISSUE CREATED < <(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --state open --label auto-triage --limit 1 \
+            --json number,createdAt --jq '.[0] | "\(.number) \(.createdAt)"' || echo " ")
+          if [ -z "${ISSUE:-}" ]; then
+            echo "No open auto-triage issue to attach a diagnosis to. Not dispatching."
+            exit 0
+          fi
+          AGE=$(( $(date -u +%s) - $(date -u -d "$CREATED" +%s 2>/dev/null || echo 0) ))
+          if [ "$AGE" -gt 3600 ]; then
+            echo "Newest auto-triage issue #$ISSUE is ${AGE}s old — already deduped."
+            echo "The fault is known and reported. Not spending an agent run on it again."
+            exit 0
+          fi
           gh workflow run claude.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
@@ -328,7 +343,7 @@ jobs:
             -f failed_workflow="tips-pipeline (10:00 Fargate)" \
             -f run_id="" \
             -f issue_number="$ISSUE"
-          echo "dispatched claude.yml (issue #${ISSUE:-none})"
+          echo "dispatched claude.yml (issue #$ISSUE, filed ${AGE}s ago)"
 
       - name: Report
         run: |
