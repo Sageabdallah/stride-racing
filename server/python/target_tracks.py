@@ -115,6 +115,25 @@ def target_tracks() -> list:
     return [t.strip().lower() for t in raw.split(",") if t.strip()]
 
 
+def matches(course: str, targets) -> bool:
+    """Does `course` name one of `targets`?
+
+    Takes the list as an argument so the other two track lists in this
+    repository can share the matcher without sharing the list. They are
+    different universes on purpose — odds_movement covers the market pillar,
+    download_historical covers ingestion, and neither is the card — but there
+    is no reason for them to each carry their own copy of the *comparison*.
+
+    Three copies is how the Warwick defect survived its first fix: the
+    correction went into is_target_track, download_racecards had an inline
+    duplicate, and the card kept being built from the duplicate while the
+    suite stayed green. One matcher means the next correction lands
+    everywhere at once.
+    """
+    course_lower = (course or "").lower()
+    return any(t in course_lower for t in targets)
+
+
 def target_source() -> str:
     """Which of the two answers above is in force. Recorded in the quiet-day
     sentinel so a zero-meeting day is always attributable to a known list."""
@@ -153,5 +172,4 @@ def is_target_track(course: str) -> bool:
     """
     if collect_all():
         return True
-    course_lower = (course or "").lower()
-    return any(t in course_lower for t in target_tracks())
+    return matches(course, target_tracks())
