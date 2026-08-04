@@ -442,10 +442,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # The issue the step above just filed, so the agent reports back onto
-          # the same thread the morning reader will be looking at.
-          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-            --label auto-triage --limit 1 --json number --jq '.[0].number // ""')
+          # Only wake the agent for an issue THIS run filed. The escalation steps
+          # above dedupe by title, so a fault that persists for a fortnight files
+          # one issue and then suppresses itself — but the wake condition is
+          # status-based and would keep firing, spending 20 turns a night against
+          # the OAuth quota, stacking comments on a suppressed thread where nobody
+          # is looking. Freshness is the cheap stand-in for "did we just file it":
+          # an issue older than an hour is one the dedupe already had.
+          read -r ISSUE CREATED < <(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --state open --label auto-triage --limit 1 \
+            --json number,createdAt --jq '.[0] | "\(.number) \(.createdAt)"' || echo " ")
+          if [ -z "${ISSUE:-}" ]; then
+            echo "No open auto-triage issue to attach a diagnosis to. Not dispatching."
+            exit 0
+          fi
+          AGE=$(( $(date -u +%s) - $(date -u -d "$CREATED" +%s 2>/dev/null || echo 0) ))
+          if [ "$AGE" -gt 3600 ]; then
+            echo "Newest auto-triage issue #$ISSUE is ${AGE}s old — already deduped."
+            echo "The fault is known and reported. Not spending an agent run on it again."
+            exit 0
+          fi
           gh workflow run claude.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
@@ -453,7 +469,7 @@ jobs:
             -f failed_workflow="morning chain (racecard/intelligence/consensus, Fargate)" \
             -f run_id="" \
             -f issue_number="$ISSUE"
-          echo "dispatched claude.yml (issue #${ISSUE:-none})"
+          echo "dispatched claude.yml (issue #$ISSUE, filed ${AGE}s ago)"
 
       - name: Report
         run: |
