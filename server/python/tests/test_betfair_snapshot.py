@@ -151,6 +151,39 @@ def test_cli_commit_writes_and_reruns_dedup(cli_env):
     assert len(conn.rows) == 2
 
 
+def test_cli_fails_when_mapped_markets_commit_no_rows(cli_env, capsys):
+    """The silent no-op this job actually shipped: every scheduled run since
+    day zero exited 0 having committed nothing, so gate 1's clock never
+    started and nothing said so."""
+    conn = FakeConn()
+    # Markets map, but the write lands nothing — the shape of a persist that
+    # dedups everything away or an INSERT that matches no target.
+    monkeypatch_persist = lambda c, rows: 0
+    orig = snap.persist_rows
+    snap.persist_rows = monkeypatch_persist
+    try:
+        rc = snap.main(["--date", DATE, "--commit"],
+                       post=make_post(), connect=lambda: conn)
+    finally:
+        snap.persist_rows = orig
+    assert rc == 5, "mapped markets that commit zero rows must not exit 0"
+    assert "POST-CONDITION FAILED" in capsys.readouterr().out
+
+
+def test_cli_quiet_day_commits_nothing_and_still_passes(cli_env, capsys):
+    """A quiet day maps no markets and writes no rows, and that is correct.
+    The post-condition must not fire here — roughly 43 percent of days carry
+    no target-track racing, and a check that goes red on those trains the
+    operator to stop reading it."""
+    conn = FakeConn()
+    # Empty catalogue: the provider was healthy, nothing of ours was racing.
+    quiet_post = make_post(catalogue=[])
+    rc = snap.main(["--date", DATE, "--commit"],
+                   post=quiet_post, connect=lambda: conn)
+    assert rc == 0, "a quiet day must stay green"
+    assert "POST-CONDITION FAILED" not in capsys.readouterr().out
+
+
 def test_cli_refuses_when_login_marker_present(cli_env, monkeypatch):
     # Real auth path (no stub) with a lockout marker on disk: the CLI must
     # exit 3 before anything touches the wire.

@@ -357,6 +357,24 @@ def main(argv=None, post=None, connect=None) -> int:
         written = persist_rows(conn, rows)
         print(f"\nCommitted {written} snapshot rows to {SNAPSHOT_TABLE} "
               f"(captured_at={captured_at.isoformat()})")
+
+        # Post-condition. Until now this returned 0 whatever `written` was, so
+        # every scheduled run since day zero reported success while committing
+        # nothing: race_schedule was unseeded, every market went unmapped, and
+        # gate 1's clock — the one input that cannot be backfilled — silently
+        # never started.
+        #
+        # The condition is `mapped and not written`, deliberately not
+        # `not written`. On a quiet day Betfair lists no target-track markets,
+        # `mapped` is empty, and zero rows is the correct outcome; asserting on
+        # `written` alone would take this red about three mornings a week and
+        # train the operator to ignore it. Mapped markets that produce no row
+        # is the real failure and cannot happen on a quiet day.
+        if mapped and not written:
+            print(f"POST-CONDITION FAILED: {len(mapped)} market(s) mapped for "
+                  f"{args.date} but 0 rows were committed. The capture clock "
+                  f"did not advance and tip_time rows cannot be backfilled.")
+            return 5
         return 0
     except BetfairEdgeBlocked as e:
         print(f"NETWORK ERROR: {e}")
