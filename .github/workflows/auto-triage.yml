@@ -36,7 +36,11 @@ on:
 permissions:
   contents: read
   issues: write
-  actions: read
+  # `read` to fetch the failing log; `write` to dispatch claude.yml. The default
+  # token does not carry actions:write, and without it the dispatch fails with
+  # HTTP 403 "Resource not accessible by integration" rather than silently doing
+  # nothing — which is the right failure mode, but only if you know to expect it.
+  actions: write
 
 jobs:
   resolved:
@@ -118,6 +122,7 @@ jobs:
           wc -l trimmed.log
 
       - name: Open triage issue
+        id: file
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WF_NAME: ${{ github.event.workflow_run.name }}
@@ -139,6 +144,7 @@ jobs:
 
           if [ "$EXISTING" != "0" ]; then
             echo "Already an open issue for ${WF_NAME} @ ${SHORT_SHA}. Not filing again."
+            echo "filed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -169,8 +175,38 @@ jobs:
             echo "  findings and open no PR. A wrong fix is worse than no fix here."
           } > body.md
 
-          gh issue create \
+          URL=$(gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
             --label auto-triage \
-            --body-file body.md
+            --body-file body.md)
+          echo "$URL"
+          echo "filed=true" >> "$GITHUB_OUTPUT"
+          echo "issue=${URL##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Wake the agent
+        # Only when the issue was newly filed. The dedupe above keys on workflow
+        # + commit, so this is also the retry cap: one agent run per failing
+        # commit, however many times the schedule re-runs it overnight. A job
+        # that fails twelve times against the same sha wakes the agent once.
+        #
+        # Dispatch rather than relying on the issue body's "@claude": issues
+        # authored by GITHUB_TOKEN do not create workflow runs, so that mention
+        # has never once woken anything. workflow_dispatch is the documented
+        # exception to that rule and always creates a run.
+        if: steps.file.outputs.filed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WF_NAME: ${{ github.event.workflow_run.name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ISSUE: ${{ steps.file.outputs.issue }}
+        run: |
+          set -euo pipefail
+          gh workflow run claude.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f source=auto-triage \
+            -f failed_workflow="$WF_NAME" \
+            -f run_id="$RUN_ID" \
+            -f issue_number="$ISSUE"
+          echo "dispatched claude.yml for ${WF_NAME} run ${RUN_ID} (issue #${ISSUE})"

@@ -44,7 +44,11 @@ on:
 permissions:
   contents: read
   issues: write
-  actions: read        # to read the pf-morning-racecards artifact
+  # read: the pf-morning-racecards artifact. write: dispatch claude.yml when
+  # this watcher escalates. The 10:00 tips job is a Fargate task and emits no
+  # workflow_run event, so auto-triage never sees it — this is its only route
+  # to the agent.
+  actions: write
 
 jobs:
   check:
@@ -295,6 +299,36 @@ jobs:
             gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
               --comment "Closed automatically: the watcher query executed successfully on ${TODAY}. The next failure files a fresh issue; this one must not sit open suppressing it."
           done < stale.txt
+
+      - name: Wake the agent
+        # Mirrors the two escalation steps above and nothing else:
+        #
+        #   empty + not quiet -> the pipeline had races and produced nothing,
+        #                        or the racecard never arrived: escalated
+        #   query_broken      -> the watcher's own SQL: escalated
+        #   quiet             -> correct silence, no wake
+        #   unreachable       -> a network path an agent cannot fix, no wake
+        #
+        # This is the only wake path for the 10:00 tips job, which is the worst
+        # failure in the stack: no tips means no ledger rows, no audit rows and
+        # no serve-liveness evidence for the day.
+        if: >-
+          steps.q.outputs.status == 'query_broken' ||
+          (steps.q.outputs.status == 'empty' && steps.card.outputs.verdict != 'quiet')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label auto-triage --limit 1 --json number --jq '.[0].number // ""')
+          gh workflow run claude.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f source=tips-watch \
+            -f failed_workflow="tips-pipeline (10:00 Fargate)" \
+            -f run_id="" \
+            -f issue_number="$ISSUE"
+          echo "dispatched claude.yml (issue #${ISSUE:-none})"
 
       - name: Report
         run: |
