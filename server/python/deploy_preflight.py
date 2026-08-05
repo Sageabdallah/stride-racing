@@ -57,6 +57,7 @@ IMAGE_PATHS = (
     "infra/jobs/",
     "infra/entrypoint.sh",
     "infra/Dockerfile",
+    "racing_system_v8.3_mc.py",
 )
 
 DEFAULT_REPO = "Sageabdallah/stride-racing"
