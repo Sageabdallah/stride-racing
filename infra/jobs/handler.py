@@ -196,13 +196,46 @@ JOB_TIMEOUTS = {
 DEFAULT_TIMEOUT = 840  # Lambda-era bound; unchanged for the remaining jobs
 
 
+def _dump_captured(stdout, stderr, header: str) -> None:
+    """Print what a child wrote before it was killed.
+
+    capture_output buffers both streams in the parent, so nothing reaches
+    CloudWatch until the parent chooses to print it — and on a timeout the
+    parent raises instead. Tail-bounded to match _run_ok, for the same reason:
+    a full card's output is megabytes and the end is the part that says where
+    it got to.
+    """
+    for stream, label, sink in ((stdout, "stdout", sys.stdout),
+                                (stderr, "stderr", sys.stderr)):
+        if not stream:
+            print(f"--- {header} {label}: (empty) ---", file=sink)
+            continue
+        if isinstance(stream, bytes):
+            stream = stream.decode("utf-8", "replace")
+        print(f"--- {header} {label} (last 4000 chars) ---", file=sink)
+        print(stream[-4000:], file=sink)
+
+
 def _run(script: str, *args: str, cwd: str = None) -> subprocess.CompletedProcess:
     root = os.environ.get("LAMBDA_TASK_ROOT", "/var/task")
     cmd = [sys.executable, f"{root}/server/python/{script}", *args]
     print("+", " ".join(cmd))
-    return subprocess.run(cmd, capture_output=True, text=True,
-                          timeout=JOB_TIMEOUTS.get(script, DEFAULT_TIMEOUT),
-                          cwd=cwd or f"{root}/server/python")
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=JOB_TIMEOUTS.get(script, DEFAULT_TIMEOUT),
+                              cwd=cwd or f"{root}/server/python")
+    except subprocess.TimeoutExpired as e:
+        # The run that most needs explaining was the one that explained least.
+        # On 2026-08-05 consensus-agent worked for 14 minutes and was killed at
+        # the cap; its entire CloudWatch stream was 31 lines, all of them the
+        # parent's own traceback. Everything the agent printed died in the
+        # parent's buffer, so how far it got is unknowable and the new bound
+        # could only be guessed at. TimeoutExpired carries what was read before
+        # the kill — print it, then re-raise UNCHANGED so the job still
+        # hard-fails and the alarm still fires. That part was always correct.
+        _dump_captured(e.stdout, e.stderr,
+                       f"{script} TIMED OUT after {e.timeout}s —")
+        raise
 
 
 def _run_ok(script: str, *args: str, ok_codes=(0,)) -> str:
