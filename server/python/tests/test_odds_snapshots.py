@@ -547,3 +547,84 @@ class TestDeriveSourceApi:
 
     def test_empty_field_keeps_the_default(self):
         assert osn.derive_source_api([]) == osn.SOURCE_API
+
+
+# --------------------------------------------- post-jump guard, real card data
+#
+# Every string below is copied from a real racecard. The guard shipped with
+# tests that used ISO timestamps, which parse_timestamp handles — so the tests
+# passed while the guard never fired once in production.
+
+CARD_OFF_TIME = "8/5/2026 12:50:00 PM"      # Canterbury R1, 2026-08-05
+CARD_OFF_TIME_AUG2 = "8/2/2026 12:20:00 PM"  # Sandown-Lakeside R1, 2026-08-02
+
+
+def test_card_off_time_is_parseable_at_all():
+    """The regression in one line: this returned None for every real race."""
+    from odds_snapshots import parse_jump_time
+    assert parse_jump_time(CARD_OFF_TIME, "NSW") is not None
+
+
+def test_card_off_time_is_venue_local_not_utc():
+    """Verified against Betfair's own market start times on 2026-08-02:
+    Sandown-Lakeside R1 reads 12:20 PM on the card and jumped at 02:19Z.
+    Reading it as UTC would put the jump 10 hours late and let a whole
+    afternoon of post-jump captures through."""
+    from odds_snapshots import parse_jump_time
+    jump = parse_jump_time(CARD_OFF_TIME_AUG2, "VIC")
+    assert jump.hour == 2 and jump.minute == 20, jump
+
+
+def test_states_resolve_to_their_own_offsets():
+    """A WA meeting is two hours behind an eastern one on the same wall clock;
+    a fixed +10 would treat Belmont as jumping two hours early."""
+    from odds_snapshots import parse_jump_time
+    east = parse_jump_time(CARD_OFF_TIME, "NSW")
+    west = parse_jump_time(CARD_OFF_TIME, "WA")
+    assert (west - east).total_seconds() == 2 * 3600
+
+
+def test_betfair_iso_jump_still_parses_unchanged():
+    """Betfair supplies a properly zoned timestamp; it must not be reinterpreted
+    in the venue zone."""
+    from odds_snapshots import parse_jump_time
+    assert parse_jump_time("2026-08-02T02:19:00Z", "WA").hour == 2
+
+
+def test_post_jump_capture_is_refused(monkeypatch):
+    """The whole point. On 2026-08-05 a rerun wrote 151 tip_time rows for
+    2026-08-02 races, three days after they were run."""
+    import odds_snapshots as osnap
+    from datetime import datetime, timezone
+    monkeypatch.setattr(osnap, "_utcnow",
+                        lambda: datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc))
+    out = osnap.capture_tip_time_snapshots(
+        track="Sandown-Lakeside", race_number=1, date_str="2026-08-02",
+        runners=[{"horse": "X", "odds": [{"bookmaker": "b", "win_odds": 3.0}]}],
+        race={"off_time": CARD_OFF_TIME_AUG2, "state": "VIC"})
+    assert out["reason"] == "post_jump", out
+    assert out["written"] == 0
+
+
+def test_pre_jump_capture_is_allowed(monkeypatch):
+    """Refusing everything would be just as wrong as refusing nothing."""
+    import odds_snapshots as osnap
+    from datetime import datetime, timezone
+    monkeypatch.setattr(osnap, "_utcnow",
+                        lambda: datetime(2026, 8, 5, 0, 30, tzinfo=timezone.utc))
+    monkeypatch.setattr(osnap, "snapshot_write_enabled", lambda: False)
+    out = osnap.capture_tip_time_snapshots(
+        track="Canterbury", race_number=1, date_str="2026-08-05",
+        runners=[{"horse": "X", "odds": [{"bookmaker": "b", "win_odds": 3.0}]}],
+        race={"off_time": CARD_OFF_TIME, "state": "NSW"})
+    assert out["reason"] != "post_jump", out
+
+
+def test_seconds_to_jump_is_populated_from_a_card_off_time():
+    """Same root cause, second victim: compute_seconds_to_jump used the same
+    parse, so every card-sourced row stored NULL — 307 of 405 rows on
+    2026-08-02."""
+    from odds_snapshots import compute_seconds_to_jump
+    stj = compute_seconds_to_jump(CARD_OFF_TIME, "2026-08-05T02:20:00Z", "NSW")
+    assert stj is not None
+    assert stj == -1800, stj   # 02:20Z is 12:20 AEST, 30 min before the 12:50 jump

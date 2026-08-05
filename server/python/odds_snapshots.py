@@ -174,10 +174,71 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def compute_seconds_to_jump(jump_time: Any, captured_at: Any) -> Optional[int]:
+# Racecards carry off_time as venue wall-clock in US order with a 12-hour
+# clock — '8/5/2026 12:50:00 PM' — which parse_timestamp cannot read at all.
+# It is NOT UTC: verified against Betfair's own market start times for every
+# Sandown-Lakeside race on 2026-08-02, where the card time equals the true
+# jump in venue-local to the minute (R1 card 12:20 PM, Betfair 02:19Z).
+_CARD_TIME_FORMATS = ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p")
+
+# Australian racing spans four offsets and three of those states observe DST,
+# so a fixed offset is wrong for half the year. Every race in the card carries
+# its state, so resolve the real zone from it.
+_STATE_TZ = {
+    "NSW": "Australia/Sydney", "ACT": "Australia/Sydney",
+    "VIC": "Australia/Melbourne", "TAS": "Australia/Hobart",
+    "QLD": "Australia/Brisbane", "SA": "Australia/Adelaide",
+    "NT": "Australia/Darwin", "WA": "Australia/Perth",
+}
+_DEFAULT_TZ = "Australia/Sydney"
+
+
+def _venue_tz(state: Any):
+    """Venue timezone for a state code, falling back to the eastern seaboard.
+
+    A missing tzdata (slim base images sometimes ship without it) must not
+    take the capture path down — the caller degrades to a naive-UTC read,
+    which is the pre-existing behaviour rather than a new failure.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(_STATE_TZ.get(str(state or "").strip().upper(), _DEFAULT_TZ))
+    except Exception:
+        return None
+
+
+def parse_jump_time(value: Any, state: Any = None) -> Optional[datetime]:
+    """Scheduled jump as an aware UTC datetime, from either source format.
+
+    Betfair supplies a properly zoned ISO timestamp; the racecard supplies
+    venue wall-clock. Only the second needs a zone attached, and attaching the
+    wrong one is worse than useless here — this feeds the post-jump refusal.
+    """
+    if value is None:
+        return None
+    iso = parse_timestamp(value)
+    if iso is not None:
+        return iso
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    for fmt in _CARD_TIME_FORMATS:
+        try:
+            naive = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        tz = _venue_tz(state)
+        if tz is None:
+            return naive.replace(tzinfo=timezone.utc)
+        return naive.replace(tzinfo=tz).astimezone(timezone.utc)
+    return None
+
+
+def compute_seconds_to_jump(jump_time: Any, captured_at: Any,
+                            state: Any = None) -> Optional[int]:
     """Actual seconds between capture and scheduled jump. Negative = pre-jump
     (a T-5 capture records ~-300; a T-15 fallback honestly records ~-900)."""
-    jump = parse_timestamp(jump_time)
+    jump = parse_jump_time(jump_time, state)
     captured = parse_timestamp(captured_at)
     if jump is None or captured is None:
         return None
@@ -190,7 +251,8 @@ def build_snapshot_rows(*, race_date: Any, track: Any, race_number: Any,
                         captured_at: Any = None,
                         source_api: str = SOURCE_API,
                         meet_id: Any = None,
-                        jump_time: Any = None) -> List[Dict[str, Any]]:
+                        jump_time: Any = None,
+                        state: Any = None) -> List[Dict[str, Any]]:
     """One row per runner per bookmaker for a single capture event.
 
     Pure and DB-free. Scratched runners are skipped (they have no live
@@ -233,7 +295,7 @@ def build_snapshot_rows(*, race_date: Any, track: Any, race_number: Any,
                 "captured_at": captured,
                 "decimal_odds": round(float(dec), 2),
                 "source_api": source_api,
-                "seconds_to_jump": compute_seconds_to_jump(jump_time, captured),
+                "seconds_to_jump": compute_seconds_to_jump(jump_time, captured, state),
                 "race_date": race_date_val,
                 "track": normalize_track_name(track),
                 "race_number": race_number_val,
@@ -323,7 +385,8 @@ def capture_snapshots(*, snapshot_kind: str, race_date: Any, track: Any,
                       race_number: Any, runners: Sequence[Dict[str, Any]],
                       meet_id: Any = None, jump_time: Any = None,
                       captured_at: Any = None,
-                      source_api: str = SOURCE_API) -> Dict[str, Any]:
+                      source_api: str = SOURCE_API,
+                      state: Any = None) -> Dict[str, Any]:
     """Build rows and persist them, swallowing every failure.
 
     Fire-and-forget: the return dict is for logging only. This function must
@@ -338,7 +401,7 @@ def capture_snapshots(*, snapshot_kind: str, race_date: Any, track: Any,
             race_date=race_date, track=track, race_number=race_number,
             runners=runners, snapshot_kind=snapshot_kind,
             captured_at=captured_at, source_api=source_api,
-            meet_id=meet_id, jump_time=jump_time)
+            meet_id=meet_id, jump_time=jump_time, state=state)
         if not rows:
             return {"written": 0, "skipped": 0, "reason": "no priced runners"}
         conn = _connect()
@@ -378,8 +441,17 @@ def capture_tip_time_snapshots(*, track: Any, race_number: Any, date_str: Any,
     runner per bookmaker at the moment the pipeline prices the field."""
     race = race or {}
     jump_time = race.get("off_time") or race.get("offTime")
-    jump = parse_timestamp(jump_time)
+    state = race.get("state")
+    jump = parse_jump_time(jump_time, state)
     now = _utcnow()
+    if jump is None and jump_time:
+        # Unreadable is not the same as absent. Silently failing open here is
+        # exactly how the refusal below stopped working: parse_timestamp could
+        # not read the card's own format, returned None for every race, and the
+        # guard never fired once against a real card.
+        print(f"  [ODDS_SNAP] WARN tip_time {track} R{race_number}: "
+              f"unparseable off_time {jump_time!r} — cannot check for post-jump "
+              f"capture, writing anyway")
     if jump is not None and now > jump:
         # The snapshot table is append-only and this hook fires on every
         # run_tips invocation — a rerun of a past date would record post-jump
@@ -396,4 +468,5 @@ def capture_tip_time_snapshots(*, track: Any, race_number: Any, date_str: Any,
         meet_id=race.get("meet_id"),
         jump_time=jump_time,
         source_api=derive_source_api(runners),
+        state=state,
     )
