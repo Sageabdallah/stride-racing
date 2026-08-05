@@ -241,8 +241,14 @@ def _run(script: str, *args: str, cwd: str = None) -> subprocess.CompletedProces
 def _run_ok(script: str, *args: str, ok_codes=(0,)) -> str:
     proc = _run(script, *args)
     print(proc.stdout[-4000:])
-    if proc.returncode not in ok_codes:
+    # The pipeline's per-race diagnostics all go to stderr, and they are the
+    # only record of WHY a run did what it did. Printing them only on failure
+    # let the 2026-08-05 tips run drop all 31 races, exit 0, and leave a log
+    # with no reason anywhere in it. Kept on success too, tail-bounded: with
+    # 31 races of output the informative end is the last one.
+    if proc.stderr and proc.stderr.strip():
         print(proc.stderr[-4000:], file=sys.stderr)
+    if proc.returncode not in ok_codes:
         raise RuntimeError(f"{script} exited {proc.returncode}")
     return proc.stdout
 

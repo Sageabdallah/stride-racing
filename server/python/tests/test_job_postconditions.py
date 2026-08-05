@@ -434,3 +434,52 @@ def test_timeout_dump_handles_bytes(handler):
     """text=True yields str, but a caller passing bytes must not crash the
     only code path that explains a timeout."""
     handler._dump_captured(b"bytes out", b"bytes err", "X")
+
+# ------------------------------------------------------------- _run_ok stderr
+
+def _completed(stdout="", stderr="", returncode=0):
+    import subprocess
+    return subprocess.CompletedProcess(args=["fake"], returncode=returncode,
+                                       stdout=stdout, stderr=stderr)
+
+
+def test_run_ok_surfaces_stderr_on_success(handler, monkeypatch, capsys):
+    """A green exit must not throw the diagnostics away.
+
+    Every per-race diagnostic in run_tips_pipeline.py goes to stderr, so when
+    the 2026-08-05 run dropped all 31 races and exited 0, the log kept the
+    stdout summary and discarded the entire explanation. stderr on success is
+    the only record of why a run did what it did.
+    """
+    monkeypatch.setattr(handler, "_run", lambda *a, **k: _completed(
+        stdout="31 races scored", stderr="race 7: MC failed, skipping"))
+    out = handler._run_ok("run_tips_pipeline.py", "2026-08-05")
+    assert out == "31 races scored"          # stdout contract unchanged
+    captured = capsys.readouterr()
+    assert "MC failed, skipping" in captured.err
+    assert "31 races scored" in captured.out
+
+
+def test_run_ok_keeps_the_tail_of_a_long_stderr(handler, monkeypatch, capsys):
+    """The bound keeps the LAST 4000 chars, not the first.
+
+    With 31 races of diagnostics the useful lines are the most recent ones;
+    keeping the head would truncate exactly where the log gets informative.
+    """
+    noise = "x" * 5000
+    monkeypatch.setattr(handler, "_run", lambda *a, **k: _completed(
+        stderr=noise + "\nthe real reason"))
+    handler._run_ok("script.py")
+    err = capsys.readouterr().err
+    assert "the real reason" in err
+    assert len(err) <= 4001                  # tail + newline, bounded
+
+
+def test_run_ok_still_raises_with_stderr_on_failure(handler, monkeypatch,
+                                                    capsys):
+    monkeypatch.setattr(handler, "_run", lambda *a, **k: _completed(
+        stderr="boom", returncode=1))
+    with pytest.raises(RuntimeError) as e:
+        handler._run_ok("script.py")
+    assert "script.py exited 1" in str(e.value)
+    assert "boom" in capsys.readouterr().err
