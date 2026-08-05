@@ -150,11 +150,58 @@ def _sync_down(rel_dir: str) -> int:
     return n
 
 
+# Subprocess bounds sized to what each job actually costs. The old single 840s
+# constant was Lambda's 15-minute ceiling minus margin applied to every job; on
+# Fargate there is no execution limit, and on 2026-08-05 it became the binding
+# constraint — intelligence-build (269.1s for 53 runners on 2026-08-02) faced
+# 404 runners and died at the cap, as did consensus-agent, while the day read
+# green downstream.
+#
+# Prefer a bound no longer than the gap to the next dependent job where one
+# exists: a bound past the gap converts a loud timeout into a silent
+# stale-data run, when the next task syncs down what the timed-out job never
+# produced. That constraint binds stride_build and consensus_agent, whose
+# output the following job reads.
+#
+# It does NOT bind run_tips_pipeline, and the number below deliberately breaks
+# the 10:00 -> 10:45 gap. Nothing downstream consumes tips_<date>.json:
+# tip-time-snapshot shells out to betfair_odds_snapshot.py, which reads the
+# Betfair markets for the date, not the tips. Bounding tips at the gap would
+# buy no safety and would kill a card outright — first-race cost alone exceeds
+# it.
+#
+# run_tips_pipeline is MEASURED, on the real image, against the 2026-08-05
+# card (ECS task 02c99b61, Belmont Park, 18-runner fields):
+#
+#   race 1   532.2s   includes ~290s of once-per-process setup — the franking
+#                     graph (130,155 result rows, 1,997,611 edges, PageRank
+#                     over 28,750 horses), the par FSP table and the model
+#                     build, none of which survives a Fargate task exit
+#   race 2   243.4s   steady state
+#
+# so a 31-race metro Saturday is ~290 + 31*243 = ~7,800s. 10800 leaves room
+# for larger fields without being unbounded.
+#
+# Raising this makes a full card COMPLETE; it does not make the 10:00 schedule
+# sound. A card that costs ~2.2h from a 10:00 start publishes tips around
+# 12:15, after the early races have jumped. The fix for that is the per-race
+# cost — ~243s is spent in the quant/franking feature engines, not in the
+# 2,000-iteration simulation itself — or an earlier start. Both are real work,
+# neither belongs in a timeout constant, and a bigger card only widens the gap.
+JOB_TIMEOUTS = {
+    "stride_build.py": 2700,        # 06:00 build -> 07:00 consensus-agent
+    "consensus_agent.py": 2700,     # 07:00 consensus -> 08:00 morning-odds
+    "run_tips_pipeline.py": 10800,  # measured ~7,800s for 31 races; no consumer
+}
+DEFAULT_TIMEOUT = 840  # Lambda-era bound; unchanged for the remaining jobs
+
+
 def _run(script: str, *args: str, cwd: str = None) -> subprocess.CompletedProcess:
     root = os.environ.get("LAMBDA_TASK_ROOT", "/var/task")
     cmd = [sys.executable, f"{root}/server/python/{script}", *args]
     print("+", " ".join(cmd))
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=840,
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=JOB_TIMEOUTS.get(script, DEFAULT_TIMEOUT),
                           cwd=cwd or f"{root}/server/python")
 
 
