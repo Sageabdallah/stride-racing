@@ -188,9 +188,34 @@ def _sync_down(rel_dir: str) -> int:
 # cost — ~243s is spent in the quant/franking feature engines, not in the
 # 2,000-iteration simulation itself — or an earlier start. Both are real work,
 # neither belongs in a timeout constant, and a bigger card only widens the gap.
+# The gap that binds a job is the gap to the job that READS ITS OUTPUT, which
+# is not always the next one on the clock. consensus_agent was first bounded at
+# 2700s against morning-odds at 08:00; morning-odds runs odds_movement.py,
+# which does not reference consensus at all. The only reader of
+# consensus_<date>.json is run_tips_pipeline (via consensus_blender
+# .load_consensus_intelligence) at 10:00, so the real gap is three hours, not
+# one, and the old bound was tight for no reason.
+#
+# Measured per-race cost, from the only two real cards the cloud chain has run:
+#
+#   stride_build      269.1s /  8 races (2026-08-02)   ~36s/race
+#                    1132.0s / 31 races (2026-08-05)
+#   consensus_agent  ~2280.0s / 31 races (2026-08-05)   ~74s/race
+#
+# Both bounds above were sized on a 31-race midweek card. A metro Saturday of
+# 8-10 meetings is plausibly ~90 races, which costs stride_build ~3,250s and
+# consensus_agent ~6,600s — each blowing 2700s, on the day of the week the
+# system exists to serve. Sized below for ~90 races with headroom.
 JOB_TIMEOUTS = {
-    "stride_build.py": 2700,        # 06:00 build -> 07:00 consensus-agent
-    "consensus_agent.py": 2700,     # 07:00 consensus -> 08:00 morning-odds
+    # Bounded by the 06:00 -> 07:00 gap: consensus syncs down this output, so
+    # a bound past 3600s would let it start on yesterday's intelligence
+    # instead of failing loudly. 3400 covers ~94 races and still dies inside
+    # the gap. A Saturday bigger than that does not fit the hour at all, and
+    # the fix then is an earlier start, not a larger number.
+    "stride_build.py": 3400,
+    # Bounded by 07:00 -> 10:00 (tips), NOT 08:00 (morning-odds, which does
+    # not read consensus). 9000 finishes by 09:30 and covers ~120 races.
+    "consensus_agent.py": 9000,
     "run_tips_pipeline.py": 10800,  # measured ~7,800s for 31 races; no consumer
 }
 DEFAULT_TIMEOUT = 840  # Lambda-era bound; unchanged for the remaining jobs

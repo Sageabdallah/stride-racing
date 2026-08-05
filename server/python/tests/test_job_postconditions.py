@@ -343,8 +343,8 @@ def test_run_sizes_the_timeout_to_the_script(handler, monkeypatch):
     """
     calls = _captured_run(monkeypatch, handler)
     expected = {
-        "stride_build.py": 2700,
-        "consensus_agent.py": 2700,
+        "stride_build.py": 3400,
+        "consensus_agent.py": 9000,
         "run_tips_pipeline.py": 10800,
         "download_racecards.py": 840,
     }
@@ -483,3 +483,32 @@ def test_run_ok_still_raises_with_stderr_on_failure(handler, monkeypatch,
         handler._run_ok("script.py")
     assert "script.py exited 1" in str(e.value)
     assert "boom" in capsys.readouterr().err
+
+
+def test_bounds_cover_a_metro_saturday(handler):
+    """The bounds were first sized on a 31-race midweek card; Saturday is the
+    day the system exists for.
+
+    Measured per-race cost from the only two real cards the cloud chain has
+    run: stride_build 269.1s/8 races and 1132s/31 races (~36s), consensus_agent
+    ~2280s/31 races (~74s). A metro Saturday of 8-10 meetings is plausibly ~90
+    races. At 2700s both jobs died on exactly that day.
+    """
+    SATURDAY_RACES = 90
+    assert handler.JOB_TIMEOUTS["stride_build.py"] > 36 * SATURDAY_RACES
+    assert handler.JOB_TIMEOUTS["consensus_agent.py"] > 74 * SATURDAY_RACES
+
+
+def test_stride_build_still_dies_inside_its_gap(handler):
+    """consensus syncs down stride_build's output at 07:00. A bound past the
+    06:00->07:00 gap would let consensus start on yesterday's intelligence
+    instead of failing loudly — the silent stale-data trade this whole scheme
+    exists to avoid."""
+    assert handler.JOB_TIMEOUTS["stride_build.py"] < 3600
+
+
+def test_consensus_finishes_before_tips_reads_it(handler):
+    """consensus_<date>.json has exactly one reader — run_tips_pipeline at
+    10:00, three hours later. Not morning-odds at 08:00, which runs
+    odds_movement.py and never references consensus."""
+    assert handler.JOB_TIMEOUTS["consensus_agent.py"] < 3 * 3600
