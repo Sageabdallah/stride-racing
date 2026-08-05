@@ -383,3 +383,54 @@ def test_a_timeout_still_fails_loudly(handler, monkeypatch):
         handler._run("stride_build.py")
     with pytest.raises(subprocess.TimeoutExpired):
         handler._run_ok("stride_build.py")
+
+
+def test_a_timeout_prints_what_the_child_wrote(handler, monkeypatch, capfd):
+    """The killed run must not also be the silent one.
+
+    consensus-agent on 2026-08-05 worked for 14 minutes and left a 31-line
+    CloudWatch stream that was entirely the parent's traceback: capture_output
+    buffers the child in the parent, and the timeout raised before anything
+    printed it. That is why how far it got is unknowable, and why the
+    replacement bound could only be guessed at.
+    """
+    import subprocess
+
+    def slow(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=cmd, timeout=kwargs["timeout"],
+            output="scored race 7 of 31\n", stderr="panel call failed, retrying\n")
+
+    monkeypatch.setattr(handler.subprocess, "run", slow)
+    with pytest.raises(subprocess.TimeoutExpired):
+        handler._run("consensus_agent.py")
+
+    out, err = capfd.readouterr()
+    assert "scored race 7 of 31" in out, "child stdout was lost on timeout"
+    assert "panel call failed, retrying" in err, "child stderr was lost on timeout"
+    assert "TIMED OUT" in out
+
+
+def test_a_timeout_with_no_child_output_says_so(handler, monkeypatch, capfd):
+    """Absent output and swallowed output must not look identical.
+
+    "(empty)" is a finding — it means the child produced nothing before the
+    kill, which points at a hang rather than slow progress.
+    """
+    import subprocess
+
+    def slow(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(handler.subprocess, "run", slow)
+    with pytest.raises(subprocess.TimeoutExpired):
+        handler._run("stride_build.py")
+
+    out, err = capfd.readouterr()
+    assert "(empty)" in out and "(empty)" in err
+
+
+def test_timeout_dump_handles_bytes(handler):
+    """text=True yields str, but a caller passing bytes must not crash the
+    only code path that explains a timeout."""
+    handler._dump_captured(b"bytes out", b"bytes err", "X")
