@@ -312,3 +312,74 @@ def test_every_card_dependent_job_skips_cleanly_on_a_quiet_day(handler, monkeypa
         out = job()
         assert out["quiet_day"] is True, job.__name__
         assert out["last_success_date"] == handler._today(), job.__name__
+
+
+# -------------------------------------------------------- subprocess timeouts
+
+def _captured_run(monkeypatch, handler):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+
+        class Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return Proc()
+
+    monkeypatch.setattr(handler.subprocess, "run", fake_run)
+    return calls
+
+
+def test_run_sizes_the_timeout_to_the_script(handler, monkeypatch):
+    """One Lambda-era constant no longer applies identically to every job.
+
+    stride_build and consensus_agent are bounded by the schedule gap to the
+    job that reads their output. run_tips_pipeline is bounded by measurement
+    instead — nothing downstream reads tips_<date>.json, and its first race
+    alone (532.2s on 2026-08-05) exceeds the gap bound. Everything else keeps
+    the historical 840s.
+    """
+    calls = _captured_run(monkeypatch, handler)
+    expected = {
+        "stride_build.py": 2700,
+        "consensus_agent.py": 2700,
+        "run_tips_pipeline.py": 10800,
+        "download_racecards.py": 840,
+    }
+    for script, timeout in expected.items():
+        handler._run(script)
+        assert calls[-1][1]["timeout"] == timeout, script
+
+
+def test_the_tips_bound_covers_a_full_metro_card(handler):
+    """The number that matters is whether a real card fits inside it.
+
+    Measured on the real image (ECS task 02c99b61, 2026-08-05): ~290s of
+    once-per-process setup plus ~243s per race in steady state. A 31-race
+    Saturday is ~7,800s. A bound under that reintroduces 2026-08-05 as a
+    timeout instead of an empty file — still no tips on screen.
+    """
+    setup_seconds, per_race, races = 290, 243, 31
+    assert handler.JOB_TIMEOUTS["run_tips_pipeline.py"] > setup_seconds + per_race * races
+
+
+def test_a_timeout_still_fails_loudly(handler, monkeypatch):
+    """Retiring the cap must not silence a timeout into a success.
+
+    TimeoutExpired is a SubprocessError, not a RuntimeError: it has to
+    propagate out of _run_ok untouched so the job hard-fails and the alarm
+    fires, exactly as intelligence-build and consensus-agent did on
+    2026-08-05 — that behaviour was correct.
+    """
+    import subprocess
+
+    def slow(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(handler.subprocess, "run", slow)
+    with pytest.raises(subprocess.TimeoutExpired):
+        handler._run("stride_build.py")
+    with pytest.raises(subprocess.TimeoutExpired):
+        handler._run_ok("stride_build.py")
