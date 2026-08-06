@@ -172,3 +172,162 @@ def test_resolve_odds_source_follows_delay_data_flag():
         return 500, json.dumps({"error": {"message": "boom"}})
     # Unknown -> delayed: never claim live prices without Betfair's word.
     assert betfair_markets.resolve_odds_source("test-app-key", "TOK", post=broken) == "betfair_delayed"
+
+
+# ---------------------------------------------------------------------------
+# Venue resolution against the day's schedule (2026-08-06 outage regression)
+# ---------------------------------------------------------------------------
+
+MP1_DATE = "2026-08-06"
+
+
+def _market(market_id, venue, race_number, date=MP1_DATE):
+    return {
+        "marketId": market_id,
+        "marketName": f"R{race_number} 1400m Hcap",
+        "marketStartTime": f"{date}T03:00:00.000Z",
+        "event": {"venue": venue},
+        "runners": [],
+    }
+
+
+def _ballarat_schedule(races=8):
+    return [("Ballarat Synthetic", n, MP1_DATE, f"{MP1_DATE}T{12 + n:02d}:00:00")
+            for n in range(1, races + 1)]
+
+
+def test_ballarat_maps_to_ballarat_synthetic_2026_08_06():
+    """The incident as a regression test: Betfair's plain 'Ballarat' must map
+    to the schedule's 'Ballarat Synthetic'; the 11 genuine non-target markets
+    (Gosford, Mount Isa, Moree, Northam) must stay unmapped. Row identity
+    keeps the SCHEDULE's track name, not Betfair's."""
+    conn = FakeConn(schedule_rows=_ballarat_schedule(), bridge_rows=[])
+    cur = conn.cursor()
+    catalogue = [
+        _market("1.260754596", "Ballarat", 1),
+        _market("1.260754604", "Ballarat", 2),
+        _market("1.260754612", "Ballarat", 3),
+    ]
+    for i, (venue, count) in enumerate(
+            [("Gosford", 3), ("Mount Isa", 3), ("Moree", 2), ("Northam", 3)]):
+        catalogue.extend(_market(f"1.88{i}{n}", venue, n)
+                         for n in range(1, count + 1))
+    mapped, unmapped, _ = betfair_markets.map_markets(
+        catalogue,
+        betfair_markets.load_schedule(cur, MP1_DATE),
+        betfair_markets.load_horse_bridge(cur))
+    assert len(mapped) == 3
+    assert len(unmapped) == 11
+    assert {m["track"] for m in mapped} == {"Ballarat Synthetic"}
+    assert {m["race_id"] for m in mapped} == {
+        f"{MP1_DATE}|ballaratsynthetic|R{n}" for n in (1, 2, 3)}
+    assert all("ballarat" not in u["venue"].lower() for u in unmapped)
+
+
+def test_sponsor_prefixed_venue_maps_by_token_containment():
+    # 'Southside Cranbourne' — the sponsor-prefix shape that went dark on
+    # 2026-08-05 with a green tick.
+    schedule = [{"track": "Cranbourne", "race_number": 1,
+                 "race_date": MP1_DATE, "off_time": f"{MP1_DATE}T13:00:00"}]
+    mapped, unmapped, _ = betfair_markets.map_markets(
+        [_market("1.31", "Southside Cranbourne", 1)], schedule, {})
+    assert unmapped == []
+    assert mapped[0]["track"] == "Cranbourne"
+    assert mapped[0]["race_id"] == f"{MP1_DATE}|cranbourne|R1"
+
+
+def test_surface_suffixed_schedule_venue_maps_by_token_containment():
+    # 'Belmont' vs schedule 'Belmont Park' — containment the other way.
+    schedule = [{"track": "Belmont Park", "race_number": 1,
+                 "race_date": MP1_DATE, "off_time": f"{MP1_DATE}T13:00:00"}]
+    mapped, unmapped, _ = betfair_markets.map_markets(
+        [_market("1.32", "Belmont", 1)], schedule, {})
+    assert unmapped == []
+    assert mapped[0]["track"] == "Belmont Park"
+
+
+def test_ambiguous_venue_is_refused_not_guessed():
+    # Both Randwick and Kensington carded: 'Randwick Kensington' matches BOTH
+    # by containment. It must refuse and report — and must not ride the
+    # randwickkensington->kensington alias onto one of them.
+    schedule = [
+        {"track": "Randwick", "race_number": 3,
+         "race_date": MP1_DATE, "off_time": f"{MP1_DATE}T14:00:00"},
+        {"track": "Kensington", "race_number": 3,
+         "race_date": MP1_DATE, "off_time": f"{MP1_DATE}T14:05:00"},
+    ]
+    catalogue = [_market("1.41", "Randwick Kensington", 3)]
+    mapped, unmapped, _ = betfair_markets.map_markets(catalogue, schedule, {})
+    assert mapped == [], "ambiguous venue must not map to either candidate"
+    assert len(unmapped) == 1
+    assert "ambiguous" in unmapped[0]["reason"]
+
+    # With only Kensington carded the same alias still resolves — the table
+    # stays as the fallback for true renames.
+    kensington_only = [schedule[1]]
+    mapped, unmapped, _ = betfair_markets.map_markets(
+        catalogue, kensington_only, {})
+    assert unmapped == []
+    assert mapped[0]["track"] == "Kensington"
+
+
+def test_non_target_venue_stays_unmapped():
+    mapped, unmapped, _ = betfair_markets.map_markets(
+        [_market("1.51", "Gosford", 1)],
+        [{"track": t, "race_number": 1,
+          "race_date": MP1_DATE, "off_time": f"{MP1_DATE}T13:00:00"}
+         for t in ("Ballarat Synthetic",)],
+        {})
+    assert mapped == []
+    assert unmapped[0]["reason"] == "no race_schedule match for venue"
+
+
+def test_norm_track_contract_unchanged():
+    """norm_track output feeds stored track/race_id values. Pin every alias
+    table entry (plus representative plain cases) so venue resolution can
+    never fork stored data against history."""
+    cases = {
+        "Royal Randwick": "randwick",
+        "Randwick Kensington": "kensington",
+        "Rosehill Gardens": "rosehill",
+        "Ascot": "ascotwa",
+        "Ascot WA": "ascotwa",
+        "Sandown Lakeside": "sandown",
+        "Sandown Hillside": "sandown",
+        # Non-aliased names keep plain_norm behaviour.
+        "Ballarat Synthetic": "ballaratsynthetic",
+        "Ballarat": "ballarat",
+        "Randwick (AUS)": "randwick",
+    }
+    for name, expected in cases.items():
+        assert betfair_markets.norm_track(name) == expected, name
+
+
+def test_prices_zero_mapped_message_reports_unmapped_venue_names(monkeypatch, capsys):
+    """The old message asked 'is race_schedule seeded?' — a dead end on
+    2026-08-06, when the schedule was seeded and the venues simply did not
+    map. It must name the unmapped venues it actually saw."""
+    import betfair_prices
+    from providers import betfair_auth
+
+    catalogue = [_market("1.61", "Gosford", 1), _market("1.62", "Northam", 2)]
+    for key, value in {"date": None, "token": None, "app_key": None,
+                       "source": None, "mapped": None}.items():
+        monkeypatch.setitem(betfair_prices._DIRECT_CTX, key, value)
+    monkeypatch.setattr(betfair_auth, "missing_config", lambda: [])
+    monkeypatch.setattr(betfair_auth, "get_session_token", lambda: "TOK")
+    monkeypatch.setattr(betfair_auth, "_config", lambda: {"app_key": "test-app-key"})
+    monkeypatch.setattr(betfair_markets, "resolve_odds_source",
+                        lambda *a, **k: "betfair_delayed")
+    monkeypatch.setattr(betfair_markets, "list_win_market_catalogue",
+                        lambda *a, **k: catalogue)
+    monkeypatch.setattr(
+        betfair_prices, "_connect",
+        lambda: FakeConn(schedule_rows=_ballarat_schedule(), bridge_rows=[]))
+
+    _, _, _, mapped = betfair_prices._direct_context(MP1_DATE)
+    assert mapped == []
+    err = capsys.readouterr().err
+    assert "Gosford" in err
+    assert "Northam" in err
+    assert "seeded" not in err

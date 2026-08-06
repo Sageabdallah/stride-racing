@@ -25,10 +25,12 @@ Operations used:
         key is activated.
 
 Mapping rules:
-    market -> race: Betfair venue vs race_schedule.track through a shared
-        normaliser (aliases kept in lockstep with stride_norm_track() in
-        build_betfair_mapping.py) + race number from the market name, with a
-        jump-time fallback. Read-only SELECTs; unmapped markets are reported,
+    market -> race: Betfair venue vs race_schedule.track through resolve_venue
+        (exact/alias via a shared normaliser kept in lockstep with
+        stride_norm_track() in build_betfair_mapping.py, then single-candidate
+        token containment against the day's schedule — ambiguity is refused,
+        never guessed) + race number from the market name, with a jump-time
+        fallback. Read-only SELECTs; unmapped markets are reported,
         never guessed.
     runner -> horse_id: runnerName (trap-number prefix stripped, Betfair
         style "1. Fast Horse") through pf_backfill_results.norm_name against
@@ -211,6 +213,42 @@ def norm_track(name: Any) -> str:
     return _TRACK_ALIASES.get(key, key)
 
 
+def _venue_tokens(name: Any) -> frozenset:
+    """Tokens for containment matching — must tokenise BEFORE plain_norm,
+    which strips all non-alphanumerics including spaces and would fuse
+    'Ballarat Synthetic' into the single token 'ballaratsynthetic'."""
+    base = re.sub(r"\([^)]*\)", " ", str(name or "")).split(" - ")[0]
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", base.lower()) if t)
+
+
+def resolve_venue(venue: Any,
+                  schedule_tokens: Dict[str, frozenset]) -> Tuple[Optional[str], str]:
+    """Betfair venue -> race_schedule venue key, or (None, reason).
+
+    Exact/alias match via norm_track, then token containment against ONLY the
+    venues racing today. AU Betfair venues carry naming-rights prefixes
+    ('Southside Cranbourne') and our cards carry surface suffixes ('Ballarat
+    Synthetic'); neither side is canonical, so containment either way counts.
+
+    Ambiguity is reported, never resolved by preference: the containment check
+    runs BEFORE the exact hit is honoured, so 'Randwick Kensington' refuses
+    when both Randwick and Kensington are carded rather than riding the alias
+    table onto one of them.
+    """
+    key = norm_track(venue)
+    vt = _venue_tokens(venue)
+    if not vt:
+        return None, "empty venue"
+    hits = [k for k, kt in schedule_tokens.items() if vt <= kt or kt <= vt]
+    if len(hits) > 1:
+        return None, f"ambiguous: matches {', '.join(sorted(hits))}"
+    if key in schedule_tokens:
+        return key, "exact"
+    if hits:
+        return hits[0], "token-containment"
+    return None, "no race_schedule match for venue"
+
+
 def clean_runner_name(name: Any) -> str:
     # Betfair runner names carry the saddlecloth number: "1. Fast Horse"
     # (convention: clean_horse_name in build_betfair_mapping.py).
@@ -300,12 +338,15 @@ def map_markets(catalogue: Sequence[dict], schedule_rows: Sequence[dict],
     """(mapped_markets, unmapped_markets, unmapped_runners).
 
     A market maps when its venue+race number hit a race_schedule row (jump
-    time within tolerance is the fallback when the name has no number). A
+    time within tolerance is the fallback when the name has no number). The
+    venue is resolved by resolve_venue: exact/alias first, then
+    single-candidate token containment against the day's venues only. A
     runner maps when its normalised name is in the horse-id bridge. Anything
     unmapped is reported for the run summary — never guessed, never fatal to
     the rest of the capture."""
     by_key: Dict[Tuple[str, int], dict] = {}
     by_venue: Dict[str, List[dict]] = {}
+    schedule_tokens: Dict[str, frozenset] = {}
     for row in schedule_rows:
         vkey = norm_track(row["track"])
         try:
@@ -314,6 +355,7 @@ def map_markets(catalogue: Sequence[dict], schedule_rows: Sequence[dict],
             continue
         by_key.setdefault((vkey, rn), row)
         by_venue.setdefault(vkey, []).append(row)
+        schedule_tokens.setdefault(vkey, _venue_tokens(row["track"]))
 
     mapped: List[dict] = []
     unmapped_markets: List[dict] = []
@@ -324,32 +366,37 @@ def map_markets(catalogue: Sequence[dict], schedule_rows: Sequence[dict],
         market_id = str(market.get("marketId") or "")
         event = market.get("event") or {}
         venue = event.get("venue") or event.get("name") or ""
-        vkey = norm_track(venue)
+        vkey, reason = resolve_venue(venue, schedule_tokens)
         market_name = market.get("marketName") or ""
         start_time = parse_iso_utc(market.get("marketStartTime"))
         rn = extract_race_number(market_name, event.get("name"))
 
-        race = by_key.get((vkey, rn)) if rn is not None else None
-        if race is None and rn is None and start_time is not None:
-            # Only when the name carried no race number at all: nearest
-            # scheduled jump at the same venue, inside tolerance. A number
-            # that missed the schedule is reported, never re-guessed by time.
-            best = None
-            for candidate in by_venue.get(vkey, []):
-                off = parse_iso_utc(candidate.get("off_time"))
-                if off is None:
-                    continue
-                delta = abs(off - start_time)
-                if delta <= START_TIME_TOLERANCE and (best is None or delta < best[0]):
-                    best = (delta, candidate)
-            if best:
-                race = best[1]
+        race = None
+        if vkey is not None:
+            race = by_key.get((vkey, rn)) if rn is not None else None
+            if race is None and rn is None and start_time is not None:
+                # Only when the name carried no race number at all: nearest
+                # scheduled jump at the same venue, inside tolerance. A number
+                # that missed the schedule is reported, never re-guessed by time.
+                best = None
+                for candidate in by_venue.get(vkey, []):
+                    off = parse_iso_utc(candidate.get("off_time"))
+                    if off is None:
+                        continue
+                    delta = abs(off - start_time)
+                    if delta <= START_TIME_TOLERANCE and (best is None or delta < best[0]):
+                        best = (delta, candidate)
+                if best:
+                    race = best[1]
+            if race is None:
+                reason = (f"venue '{venue}' resolved to '{vkey}' but no "
+                          f"scheduled race matches race number/jump time")
 
         if race is None:
             unmapped_markets.append({
                 "market_id": market_id, "venue": venue, "market_name": market_name,
                 "start_time": market.get("marketStartTime"),
-                "reason": "no race_schedule match for venue/race number",
+                "reason": reason,
             })
             continue
 
