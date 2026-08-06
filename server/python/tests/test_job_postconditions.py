@@ -564,8 +564,9 @@ def test_panel_proof_asks_for_a_real_fetch_not_a_dry_run(handler, monkeypatch):
     "does the panel fetch". panel-proof must pass --panel-only instead."""
     _neutralise_io(handler, monkeypatch)
     calls = []
-    monkeypatch.setattr(handler, "_run_ok",
-                        lambda *a, **k: calls.append(a) or "0/16 sources")
+    monkeypatch.setattr(
+        handler, "_run_ok",
+        lambda *a, **k: calls.append(a) or "PANEL_STAGED 1\nPANEL_USABLE 4 16\n")
     handler.job_panel_proof()
     assert "--panel-only" in calls[0]
     assert "--dry-run" not in calls[0]
@@ -703,3 +704,65 @@ def test_stage_models_passes_when_the_named_artifact_lands(handler,
             open(d, "w").close()
     monkeypatch.setattr(handler, "_s3", lambda: _S3())
     handler._stage_models()          # must not raise
+
+
+def test_panel_proof_treats_rotted_sources_as_a_finding_not_a_failure(
+        handler, monkeypatch):
+    """Exit 1 means staged-but-degraded. Failing on it inverts the runbook.
+
+    At the measured 4 of 16 usable sources, --panel-only returns 1 (below its
+    50% floor). With _run_ok's default ok_codes=(0,) that raised, so
+    panel-proof would have gone RED on the first day the panel was ever
+    shipped working — and the documented response to a red panel-proof is to
+    set STRIDE_PANEL_OPTIONAL and run without the panel. A red that makes its
+    reader disable the healthy thing is worse than no check.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok",
+                        lambda *a, **k: "PANEL_STAGED 1\nPANEL_USABLE 4 16\n")
+    out = handler.job_panel_proof()
+    assert out["panel_staged"] is True
+    assert (out["sources_usable"], out["sources_total"]) == (4, 16)
+    assert out["degraded"] is True
+
+
+def test_panel_proof_accepts_the_degraded_exit_code_from_the_script(
+        handler, monkeypatch):
+    """The acceptance has to reach _run_ok, not just the parsing below it."""
+    seen = {}
+
+    def _capture(script, *args, **kw):
+        seen["ok_codes"] = kw.get("ok_codes", (0,))
+        return "PANEL_STAGED 1\nPANEL_USABLE 16 16\n"
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok", _capture)
+    handler.job_panel_proof()
+    assert 1 in seen["ok_codes"], (
+        "exit 1 must be accepted or a degraded panel reads as a staging "
+        "failure")
+    assert 6 in seen["ok_codes"], (
+        "exit 6 must reach the handler so it can raise the specific message, "
+        "not _run_ok's generic 'exited 6'")
+
+
+def test_panel_proof_fails_when_the_panel_never_reached_the_container(
+        handler, monkeypatch):
+    """The one thing this job exists to detect."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok", lambda *a, **k: "PANEL_STAGED 0\n")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_panel_proof()
+    assert "NOT in the container" in str(e.value)
+    assert "09c_upload_panel.sh" in str(e.value)
+
+
+def test_panel_proof_fails_when_no_marker_was_printed_at_all(handler,
+                                                             monkeypatch):
+    """Neither outcome reported is its own outcome. Absent a marker the run
+    stopped before the panel, and reporting that as a pass is the exact shape
+    consensus-proof already had."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok", lambda *a, **k: "some other output")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_panel_proof()
+    assert "no PANEL_STAGED marker" in str(e.value)

@@ -787,9 +787,43 @@ def job_panel_proof() -> dict:
     list parses and nothing more. This does the real extracts and nothing
     else: no races, no Perplexity, no Claude, no DB. Never scheduled —
     dispatched by hand, like the other proof variants.
+
+    Exit 1 is "staged, but the sources have rotted" — a finding for the URL
+    pass, not a staging failure, and the same shape as job_preflight's RED
+    verdict. Accepting it is not leniency, it is the difference between two
+    opposite instructions: the documented response to a red panel-proof is to
+    set STRIDE_PANEL_OPTIONAL and run without the panel. At the measured 4 of
+    16 usable sources, failing on exit 1 would report the panel as broken on
+    the first day it was ever shipped working, and the operator would then
+    correctly follow the runbook and disable it. A red that means the opposite
+    of what its reader will do is worse than no check.
+
+    Only PANEL_STAGED 0 — the panel never reached the container — is what this
+    job exists to detect.
     """
-    out = _run_ok("consensus_agent.py", _today(), "--panel-only")
-    return {"last_success_date": _today(), "detail": out[-1200:]}
+    out = _run_ok("consensus_agent.py", _today(), "--panel-only",
+                  ok_codes=(0, 1, 6))
+    staged, usable, total = None, None, None
+    for line in out.splitlines():
+        if line.startswith("PANEL_STAGED"):
+            staged = line.split()[1] == "1"
+        elif line.startswith("PANEL_USABLE"):
+            _, u, t = line.split()
+            usable, total = int(u), int(t)
+    if staged is None:
+        raise RuntimeError(
+            "panel-proof: consensus_agent.py --panel-only printed no "
+            "PANEL_STAGED marker — it exited before reaching the panel at all, "
+            "which is neither of the outcomes this job knows how to report.")
+    if not staged:
+        raise RuntimeError(
+            "panel-proof: the panel is NOT in the container. _stage_panel "
+            "could not fetch config/tipster_panel.json from the models "
+            "bucket — run infra/09c_upload_panel.sh. Until it is there, "
+            "consensus_agent exits 6 every morning.")
+    return {"last_success_date": _today(), "panel_staged": True,
+            "sources_usable": usable, "sources_total": total,
+            "degraded": bool(usable is not None and total and usable < total)}
 
 
 def job_nightly_etl() -> dict:

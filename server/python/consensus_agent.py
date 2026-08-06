@@ -1915,6 +1915,7 @@ def run_panel_only(date_str: str) -> int:
     try:
         panel = load_tipster_panel()
     except PanelUnavailable as e:
+        print("PANEL_STAGED 0")
         print(f"[PANEL-PROOF] FATAL: {e}", file=sys.stderr)
         return 6
     active = [s for s in panel.get("sources", [])
@@ -1922,6 +1923,7 @@ def run_panel_only(date_str: str) -> int:
     print(f"[PANEL-PROOF] {len(panel.get('sources', []))} sources in file, "
           f"{len(active)} active+verified", file=sys.stderr)
     if not active:
+        print("PANEL_STAGED 0")
         print("[PANEL-PROOF] FATAL: no active+verified sources. In the cloud "
               "this is almost certainly the file missing from the image — "
               "server/python/tipster_panel.json is in .gitignore, so it is "
@@ -1931,6 +1933,7 @@ def run_panel_only(date_str: str) -> int:
 
     tavily_key = os.getenv("TAVILY_API_KEY")
     if not tavily_key:
+        print("PANEL_STAGED 0")
         print("[PANEL-PROOF] FATAL: TAVILY_API_KEY not set", file=sys.stderr)
         return 6
     from tavily import TavilyClient
@@ -1942,6 +1945,11 @@ def run_panel_only(date_str: str) -> int:
     )
 
     ok = [r for r in rows if r["fetch_status"] == "SUCCESS"]
+    # Two facts, two markers: the panel REACHED the container, and how much of
+    # it works. Conflating them is what would have read a healthy first deploy
+    # as a staging failure.
+    print("PANEL_STAGED 1")
+    print(f"PANEL_USABLE {len(ok)} {len(rows)}")
     print(f"\n[PANEL-PROOF] {len(ok)}/{len(rows)} sources returned usable "
           f"content", file=sys.stderr)
     for r in sorted(rows, key=lambda x: (x["fetch_status"], x["tipster_name"])):
