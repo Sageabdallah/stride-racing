@@ -681,11 +681,43 @@ def job_tips_proof() -> dict:
 
 
 def job_consensus_proof() -> dict:
-    """Consensus in --dry-run: proves the container, secrets, DB and panel
-    setup without LLM spend and without overwriting today's consensus file
-    (which the tips hard-gate depends on)."""
+    """Consensus in --dry-run: proves the container, secrets and panel setup
+    without LLM spend and without overwriting today's consensus file (which
+    the tips hard-gate depends on).
+
+    The racecard relay was missing and made this claim false. Fargate tasks
+    start with an empty filesystem, so with no card staged run_consensus
+    returns at its `load_racecard_meetings` check — which sits ABOVE
+    load_tipster_panel — prints "No racecard found", writes an empty
+    consensus file and exits 0. Verified 2026-08-06 (ECS task 417b4554):
+    PASSED, and not one line of panel or secret setup ran. A proof that
+    cannot reach what it proves is worse than no proof, because it is
+    reported as evidence.
+    """
+    _sync_down("server/python/intelligence")
+    if _require_racecard("consensus-proof") == "quiet":
+        return {"last_success_date": _today(), "quiet_day": True}
     out = _run_ok("consensus_agent.py", _today(), "--dry-run")
+    # The line run_consensus prints once the panel is loaded. Absent means
+    # the run stopped short of it again, whatever the exit code said.
+    if "[PANEL]" not in out:
+        raise RuntimeError(
+            "consensus-proof: exited 0 without reaching the tipster panel. "
+            "Something returned before load_tipster_panel — check for 'No "
+            "racecard found' or 'No runners' above.")
     return {"last_success_date": _today(), "detail": out[-400:]}
+
+
+def job_panel_proof() -> dict:
+    """Does the tipster panel actually fetch? --dry-run cannot answer that.
+
+    dry_run returns before tavily_client.extract is called, so it proves the
+    list parses and nothing more. This does the real extracts and nothing
+    else: no races, no Perplexity, no Claude, no DB. Never scheduled —
+    dispatched by hand, like the other proof variants.
+    """
+    out = _run_ok("consensus_agent.py", _today(), "--panel-only")
+    return {"last_success_date": _today(), "detail": out[-1200:]}
 
 
 def job_nightly_etl() -> dict:
@@ -758,6 +790,7 @@ JOBS = {
     # a path before it runs for real.
     "tips-proof": job_tips_proof,
     "consensus-proof": job_consensus_proof,
+    "panel-proof": job_panel_proof,
     "nightly-etl": job_nightly_etl,
     "weekly-digest": job_weekly_digest,
 }

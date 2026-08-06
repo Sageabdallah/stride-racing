@@ -512,3 +512,60 @@ def test_consensus_finishes_before_tips_reads_it(handler):
     10:00, three hours later. Not morning-odds at 08:00, which runs
     odds_movement.py and never references consensus."""
     assert handler.JOB_TIMEOUTS["consensus_agent.py"] < 3 * 3600
+
+
+# ------------------------------------------------------- proof jobs that proof
+
+def test_consensus_proof_fails_if_it_never_reached_the_panel(handler,
+                                                             monkeypatch):
+    """The defect this job actually had, pinned.
+
+    With no card staged, run_consensus returns at its load_racecard_meetings
+    check — which sits above load_tipster_panel — prints "No racecard found",
+    writes an empty consensus file and exits 0. The job reported PASSED
+    (ECS task 417b4554, 2026-08-06) while proving none of the container,
+    secret or panel setup its docstring claims.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(
+        handler, "_run_ok",
+        lambda *a, **k: "[CONSENSUS] No racecard found for 2026-08-06. "
+                        "Writing empty consensus file.")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_consensus_proof()
+    assert "without reaching the tipster panel" in str(e.value)
+
+
+def test_consensus_proof_passes_once_the_panel_line_appears(handler,
+                                                            monkeypatch):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(
+        handler, "_run_ok",
+        lambda *a, **k: "[PANEL] 16 active+verified tipsters in panel")
+    out = handler.job_consensus_proof()
+    assert out["last_success_date"]
+
+
+def test_consensus_proof_stages_the_card_before_running(handler, monkeypatch):
+    """Ordering: the card has to be relayed BEFORE consensus_agent starts, or
+    the assertion above can only ever fail. Fargate tasks start empty."""
+    _neutralise_io(handler, monkeypatch)
+    order = []
+    monkeypatch.setattr(handler, "_prepare_racecard",
+                        lambda: order.append("card") or "card")
+    monkeypatch.setattr(handler, "_run_ok",
+                        lambda *a, **k: order.append("run") or "[PANEL] 16")
+    handler.job_consensus_proof()
+    assert order == ["card", "run"], order
+
+
+def test_panel_proof_asks_for_a_real_fetch_not_a_dry_run(handler, monkeypatch):
+    """--dry-run returns before tavily_client.extract, so it can never answer
+    "does the panel fetch". panel-proof must pass --panel-only instead."""
+    _neutralise_io(handler, monkeypatch)
+    calls = []
+    monkeypatch.setattr(handler, "_run_ok",
+                        lambda *a, **k: calls.append(a) or "0/16 sources")
+    handler.job_panel_proof()
+    assert "--panel-only" in calls[0]
+    assert "--dry-run" not in calls[0]
