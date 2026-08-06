@@ -25,6 +25,11 @@ try:
 except ImportError:
     _anthropic_module = None
 
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "intelligence"))
 
@@ -1351,24 +1356,54 @@ def _write_health(date_str: str, health: dict) -> None:
     print(f"[CONSENSUS] Health written to {path}", file=sys.stderr)
 
 
-def _store_with_retry(fn, *args, attempts: int = 3, base_delay: float = 2.0):
-    """Retry a DB mirror write. These were fire-and-forget: a transient Neon SSL
-    drop lost the whole day's mirror while the JSON still said everything was
-    fine. Raises the last error if every attempt fails."""
-    last = None
-    for i in range(attempts):
-        try:
-            return fn(*args)
-        except Exception as e:
-            last = e
+# Connection-level failures worth redialling for. Empty when psycopg2 is
+# absent (except () catches nothing, and every error lands in the generic
+# branch instead).
+_CONN_ERRORS = ((psycopg2.OperationalError, psycopg2.InterfaceError)
+               if psycopg2 is not None else ())
+
+
+def _store_with_retry(fn, conn_factory, *args, attempts: int = 3, base_delay: float = 2.0):
+    """Retry a DB mirror write, redialling on connection-level failure.
+
+    These were fire-and-forget: a transient Neon SSL drop lost the whole
+    day's mirror while the JSON still said everything was fine. The first
+    retry re-CALLED fn with the same connection object passed as an argument
+    — a dropped connection is dead, so attempts 2 and 3 could only ever
+    raise InterfaceError: connection already closed (2026-08-06). The retry
+    now owns the connection: it opens one lazily from conn_factory, and any
+    OperationalError/InterfaceError discards it so the next attempt gets a
+    live socket. Raises the last error if every attempt fails."""
+    conn, last = None, None
+    try:
+        for i in range(attempts):
+            try:
+                if conn is None or getattr(conn, "closed", 0):
+                    conn = conn_factory()
+                return fn(conn, *args)
+            except _CONN_ERRORS as e:
+                last = e
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None      # the point: next attempt gets a live socket
+            except Exception as e:
+                last = e
             if i < attempts - 1:
                 print(
                     f"[CONSENSUS] DB write attempt {i + 1}/{attempts} failed "
-                    f"({type(e).__name__}); retrying",
+                    f"({type(last).__name__}); retrying",
                     file=sys.stderr,
                 )
                 time.sleep(base_delay * (2 ** i))
-    raise last
+        raise last
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def run_consensus_agent(
@@ -1452,13 +1487,24 @@ def run_consensus_agent(
     results_by_race = {}
     all_mentions = []
     all_scores = []
-    conn = None if dry_run else get_connection()
 
-    if not dry_run and conn and panel_log_rows:
+    # No DB connection is opened ahead of the research loop below: it runs
+    # ~11 minutes of web research, and Neon reaps idle connections, so a
+    # connection opened here is dead by the first write (2026-08-06). The
+    # panel log opens and closes its own short-lived connection instead.
+    if not dry_run and panel_log_rows:
+        panel_conn = None
         try:
-            store_panel_log(conn, panel_log_rows)
+            panel_conn = get_connection()
+            store_panel_log(panel_conn, panel_log_rows)
         except Exception as e:
             print(f"[PANEL] Panel log write error: {e}", file=sys.stderr)
+        finally:
+            if panel_conn is not None:
+                try:
+                    panel_conn.close()
+                except Exception:
+                    pass
 
     for race in races:
         track = race["track"]
@@ -1748,10 +1794,14 @@ def run_consensus_agent(
             print(f"    No tips found for this race", file=sys.stderr)
 
     db_ok, db_error = True, None
-    if not dry_run and conn:
+    if not dry_run:
+        # The connection is opened here, at first use, by the retry's
+        # factory — and re-opened if a write kills it. Nothing has been
+        # held open across the research phase.
         try:
-            _store_with_retry(store_mentions_batch, conn, all_mentions)
-            _store_with_retry(store_consensus_scores_batch, conn, date_str, all_scores)
+            _store_with_retry(store_mentions_batch, get_connection, all_mentions)
+            _store_with_retry(store_consensus_scores_batch, get_connection,
+                              date_str, all_scores)
             print(
                 f"[CONSENSUS] DB: {len(all_mentions)} mentions, {len(all_scores)} scores stored",
                 file=sys.stderr,
@@ -1759,8 +1809,6 @@ def run_consensus_agent(
         except Exception as e:
             db_ok, db_error = False, f"{type(e).__name__}: {e}"
             print(f"[CONSENSUS] DB write error after retries: {e}", file=sys.stderr)
-        finally:
-            conn.close()
 
     # A dry run must not touch the live artifact. It used to: _write_output ran
     # unconditionally, so `consensus_agent.py <date> --dry-run` — the documented
