@@ -1429,6 +1429,16 @@ def run_consensus_agent(
         print("[CONSENSUS] ERROR: ANTHROPIC_API_KEY not set in .env", file=sys.stderr)
         return {}
 
+    # Presence check only — no connection is opened here, or anywhere before
+    # the write site. A missing DATABASE_URL used to crash at startup; the
+    # late-connection change moved it to AFTER ~11 minutes of paid research.
+    # Fail on the misconfiguration before spending a cent, not after.
+    if not dry_run and not os.getenv("DATABASE_URL", "").strip():
+        raise RuntimeError(
+            "DATABASE_URL is not set — the DB mirror cannot run. Failing "
+            "before any research spend: discovering this at the write site "
+            "costs a full day's LLM budget.")
+
     from tavily import TavilyClient
     import anthropic
 

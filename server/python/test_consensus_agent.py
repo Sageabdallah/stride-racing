@@ -84,6 +84,22 @@ class RetryConn:
         self.closed = 1
 
 
+def _stub_spend_modules(monkeypatch):
+    """run_consensus_agent imports dotenv/tavily/anthropic inside the
+    function, and the CI venv has none of them. Stub construction only —
+    the tests drive every actual call through their own fakes, so these
+    never reach a network."""
+    dotenv = types.ModuleType("dotenv")
+    dotenv.load_dotenv = lambda *a, **k: None
+    tavily = types.ModuleType("tavily")
+    tavily.TavilyClient = lambda **k: object()
+    anthropic_mod = types.ModuleType("anthropic")
+    anthropic_mod.Anthropic = lambda **k: object()
+    monkeypatch.setitem(sys.modules, "dotenv", dotenv)
+    monkeypatch.setitem(sys.modules, "tavily", tavily)
+    monkeypatch.setitem(sys.modules, "anthropic", anthropic_mod)
+
+
 def test_retry_redials_after_a_connection_drop():
     """The 2026-08-06 failure inverted: attempt 1 dies with OperationalError,
     attempt 2 must run on a NEW connection, not the corpse of the old one."""
@@ -153,7 +169,9 @@ def test_no_connection_is_held_open_across_the_research_phase(monkeypatch):
     """
     monkeypatch.setenv("TAVILY_API_KEY", "test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("DATABASE_URL", "test-not-a-real-dsn")
     monkeypatch.delenv("STRIDE_ACCURACY_WEIGHTS", raising=False)
+    _stub_spend_modules(monkeypatch)
     monkeypatch.setattr(ca, "extraction_model", lambda: "test-model")
     monkeypatch.setattr(ca, "preflight_extraction_model", lambda *a, **k: None)
     monkeypatch.setattr(ca, "load_racecard_meetings", lambda d: {"fake": True})
@@ -196,3 +214,33 @@ def test_no_connection_is_held_open_across_the_research_phase(monkeypatch):
     assert [w[0] for w in writes] == ["mentions", "scores"]
     assert len(factory_calls) == 2, "connections open at the write site only"
     assert all(c.closed == 1 for c in factory_calls), "and are not leaked"
+
+
+def test_missing_database_url_fails_before_any_research_spend(monkeypatch):
+    """A misconfigured run must not burn a day's LLM budget finding out.
+
+    The check is a presence check on the env var — it must NOT open a
+    connection (that would reintroduce the early connection #98 removed),
+    and it must fire before preflight, before the research loop: every
+    spend counter stays at zero.
+    """
+    monkeypatch.setenv("TAVILY_API_KEY", "test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    _stub_spend_modules(monkeypatch)
+
+    def boom():
+        raise AssertionError("get_connection called by a presence check")
+
+    monkeypatch.setattr(ca, "get_connection", boom)
+
+    spends = {"preflight": 0, "research": 0}
+    monkeypatch.setattr(ca, "preflight_extraction_model",
+                        lambda *a, **k: spends.__setitem__("preflight", 1))
+    monkeypatch.setattr(ca, "claude_research_race",
+                        lambda *a, **k: spends.__setitem__("research", 1))
+
+    with pytest.raises(RuntimeError) as e:
+        ca.run_consensus_agent("2026-08-06")
+    assert "DATABASE_URL" in str(e.value)
+    assert spends == {"preflight": 0, "research": 0}
