@@ -307,13 +307,52 @@ def match_horse_to_field(extracted_name: str, field_names: list[str]) -> str | N
     return scores[0][1]
 
 
+PANEL_OPTIONAL_ENV = "STRIDE_PANEL_OPTIONAL"
+
+
+class PanelUnavailable(RuntimeError):
+    """The tipster panel is absent. Fatal unless explicitly made optional."""
+
+
 def load_tipster_panel() -> dict:
-    """Load tipster_panel.json from the same directory."""
+    """Load tipster_panel.json from the same directory.
+
+    Raises rather than returning an empty list. Returning `{"sources": []}`
+    on a missing file is what let the panel be absent from every Fargate
+    task since the cloud went live, with one stderr line as the only
+    evidence: fetch_panel_pages then logged "No active+verified panel
+    members" and consensus ran on Perplexity alone, scoring every race and
+    reporting success. A degraded panel does not crash anything — it just
+    makes worse picks, quietly, which is why it has to be the loud kind of
+    failure instead.
+
+    The guard lives HERE, in the consumer, not in whichever job happens to
+    invoke it. Fargate stages the panel in dispatch(); the Mac scheduler
+    has it on disk; a future Lambda would have neither. Putting the check
+    at the read means every one of those paths is covered by construction,
+    including paths that do not exist yet.
+
+    STRIDE_PANEL_OPTIONAL=true is the deliberate escape for local dev and
+    CI, which have no bucket credential. Documented in CLAUDE.md — the same
+    treatment .claude/skills/ gets, and for the same reason: absent by
+    design must be written down, not discovered.
+    """
     panel_path = Path(__file__).resolve().parent / "tipster_panel.json"
-    if not panel_path.exists():
-        print("[PANEL] ERROR: tipster_panel.json not found", file=sys.stderr)
+    if panel_path.exists():
+        return json.loads(panel_path.read_text(encoding="utf-8"))
+
+    if os.environ.get(PANEL_OPTIONAL_ENV, "").strip().lower() in ("true", "1", "yes"):
+        print(f"[PANEL] tipster_panel.json absent and {PANEL_OPTIONAL_ENV} is "
+              f"set — running panel-less on purpose. Consensus scores will "
+              f"come from Perplexity alone.", file=sys.stderr)
         return {"sources": [], "bucket_definitions": {}}
-    return json.loads(panel_path.read_text(encoding="utf-8"))
+
+    raise PanelUnavailable(
+        f"{panel_path} not found. The file is gitignored (the repo is "
+        f"PUBLIC) and is staged from the private models bucket at task "
+        f"start — see infra/09c_upload_panel.sh and _stage_panel() in "
+        f"infra/jobs/handler.py. Set {PANEL_OPTIONAL_ENV}=true to run "
+        f"without it on purpose.")
 
 
 def fetch_panel_pages(
@@ -1873,7 +1912,11 @@ def run_panel_only(date_str: str) -> int:
     are exit 1. Not 2: argparse already exits 2 on a bad command line, and
     a reader debugging a red job should not have to tell those apart. The URLs were last edited 2026-04-10; tip pages move.
     """
-    panel = load_tipster_panel()
+    try:
+        panel = load_tipster_panel()
+    except PanelUnavailable as e:
+        print(f"[PANEL-PROOF] FATAL: {e}", file=sys.stderr)
+        return 6
     active = [s for s in panel.get("sources", [])
               if s.get("active") and s.get("verified")]
     print(f"[PANEL-PROOF] {len(panel.get('sources', []))} sources in file, "
@@ -1950,6 +1993,11 @@ def main():
     except ExtractionModelUnavailable as e:
         print(f"[CONSENSUS] FATAL: {e}", file=sys.stderr)
         sys.exit(3)
+    except PanelUnavailable as e:
+        # 6, the same code --panel-only uses for "panel absent", so one
+        # number means one thing however consensus was invoked.
+        print(f"[CONSENSUS] FATAL: {e}", file=sys.stderr)
+        sys.exit(6)
 
     # Exit contract. A day that scored races but found nothing is a broken run,
     # not a quiet one, and the pipeline must be able to tell: without a non-zero

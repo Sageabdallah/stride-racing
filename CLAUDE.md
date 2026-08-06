@@ -66,6 +66,25 @@ That is not a missing file, it is not recoverable from this repository, and it i
 not something to reconstruct by guessing. Work from the code, or say what you
 could not determine.
 
+`server/python/tipster_panel.json` is gitignored on the same grounds and gets the
+same treatment. It holds which 16 of 37 sources are trusted, which weighting
+bucket each sits in, and which carry the proofed-results boost — the vetting
+work, not a description of it, and `historical_accuracy` is designed not to stay
+null. The repo is PUBLIC and git is a one-way door, so it is never committed;
+it lives in the private models bucket under `config/` and is staged into every
+task by `_stage_panel()` in `infra/jobs/handler.py`. Upload it with
+`infra/09c_upload_panel.sh`; prove it reaches a container with
+`gh workflow run verify-jobs.yml -f jobs=panel-proof`.
+
+**Absent, `consensus_agent.py` raises `PanelUnavailable` and exits 6.** That is
+deliberate — the old behaviour returned an empty source list and scored the day
+on Perplexity alone, reporting success, which is how the panel stayed dead in
+the cloud from the day it went live. To run without it on purpose — local dev,
+CI, anywhere with no bucket credential — set **`STRIDE_PANEL_OPTIONAL=true`**.
+Consensus then runs panel-less and says so on stderr. CI does not execute
+`consensus_agent.py`, so it needs neither the variable nor a credential today;
+set the variable rather than staging a panel if that ever changes.
+
 ## Commands
 - `/stride-full` — full daily pipeline run (results → health → build → tips → blackbook → performance)
 - `/stride-health` — health check dashboard

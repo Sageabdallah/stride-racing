@@ -99,6 +99,12 @@ def _stage_models() -> None:
     n = 0
     for page in _s3().get_paginator("list_objects_v2").paginate(Bucket=bucket):
         for o in page.get("Contents", []):
+            # config/ is not a model artifact. Without this skip it would
+            # land a second copy at models/tipster_panel.json that nothing
+            # reads, and a bucket holding only config would satisfy the
+            # "models bucket is EMPTY" check below.
+            if o["Key"].startswith("config/"):
+                continue
             name = os.path.basename(o["Key"])
             if name:
                 _s3().download_file(bucket, o["Key"], os.path.join(dest, name))
@@ -108,6 +114,52 @@ def _stage_models() -> None:
         raise RuntimeError(
             f"models bucket s3://{bucket} is EMPTY — run "
             "infra/09b_upload_models.sh from the box that has the artifacts")
+
+
+PANEL_KEY = "config/tipster_panel.json"
+
+
+def _stage_panel() -> bool:
+    """Pull the tipster panel out of the private models bucket.
+
+    Same reasoning as _stage_models: the repo is PUBLIC and this file is
+    gitignored, so it is not in the build context and cannot be in the
+    image. It carries which 16 of 37 sources are trusted, which bucket each
+    is weighted into, and which get the proofed-results boost — the vetting,
+    not a description of it. historical_accuracy is null today and will not
+    stay null, and git is a one-way door: a file published while it is
+    low-value stays published in every clone once it is not.
+
+    Called from dispatch() rather than from the consensus jobs, so every
+    path through this handler stages it — Fargate, Lambda, proof variants,
+    and any job added later that nobody remembers to wire up.
+
+    Returns rather than raising, and that is deliberate: results-collect
+    must not go red because the panel is missing. The loud failure belongs
+    to the CONSUMER — consensus_agent.load_tipster_panel raises
+    PanelUnavailable (exit 6) — so a job that needs the panel fails and a
+    job that does not carries on. A best-effort stage is only safe because
+    something else is not best-effort.
+    """
+    bucket = os.environ.get("STRIDE_MODELS_BUCKET", "").strip()
+    if not bucket:
+        return False
+    dest = f"{_root()}/server/python/tipster_panel.json"
+    try:
+        # Lambda's task root is read-only, so staging cannot work there at
+        # all. No Lambda job runs consensus today; if one ever does, the
+        # consumer's guard is what catches it rather than this returning a
+        # quiet False that reads like "nothing to do".
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        _s3().download_file(bucket, PANEL_KEY, dest)
+        print(f"[panel] staged from s3://{bucket}/{PANEL_KEY}")
+        return True
+    except Exception as e:
+        print(f"[panel] NOT staged from s3://{bucket}/{PANEL_KEY}: "
+              f"{type(e).__name__}: {e}. Jobs that read the panel will fail "
+              f"loudly; run infra/09c_upload_panel.sh if it was never "
+              f"uploaded.", file=sys.stderr)
+        return False
 
 
 ARTIFACTS_PREFIX = "artifacts"
@@ -802,6 +854,7 @@ def dispatch(event=None, context=None):
         raise RuntimeError(f"unknown STRIDE_JOB {job!r}; known: {sorted(JOBS)}")
     _load_secrets()
     _stage_models()
+    _stage_panel()
     try:
         result = JOBS[job]()
         _put_state(job, **result)

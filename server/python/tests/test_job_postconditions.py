@@ -569,3 +569,86 @@ def test_panel_proof_asks_for_a_real_fetch_not_a_dry_run(handler, monkeypatch):
     handler.job_panel_proof()
     assert "--panel-only" in calls[0]
     assert "--dry-run" not in calls[0]
+
+
+# ------------------------------------------------------------- panel staging
+
+def test_dispatch_stages_the_panel_for_every_job(handler, monkeypatch):
+    """Staging lives in dispatch, so no job can be added without it.
+
+    Wiring it per-job is how the panel would go missing again: the next
+    consensus-adjacent job someone adds is the one nobody remembers to wire.
+    Covering it here means Fargate, Lambda and the proof variants are all
+    covered by construction, including paths that do not exist yet.
+    """
+    order = []
+    monkeypatch.setattr(handler, "_load_secrets", lambda: order.append("secrets"))
+    monkeypatch.setattr(handler, "_stage_models", lambda: order.append("models"))
+    monkeypatch.setattr(handler, "_stage_panel", lambda: order.append("panel"))
+    monkeypatch.setattr(handler, "_put_state", lambda *a, **k: None)
+    monkeypatch.setitem(handler.JOBS, "unit-test-job",
+                        lambda: order.append("job") or {"ok": 1})
+    monkeypatch.setenv("STRIDE_JOB", "unit-test-job")
+    handler.dispatch()
+    assert "panel" in order, "dispatch never staged the panel"
+    assert order.index("panel") < order.index("job"), (
+        "the panel was staged after the job ran, which is no staging at all")
+
+
+def test_stage_panel_does_not_take_unrelated_jobs_red(handler, monkeypatch):
+    """A missing panel must fail the CONSUMER, not results-collect.
+
+    The loud failure belongs to consensus_agent.load_tipster_panel; this
+    returning False keeps a best-effort stage safe, because something else
+    is not best-effort.
+    """
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+
+    class _Boom:
+        def download_file(self, *a, **k):
+            raise RuntimeError("NoSuchKey")
+    monkeypatch.setattr(handler, "_s3", lambda: _Boom())
+    monkeypatch.setattr(handler, "_root", lambda: "/tmp/stride-panel-test")
+    assert handler._stage_panel() is False        # must not raise
+
+
+def test_stage_models_does_not_flatten_config_into_models(handler,
+                                                          monkeypatch):
+    """config/ is not a model artifact.
+
+    Without the skip, the panel lands a second time at
+    models/tipster_panel.json where nothing reads it, and a bucket holding
+    only config would satisfy the "models bucket is EMPTY" assertion —
+    turning a genuinely missing ensemble into a silent pass.
+    """
+    import pytest as _pytest
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setattr(handler, "_root", lambda: "/tmp/stride-panel-test")
+    got = []
+
+    class _S3:
+        def get_paginator(self, _):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [{"Key": "config/tipster_panel.json"}]}]
+            return P()
+
+        def download_file(self, b, k, d):
+            got.append(k)
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    with _pytest.raises(RuntimeError) as e:
+        handler._stage_models()
+    assert got == [], f"config/ was downloaded as a model artifact: {got}"
+    assert "EMPTY" in str(e.value)
+
+
+def test_the_panel_escape_hatch_is_documented(handler):
+    """"Written down, not discovered by accident three weeks from now."
+
+    The variable is the whole fallback story for local dev and CI, so it
+    lives beside the .claude/skills/ note rather than only in a docstring.
+    """
+    from pathlib import Path
+    md = (Path(__file__).resolve().parents[3] / "CLAUDE.md").read_text()
+    assert "STRIDE_PANEL_OPTIONAL" in md
+    assert "tipster_panel.json" in md
