@@ -1,0 +1,77 @@
+# Refuse to merge the panel-staging change before the panel is in the bucket.
+#
+# Sequencing this from memory is the part that inverts three merges from now.
+# Once load_tipster_panel raises on a missing panel, merging ahead of the
+# upload turns consensus red every morning until someone remembers why — loud,
+# correct, and still an outage. So the precondition is checked here rather
+# than trusted.
+#
+# It asserts the OBJECT EXISTS, not that panel-proof passed: panel-proof runs
+# against the deployed image, which by definition does not yet contain the code
+# in the PR. The thing a PR can meaningfully verify is the precondition.
+#
+# NO `paths:` FILTER, deliberately, and this is the part that is easy to get
+# wrong. A required status check that is paths-filtered never reports on a PR
+# outside those paths, and GitHub treats a required check with no result as
+# PENDING FOREVER — every unrelated PR becomes unmergeable, which is a worse
+# failure than the one this guards. So the workflow always runs and decides
+# for itself whether it applies. A check that fires on everything is one people
+# learn to click past, so when it does not apply it says so and passes.
+name: panel-staged-check
+
+on:
+  pull_request:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  panel-in-bucket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # need the base commit to diff against
+
+      - name: Does this PR touch panel staging?
+        id: scope
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE '^(infra/jobs/handler\.py|infra/09c_upload_panel\.sh|server/python/consensus_agent\.py)$'; then
+            echo "applies=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "applies=false" >> "$GITHUB_OUTPUT"
+            echo "no panel-staging files touched — nothing to gate"
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.scope.outputs.applies == 'true'
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: The panel must already be staged
+        if: steps.scope.outputs.applies == 'true'
+        run: |
+          BUCKET="stride-models-${{ vars.AWS_ACCOUNT_ID }}"
+          KEY="config/tipster_panel.json"
+          if aws s3api head-object --bucket "$BUCKET" --key "$KEY" \
+               --query '[LastModified,ContentLength]' --output text 2>/tmp/err; then
+            echo "panel present in s3://$BUCKET/$KEY"
+            # Size is printed but is NOT the assertion: an empty object would
+            # still "exist". 09c_upload_panel.sh refuses to upload a panel with
+            # zero active+verified sources, so content is gated at the write.
+            # This proves only that the write happened — which is exactly the
+            # precondition a merge depends on.
+          else
+            cat /tmp/err
+            echo "::error::s3://$BUCKET/$KEY is absent. Merging this PR makes"
+            echo "::error::consensus_agent exit 6 every morning. Run"
+            echo "::error::infra/09c_upload_panel.sh, then"
+            echo "::error::gh workflow run verify-jobs.yml -f jobs=panel-proof"
+            exit 1
+          fi

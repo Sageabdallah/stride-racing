@@ -32,6 +32,7 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 TABLE = os.environ.get("STRIDE_STATE_TABLE", "stride_run_state")
 SYD = timezone(timedelta(hours=10))  # display only; schedules own DST
 PF_WALL_DAYS = 31
+# probe: throwaway edit so this PR touches a panel-staging file.
 
 
 def _load_secrets() -> None:
