@@ -368,7 +368,11 @@ AS $$
     WHEN lower(src) LIKE '%flemington%' THEN 'flemington'
     WHEN lower(src) LIKE '%shatin%' OR lower(src) LIKE '%sha tin%' THEN 'shatin'
     WHEN lower(src) LIKE '%happy valley%' THEN 'happyvalley'
-    ELSE lower(regexp_replace(src, '[^a-z0-9]+', '', 'g'))
+    -- lower() must come FIRST: regexp_replace's class [^a-z0-9] is
+    -- lowercase-only, so lower(regexp_replace(...)) deleted every
+    -- uppercase letter as "non-alphanumeric" ('Canterbury' -> 'anterbury').
+    -- For already-lowercase input this is byte-identical to the old form.
+    ELSE regexp_replace(lower(src), '[^a-z0-9]+', '', 'g')
   END;
 $$;
 """

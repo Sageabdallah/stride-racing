@@ -341,6 +341,66 @@ def test_morning_odds_venue_check_passes_with_no_schedule(handler,
     handler.job_morning_odds()   # must not raise
 
 
+# ------------------------------------- normaliser lockstep (MP-4)
+
+MAPPING_PATH = (Path(__file__).resolve().parents[3]
+                / "server" / "python" / "build_betfair_mapping.py")
+
+# The verification script's case table: capitalised schedule values, an
+# already-lowercase snapshot value, and one name per explicit alias branch.
+NORM_CASE_TABLE = {
+    "Canterbury": "canterbury",
+    "Belmont Park": "belmontpark",
+    "Ballarat Synthetic": "ballaratsynthetic",
+    "canterbury": "canterbury",
+    "Royal Randwick": "randwick",
+    "Caulfield": "caulfield",
+}
+
+
+def test_sql_normaliser_lowercases_before_stripping():
+    """Guard the MP-4 fix at the only level a unit test can reach: the SQL
+    source. The old ELSE ran regexp_replace first, and [^a-z0-9] is a
+    lowercase-only class, so every uppercase letter was DELETED
+    ('Canterbury' -> 'anterbury') and a capitalised schedule row could
+    never join a lowercased snapshot row. lower() must come first."""
+    sql = MAPPING_PATH.read_text()
+    assert "regexp_replace(lower(src), '[^a-z0-9]+', '', 'g')" in sql
+    assert "lower(regexp_replace(src, '[^a-z0-9]+', '', 'g'))" not in sql
+
+
+def test_python_mirror_agrees_with_sql_normaliser_on_the_case_table():
+    """betfair_markets.norm_track is documented as the Python lockstep
+    mirror of stride_norm_track. If they are supposed to agree, a test
+    should say so — on the same case table the verification script uses,
+    so the two normalisers cannot drift apart silently."""
+    import betfair_markets
+    for name, expected in NORM_CASE_TABLE.items():
+        assert betfair_markets.norm_track(name) == expected, name
+
+
+def test_handler_normalises_both_sides_of_the_venue_comparison(handler,
+                                                               monkeypatch):
+    """A one-sided edit — normalising the schedule but not the snapshots,
+    or vice versa — compiles fine, passes faked-cursor tests, and never
+    matches in production. Pin that BOTH sides go through
+    stride_norm_track."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    queries = _venue_coverage_db(
+        handler, monkeypatch,
+        scheduled=["Canterbury"], covered_rows=[("Canterbury", 1)])
+    handler.job_morning_odds()
+    texts = [" ".join(sql.split()).lower() for sql in queries]
+    missing_sql = next(t for t in texts if "array_agg" in t)
+    assert missing_sql.count("stride_norm_track(track)") == 2, (
+        "the missing-venue query must apply stride_norm_track to the "
+        "schedule side AND the snapshot side")
+    scheduled_sql = next(t for t in texts
+                         if "count(distinct" in t and "race_schedule" in t)
+    assert "count(distinct stride_norm_track(track))" in scheduled_sql
+
+
 def test_results_collect_treats_a_timeout_on_today_as_non_fatal(handler,
                                                                 monkeypatch):
     """_run's 840s cap raises TimeoutExpired, a SubprocessError.
