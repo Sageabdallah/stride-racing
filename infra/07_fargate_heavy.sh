@@ -62,7 +62,8 @@ aws iam put-role-policy --role-name $EXEC_ROLE --policy-name stride-logs-create 
     {"Effect": "Allow", "Action": ["logs:CreateLogGroup"], "Resource": "*"}]}'
 for spec in "intelligence-build 2048 4096" "consensus-agent 1024 2048" \
             "tips-pipeline 2048 8192" "nightly-etl 1024 4096" \
-            "racecard-collect 512 1024" "morning-odds 512 1024" \
+            "racecard-collect 512 1024" "baseline-night 512 1024" \
+            "morning-odds 512 1024" \
             "results-collect 1024 2048" "gap-heal 1024 2048" \
             "preflight 512 1024" "calibrator-coverage 512 2048"; do
   read -r NAME CPU MEM <<< "$spec"
