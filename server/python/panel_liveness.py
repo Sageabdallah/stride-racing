@@ -26,7 +26,9 @@ and refusing this client. Those need opposite responses, and
 Run standalone, or as the pre-flight in infra/09c_upload_panel.sh so a panel
 whose sources have rotted cannot be uploaded without the operator seeing it.
 
-Exit: 0 all reachable, 1 some unreachable, 2 none reachable or no panel.
+Three verdicts, not two, because two cannot describe what was measured — see
+ALIVE/FLAKY/DEAD below. Exit: 0 every source ALIVE, 1 some DEAD or FLAKY,
+2 nothing that could ever contribute (or no panel). Only 2 stops an upload.
 """
 
 from __future__ import annotations
@@ -50,8 +52,24 @@ HEADERS = {
 }
 
 
-def probe(url: str) -> tuple[bool, str]:
-    """(reachable, detail). HEAD first; some servers 405 it, so fall back."""
+ATTEMPTS = 3
+
+# Three outcomes, because two cannot describe what was measured. Back A Winner
+# returned EMPTY after 26,296ms on one probe and 122,750 chars on the next, so
+# every single-shot count stated about this panel — including the 4-vs-3 that
+# started this — was one observation read as a fact.
+#
+# FLAKY is "succeeded at least once and failed at least once", NOT a 2-of-3
+# majority. A majority rule would relabel a source that fails one morning in
+# three as healthy, which is the specific thing worth seeing: the panel is
+# fetched once a day, so a 1-in-3 failure rate is a third of race days with
+# that source contributing nothing. Any disagreement is the signal. This is a
+# report, not a gate, so strictness costs nothing and hides nothing.
+ALIVE, FLAKY, DEAD = "ALIVE", "FLAKY", "DEAD"
+
+
+def _attempt(url: str) -> tuple[bool, str]:
+    """One try. HEAD first; some servers 405 it, so fall back to GET."""
     for method in ("HEAD", "GET"):
         try:
             r = requests.request(method, url, timeout=TIMEOUT,
@@ -68,11 +86,35 @@ def probe(url: str) -> tuple[bool, str]:
     return False, "no response"
 
 
+def probe(url: str, attempts: int = ATTEMPTS) -> tuple[str, str]:
+    """(verdict, detail) over `attempts` tries.
+
+    Detail names the disagreement when there is one, because "2/3 HTTP 200,
+    1/3 ConnectTimeout" and "3/3 HTTP 404" need opposite responses and a
+    single-shot probe reports them identically.
+    """
+    results = [_attempt(url) for _ in range(attempts)]
+    oks = [ok for ok, _ in results]
+    details = [d for _, d in results]
+    if all(oks):
+        return ALIVE, f"{attempts}/{attempts} {details[0]}"
+    if not any(oks):
+        # Distinct reasons matter: an intermittent 429 among 404s is a
+        # different diagnosis from three consistent 404s.
+        uniq = sorted(set(details))
+        return DEAD, f"{attempts}/{attempts} failed ({', '.join(uniq)})"
+    good = sum(oks)
+    bad = sorted({d for ok, d in results if not ok})
+    return FLAKY, f"{good}/{attempts} ok, failed: {', '.join(bad)}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--panel", default=str(Path(__file__).with_name(
         "tipster_panel.json")))
     ap.add_argument("--json", action="store_true", help="machine-readable")
+    ap.add_argument("--attempts", type=int, default=ATTEMPTS,
+                    help="tries per source; >1 separates FLAKY from DEAD")
     args = ap.parse_args()
 
     path = Path(args.panel)
@@ -86,31 +128,53 @@ def main() -> int:
         print("[LIVENESS] FATAL: no active+verified sources", file=sys.stderr)
         return 2
 
-    rows = []
-    for s in sources:
+    # Concurrent across sources, sequential within one. 16 sources x 3
+    # attempts x a 15s timeout is 12 minutes serially, which is long enough
+    # that an operator skips the pre-flight — and a check people skip is worse
+    # than no check. Fanned out it is bounded by the slowest single source.
+    from concurrent.futures import ThreadPoolExecutor
+    def _one(s):
         url = s.get("tip_page_url") or s.get("base_url", "")
-        alive, detail = probe(url) if url else (False, "no url")
-        rows.append({"id": s.get("id"), "name": s.get("name"),
-                     "bucket": s.get("type"), "url": url,
-                     "alive": alive, "detail": detail})
+        verdict, detail = probe(url, args.attempts) if url else (DEAD, "no url")
+        return {"id": s.get("id"), "name": s.get("name"),
+                "bucket": s.get("type"), "url": url,
+                "verdict": verdict, "detail": detail}
+    # One batch, not two: at 8 workers a 16-source panel took 3m00s, and a
+    # 3-minute pre-flight is one an operator learns to skip. Bounded now by the
+    # slowest single source (2 methods x 3 attempts x TIMEOUT), not by batches.
+    with ThreadPoolExecutor(max_workers=max(8, len(sources))) as pool:
+        rows = list(pool.map(_one, sources))
 
     if args.json:
         print(json.dumps(rows, indent=2))
     else:
-        for r in sorted(rows, key=lambda x: (x["alive"], x["name"])):
-            print(f"  {'OK  ' if r['alive'] else 'DEAD'} "
-                  f"[{r['bucket'] or '?':15}] {r['name'][:32]:34} "
-                  f"{r['detail']:22} {r['url'][:56]}")
+        order = {ALIVE: 0, FLAKY: 1, DEAD: 2}
+        for r in sorted(rows, key=lambda x: (order[x["verdict"]], x["name"])):
+            print(f"  {r['verdict']:5} [{r['bucket'] or '?':15}] "
+                  f"{r['name'][:32]:34} {r['detail']:36} {r['url'][:52]}")
 
-    live = [r for r in rows if r["alive"]]
-    dead = [r for r in rows if not r["alive"]]
-    print(f"\n[LIVENESS] {len(live)}/{len(rows)} reachable", file=sys.stderr)
+    live = [r for r in rows if r["verdict"] == ALIVE]
+    flaky = [r for r in rows if r["verdict"] == FLAKY]
+    dead = [r for r in rows if r["verdict"] == DEAD]
+    # Every count says which predicate it counts. Two reports of "the panel"
+    # disagreeing about what they were counting is what produced 4-vs-3.
+    print(f"\n[LIVENESS] REACHABLE over {args.attempts} attempts: "
+          f"{len(live)} ALIVE, {len(flaky)} FLAKY, {len(dead)} DEAD "
+          f"(of {len(rows)} active+verified)", file=sys.stderr)
+    print(f"[LIVENESS] this measures REACHABILITY by plain request. What "
+          f"consensus actually receives is EXTRACTABILITY via Tavily — "
+          f"`consensus_agent.py <date> --panel-only`. The two disagree in "
+          f"BOTH directions; neither is a superset.", file=sys.stderr)
+    if flaky:
+        print(f"[LIVENESS] FLAKY sources contribute on some race days and not "
+              f"others: {', '.join(r['name'] for r in flaky)}", file=sys.stderr)
 
     # Which WEIGHTING buckets survive, not just how many sources. Losing the
     # only stable_watcher costs more than losing a fourth form_analyst:
     # bucket_spread drives a 0.8x-1.5x multiplier on the consensus injection
     # (consensus_blender.py:123), so diversity is the thing to protect.
-    lost = sorted({r["bucket"] for r in dead} - {r["bucket"] for r in live})
+    lost = sorted({r["bucket"] for r in dead}
+                  - {r["bucket"] for r in live + flaky})
     if lost:
         print(f"[LIVENESS] buckets with NO reachable source: "
               f"{', '.join(lost)}", file=sys.stderr)
@@ -118,9 +182,19 @@ def main() -> int:
         print(f"[LIVENESS] replace or deactivate: "
               f"{', '.join(r['name'] for r in dead)}", file=sys.stderr)
 
-    if not live:
+    # Exit contract, and what 09c_upload_panel.sh does with each:
+    #   0  every source ALIVE                      -> upload, no comment
+    #   1  some DEAD or FLAKY                      -> upload, report loudly
+    #   2  nothing that can EVER contribute        -> refuse the upload
+    #
+    # FLAKY counts as contributing for the go/no-go, because it does: a source
+    # that fetches two mornings in three is worth more than no panel. It is
+    # never counted as ALIVE, is always named, and is a replacement candidate
+    # for the URL pass — not an emergency. Excluding it from the go/no-go
+    # would throw away real signal to make a number look tidier.
+    if not live and not flaky:
         return 2
-    return 1 if dead else 0
+    return 1 if (dead or flaky) else 0
 
 
 if __name__ == "__main__":

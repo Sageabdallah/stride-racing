@@ -36,16 +36,25 @@ sys.exit(0 if n else 1)
 " || { echo "FATAL: no active+verified sources — refusing to upload" >&2; exit 1; }
 
 # Liveness pre-flight. "verified": true is a claim someone made once, and it
-# was wrong for 13 of 16 sources by the time anyone checked — four months after
-# the file was last edited. Reporting it at upload time is the cheapest moment
-# to notice, since this is the only step that runs when the panel changes.
+# was wrong for most of the sources carrying it — four months after the file was
+# last edited. Upload time is the cheapest moment to notice, since this is the
+# only step that runs when the panel changes.
 #
-# Reports, does not block, and the distinction matters: exit 1 means some
-# sources are unreachable, which is a worse panel but still better than the
-# none currently in the cloud. Exit 2 (nothing reachable, or no panel) is the
-# one that stops the upload. A source that 403s here can still extract fine via
-# Tavily, so blocking on this check would refuse good panels.
-echo "checking source liveness (HEAD, no API keys, no cost)..."
+# THREE attempts per source, not one. A single probe found Back A Winner EMPTY
+# at 26,296ms and, minutes later, returning 122,750 chars — so a one-shot
+# pre-flight was making a go/no-go call on a coin flip, and every count stated
+# about this panel before now was one observation read as a fact.
+#
+# Reports, does not block, and the split matters:
+#   exit 0  every source ALIVE                        -> upload quietly
+#   exit 1  some DEAD or FLAKY                        -> upload, say so loudly
+#   exit 2  nothing that could ever contribute        -> refuse
+# FLAKY counts as contributing for the go/no-go because it does: a source that
+# fetches two mornings in three beats no panel at all. It is never counted as
+# ALIVE and is always named. And a source that 403s HERE can still extract fine
+# via Tavily (punters.com.au does), so blocking on this check would refuse good
+# panels — reachability and extractability are different questions.
+echo "checking source liveness (3 attempts each, no API keys, no cost)..."
 set +e
 python3 "$(dirname "$0")/../server/python/panel_liveness.py" --panel "$SRC"
 LIVE_RC=$?
