@@ -652,3 +652,54 @@ def test_the_panel_escape_hatch_is_documented(handler):
     md = (Path(__file__).resolve().parents[3] / "CLAUDE.md").read_text()
     assert "STRIDE_PANEL_OPTIONAL" in md
     assert "tipster_panel.json" in md
+
+
+def test_stage_models_names_the_artifact_instead_of_counting(handler,
+                                                             monkeypatch,
+                                                             tmp_path):
+    """A count is a proxy; the scorer opens one file by name.
+
+    Staging the four sectional_combiner JSONs and no .pkl satisfied
+    "the bucket is not empty" while models/racing_ensemble_v2.pkl — the file
+    ml_model.py:165 loads — was absent. The tips job would then discover it
+    at 08:05, with the morning already spent.
+    """
+    import pytest as _pytest
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+
+    class _S3:
+        def get_paginator(self, _):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [
+                        {"Key": "sectional_combiner_mile.json"},
+                        {"Key": "sectional_combiner_sprint.json"}]}]
+            return P()
+
+        def download_file(self, b, k, d):
+            open(d, "w").close()
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    with _pytest.raises(RuntimeError) as e:
+        handler._stage_models()
+    assert "racing_ensemble_v2.pkl" in str(e.value)
+    assert "EMPTY" not in str(e.value), "counted instead of named"
+
+
+def test_stage_models_passes_when_the_named_artifact_lands(handler,
+                                                           monkeypatch,
+                                                           tmp_path):
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+
+    class _S3:
+        def get_paginator(self, _):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [{"Key": "racing_ensemble_v2.pkl"}]}]
+            return P()
+
+        def download_file(self, b, k, d):
+            open(d, "w").close()
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    handler._stage_models()          # must not raise

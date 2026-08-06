@@ -1,0 +1,59 @@
+# Refuse to merge the panel-staging change before the panel is in the bucket.
+#
+# Sequencing this from memory is the part that inverts three merges from now.
+# Once load_tipster_panel raises on a missing panel, merging ahead of the
+# upload turns consensus red every morning until someone remembers why — loud,
+# correct, and still an outage. So the precondition is checked here rather
+# than trusted.
+#
+# It asserts the OBJECT EXISTS, not that panel-proof passed: panel-proof runs
+# against the deployed image, which by definition does not yet contain the code
+# in the PR. The thing a PR can meaningfully verify is the precondition.
+#
+# Paths-filtered on purpose. An unrelated PR must not be blocked by a bucket it
+# never touches, and a check that fires on everything is a check people learn
+# to click past.
+name: panel-staged-check
+
+on:
+  pull_request:
+    paths:
+      - "infra/jobs/handler.py"
+      - "infra/09c_upload_panel.sh"
+      - "server/python/consensus_agent.py"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  panel-in-bucket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: The panel must already be staged
+        run: |
+          BUCKET="stride-models-${{ vars.AWS_ACCOUNT_ID }}"
+          KEY="config/tipster_panel.json"
+          if aws s3api head-object --bucket "$BUCKET" --key "$KEY" \
+               --query 'LastModified' --output text 2>/tmp/err; then
+            echo "panel present in s3://$BUCKET/$KEY"
+            # Size is worth printing but is NOT the assertion: a truncated or
+            # empty object would still "exist". 09c_upload_panel.sh refuses to
+            # upload a panel with zero active+verified sources, so content is
+            # gated at the write; this only proves the write happened.
+            aws s3api head-object --bucket "$BUCKET" --key "$KEY" \
+              --query 'ContentLength' --output text
+          else
+            cat /tmp/err
+            echo "::error::s3://$BUCKET/$KEY is absent. Merging this PR makes"
+            echo "::error::consensus_agent exit 6 every morning. Run"
+            echo "::error::infra/09c_upload_panel.sh, then"
+            echo "::error::gh workflow run verify-jobs.yml -f jobs=panel-proof"
+            exit 1
+          fi

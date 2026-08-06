@@ -80,6 +80,11 @@ def _s3():
     return boto3.client("s3", region_name=REGION)
 
 
+# The artifact the scorer opens by name (ml_model.py:165). Listed rather than
+# inferred: a count cannot tell "the ensemble is here" from "four JSONs are".
+REQUIRED_MODEL_ARTIFACTS = ("racing_ensemble_v2.pkl",)
+
+
 def _stage_models() -> None:
     """Fargate: pull model artifacts into server/python/models/. No-op on
     Lambda (read-only fs, and no Lambda job loads the model). Raises when
@@ -114,6 +119,21 @@ def _stage_models() -> None:
         raise RuntimeError(
             f"models bucket s3://{bucket} is EMPTY — run "
             "infra/09b_upload_models.sh from the box that has the artifacts")
+    # Count was a PROXY for "the ensemble is here", and CLAUDE.md's own rule is
+    # to verify content rather than proxies. A bucket holding the four
+    # sectional_combiner JSONs and no .pkl staged 4 artifacts and satisfied the
+    # check above, while the file the scorer actually opens — ml_model.py:165,
+    # models/racing_ensemble_v2.pkl — was absent. That is the same failure this
+    # whole pass keeps finding: a green check standing in front of a missing
+    # thing. Name the artifact instead of counting its neighbours.
+    missing = [f for f in REQUIRED_MODEL_ARTIFACTS
+               if not os.path.exists(os.path.join(dest, f))]
+    if missing:
+        raise RuntimeError(
+            f"models bucket s3://{bucket} staged {n} artifact(s) but not "
+            f"{', '.join(missing)} — ml_model.py loads that by name, so the "
+            f"scorer would fail at 08:05 with the day already half gone, or "
+            f"worse, score on a fallback. Re-run infra/09b_upload_models.sh.")
 
 
 PANEL_KEY = "config/tipster_panel.json"

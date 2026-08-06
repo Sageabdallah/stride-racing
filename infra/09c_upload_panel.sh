@@ -35,6 +35,24 @@ print(f'  {len(s)} sources, {len(n)} active+verified')
 sys.exit(0 if n else 1)
 " || { echo "FATAL: no active+verified sources — refusing to upload" >&2; exit 1; }
 
+# Liveness pre-flight. "verified": true is a claim someone made once, and it
+# was wrong for 13 of 16 sources by the time anyone checked — four months after
+# the file was last edited. Reporting it at upload time is the cheapest moment
+# to notice, since this is the only step that runs when the panel changes.
+#
+# Reports, does not block, and the distinction matters: exit 1 means some
+# sources are unreachable, which is a worse panel but still better than the
+# none currently in the cloud. Exit 2 (nothing reachable, or no panel) is the
+# one that stops the upload. A source that 403s here can still extract fine via
+# Tavily, so blocking on this check would refuse good panels.
+echo "checking source liveness (HEAD, no API keys, no cost)..."
+set +e
+python3 "$(dirname "$0")/../server/python/panel_liveness.py" --panel "$SRC"
+LIVE_RC=$?
+set -e
+[ "$LIVE_RC" -ge 2 ] && { echo "FATAL: no reachable sources — refusing" >&2; exit 1; }
+[ "$LIVE_RC" -eq 1 ] && echo "  (uploading anyway: a degraded panel beats no panel)"
+
 aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1 || {
   echo "FATAL: s3://$BUCKET missing — run infra/09b_upload_models.sh first" >&2
   exit 1
