@@ -170,6 +170,57 @@ def test_cli_fails_when_mapped_markets_commit_no_rows(cli_env, capsys):
     assert "POST-CONDITION FAILED" in capsys.readouterr().out
 
 
+def test_cli_fails_when_a_seeded_schedule_maps_no_markets(cli_env, capsys):
+    """2026-08-06 in miniature: markets listed, race_schedule seeded, and the
+    venue join matched none of them. The exit-5 guard cannot see this — it
+    needs mapped markets to fire — so the run reported success having written
+    nothing, and the first sign of trouble was a downstream job failing an
+    hour later for reasons its own log did not carry."""
+    conn = FakeConn()
+    # One market at a venue the schedule has never heard of, and a schedule
+    # that is emphatically not empty.
+    rc = snap.main(["--date", DATE, "--commit"],
+                   post=make_post(catalogue=[CATALOGUE[2]]),
+                   connect=lambda: conn)
+    out = capsys.readouterr().out
+    assert rc == 6, "a schedule that maps nothing must not exit 0"
+    assert "POST-CONDITION FAILED" in out
+    # The mismatch is a pair of strings, so the report must name both sides.
+    assert "nowherepark" in out
+    assert "'Royal Randwick' -> randwick" in out
+    assert conn.rows == []
+
+
+def test_cli_tip_time_past_every_jump_is_not_a_broken_join(cli_env, capsys,
+                                                           monkeypatch):
+    """The pre-jump guard drops every market on a late tip_time run. The
+    markets DID map — the zero-mapped post-condition must ask about the join,
+    not about what survived the guard, or the honest case reads as a fault."""
+    # Both fixture markets jump by 03:50Z; run the capture after the last one.
+    monkeypatch.setattr(snap, "_utcnow",
+                        lambda: datetime(2026, 8, 1, 6, 0, tzinfo=timezone.utc))
+    conn = FakeConn()
+    rc = snap.main(["--date", DATE, "--kind", "tip_time", "--commit"],
+                   post=make_post(), connect=lambda: conn)
+    out = capsys.readouterr().out
+    assert "dropped 2 market(s)" in out, "fixture markets must be past jump"
+    assert rc == 0
+    assert "POST-CONDITION FAILED" not in out
+
+
+def test_cli_maps_a_surface_qualified_track_end_to_end(cli_env):
+    """The fix, through the CLI: Betfair's "Ballarat" against a schedule
+    seeded from a card that called it "Ballarat Synthetic"."""
+    conn = FakeConn(schedule_rows=[("Ballarat Synthetic", 1, DATE,
+                                    "2026-08-01T13:15:00")])
+    catalogue = [dict(CATALOGUE[0], event={"venue": "Ballarat"})]
+    rc = snap.main(["--date", DATE, "--commit"],
+                   post=make_post(catalogue=catalogue), connect=lambda: conn)
+    assert rc == 0
+    assert conn.rows, "the Ballarat market should have produced rows"
+    assert {r[0] for r in conn.rows} == {f"{DATE}|ballaratsynthetic|R1"}
+
+
 def test_cli_quiet_day_commits_nothing_and_still_passes(cli_env, capsys):
     """A quiet day maps no markets and writes no rows, and that is correct.
     The post-condition must not fire here — roughly 43 percent of days carry

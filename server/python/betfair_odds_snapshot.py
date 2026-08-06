@@ -35,6 +35,10 @@ Exit codes:
        credentials on betfair.com.au). NEVER retried automatically.
     4  network/geo edge block — credentials NOT tested; run from an allowed
        country.
+    5  markets mapped but zero rows committed — the write failed silently.
+    6  markets listed and race_schedule seeded but zero markets mapped — the
+       venue join is broken (a quiet day cannot reach this: no card, no
+       schedule rows).
 """
 
 import argparse
@@ -321,6 +325,11 @@ def main(argv=None, post=None, connect=None) -> int:
 
         mapped, unmapped_markets, unmapped_runners = betfair_markets.map_markets(
             catalogue, schedule, bridge)
+        # What the venue join found, before the tip_time filter below can
+        # empty it for an unrelated and legitimate reason. The zero-mapped
+        # post-condition asks about the join, not about how many markets
+        # survived the jump guard.
+        joined = len(mapped)
 
         if args.kind == "tip_time":
             # Same poison guard as odds_snapshots.capture_tip_time_snapshots:
@@ -375,6 +384,42 @@ def main(argv=None, post=None, connect=None) -> int:
                   f"{args.date} but 0 rows were committed. The capture clock "
                   f"did not advance and tip_time rows cannot be backfilled.")
             return 5
+
+        # The same failure one layer up, which the guard above cannot see: it
+        # needs `mapped` to be non-empty to fire at all, so a venue join that
+        # matches NOTHING slips past it and exits 0 having written nothing.
+        # That is how 2026-08-06 read green — 14 markets, 8 race_schedule rows,
+        # 0 mapped, exit 0 — while morning-odds failed on the empty market
+        # pillar an hour later, with the reason nowhere in its own log.
+        #
+        # Quiet-day safe by construction, and for a different reason than the
+        # guard above. A quiet day still has a catalogue (it lists every AU
+        # market, not just ours), but no card, so seed_race_schedule writes
+        # nothing and `schedule` is empty. Keying on schedule rows rather than
+        # on the catalogue is what tells "nothing of ours raced" apart from
+        # "ours raced and we could not find it".
+        #
+        # The keys are printed because the failure is a string mismatch and
+        # nothing else in the run says what the two sides actually were.
+        #
+        # `joined`, not `mapped`: a tip_time run late enough that every mapped
+        # market is past its jump drops them all, and that is the pre-jump
+        # guard doing its job, not a broken join.
+        if catalogue and schedule and not joined:
+            venues = sorted({betfair_markets.norm_track(
+                (m.get("event") or {}).get("venue")
+                or (m.get("event") or {}).get("name")) for m in catalogue})
+            # Schedule side carries its raw name too: the unmapped-market
+            # lines above already print the Betfair venue verbatim, and
+            # nothing anywhere prints what the card called the same track.
+            tracks = sorted({f"{r['track']!r} -> {betfair_markets.norm_track(r['track'])}"
+                             for r in schedule})
+            print(f"POST-CONDITION FAILED: {len(catalogue)} market(s) and "
+                  f"{len(schedule)} race_schedule row(s) for {args.date}, and "
+                  f"0 mapped. The venue join is broken, not quiet.")
+            print(f"  Betfair venue keys: {', '.join(venues)}")
+            print(f"  race_schedule tracks: {', '.join(tracks)}")
+            return 6
         return 0
     except BetfairEdgeBlocked as e:
         print(f"NETWORK ERROR: {e}")

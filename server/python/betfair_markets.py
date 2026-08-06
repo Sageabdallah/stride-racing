@@ -79,6 +79,29 @@ _TRACK_ALIASES = {
     "sandownhillside": "sandown",
 }
 
+# Surface descriptors the card carries and the Exchange never does.
+#
+# Punting Form's 2026-08-06 card named the Ballarat meeting "Ballarat
+# Synthetic"; race_schedule was seeded with that name and Betfair's venue for
+# the same meeting is plain "Ballarat". The keys were "ballaratsynthetic" and
+# "ballarat", so all three Ballarat markets went unmapped, the morning capture
+# committed zero rows, and the 08:00 morning-odds job failed its MORNING_CHECK
+# post-condition — the market pillar dark for a day that had racing.
+#
+# The vocabulary is closed and holds surface names only, because a surface is
+# never a venue in its own right. This is deliberately NOT a general
+# containment test in either direction: "warwick" sits inside "warwick farm",
+# and admitting that is the Warwick defect target_tracks.is_target_track was
+# written to close. "farm" is not a surface, so it survives here.
+#
+# Matching key only. Row identity still comes from make_race_id -> plain_norm,
+# so what a snapshot row claims to be is byte-for-byte what it claimed before.
+# The DB-side stride_norm_track() is untouched: it collapses six venues by its
+# own LIKE rules and has never been character-identical to this function, and
+# widening it would re-key the training views — a separate change with a
+# separate blast radius.
+_SURFACE_QUALIFIERS = {"synthetic", "polytrack", "poly", "tapeta"}
+
 
 class BetfairAPIError(RuntimeError):
     """JSON-RPC level failure (APINGException, bad envelope, non-JSON)."""
@@ -205,9 +228,14 @@ def plain_norm(name: Any) -> str:
 
 def norm_track(name: Any) -> str:
     """Matching key for Betfair venue <-> race_schedule.track: strip
-    parenthetical qualifiers like '(AUS)', normalise, then alias."""
+    parenthetical qualifiers like '(AUS)', drop surface descriptors,
+    normalise, then alias."""
     base = re.sub(r"\([^)]*\)", "", str(name or "")).split(" - ")[0]
-    key = plain_norm(base)
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", base) if w]
+    # `or words` guards a name made only of surface words: an empty key would
+    # collide with every other empty key and map unrelated meetings together.
+    kept = [w for w in words if w.lower() not in _SURFACE_QUALIFIERS] or words
+    key = plain_norm("".join(kept))
     return _TRACK_ALIASES.get(key, key)
 
 

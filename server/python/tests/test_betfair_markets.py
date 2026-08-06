@@ -72,6 +72,47 @@ def test_start_time_fallback_when_market_name_has_no_race_number():
     assert mapped[0]["race_id"] == "2026-08-01|royalrandwick|R1"
 
 
+def test_surface_qualified_schedule_track_maps_to_the_plain_betfair_venue():
+    """2026-08-06, reproduced: the card named the meeting "Ballarat
+    Synthetic", race_schedule was seeded with that name, and Betfair's venue
+    was "Ballarat". Every market went unmapped and the market pillar had no
+    data for a day that had racing."""
+    catalogue = [{
+        "marketId": "1.260754596", "marketName": "R1 1400m 3yo",
+        "marketStartTime": "2026-08-06T03:00:00.000Z",
+        "event": {"venue": "Ballarat"},
+        "runners": [{"selectionId": 111, "runnerName": "1. Fast Horse"}],
+    }]
+    schedule = [{"track": "Ballarat Synthetic", "race_number": 1,
+                 "race_date": "2026-08-06", "off_time": "2026-08-06T13:00:00"}]
+    mapped, unmapped, _ = betfair_markets.map_markets(
+        catalogue, schedule, {"fasthorse": "h_fast"})
+    assert unmapped == []
+    # Identity is the schedule's own name, unchanged by the matching key: the
+    # strip decides what joins, never what a row claims to be.
+    assert mapped[0]["race_id"] == "2026-08-06|ballaratsynthetic|R1"
+    assert mapped[0]["track"] == "Ballarat Synthetic"
+
+
+def test_a_venue_that_is_a_prefix_of_a_schedule_track_still_does_not_map():
+    """The Warwick defect, from the Betfair side. Betfair's Queensland venue
+    is plain "Warwick" and the Sydney metro track is "Warwick Farm"; a
+    matcher loose enough to bridge Ballarat/Ballarat Synthetic must not be
+    loose enough to bridge these two."""
+    catalogue = [{
+        "marketId": "1.888", "marketName": "R1 1200m Hcap",
+        "marketStartTime": "2026-08-01T03:15:00.000Z",
+        "event": {"venue": "Warwick"},
+        "runners": [{"selectionId": 111, "runnerName": "1. Fast Horse"}],
+    }]
+    schedule = [{"track": "Warwick Farm", "race_number": 1,
+                 "race_date": DATE, "off_time": "2026-08-01T13:15:00"}]
+    mapped, unmapped, _ = betfair_markets.map_markets(
+        catalogue, schedule, {"fasthorse": "h_fast"})
+    assert mapped == []
+    assert unmapped[0]["market_id"] == "1.888"
+
+
 def test_unmatched_race_number_is_never_reguessed_by_time():
     # R7 doesn't exist in the schedule; the 03:15Z start sits right on R1's
     # jump but must not pull the market onto the wrong race.
