@@ -381,7 +381,41 @@ def job_morning_odds() -> dict:
             "morning-odds: odds_movement.py exited 0 but committed no "
             "MORNING_CHECK rows — the market pillar has no data today.")
 
-    # 2. Signals were derived, not just prices stored. On 2026-04-06 this
+    # 2. Every scheduled venue has at least one MORNING_CHECK row. The row
+    #    check above is all-or-nothing per DAY: on 2026-08-05 this job passed
+    #    green with odds for 2 of 4 scheduled venues (Canterbury, Doomben)
+    #    while Cranbourne and Belmont Park mapped zero — 16 races dark and
+    #    invisible. Per-VENUE, never per-race: Betfair publishes provincial
+    #    markets only a few hours out, so a venue with 3 of 8 races covered
+    #    at 08:00 is healthy, and a per-race check would false-alarm on every
+    #    provincial card. stride_norm_track is the DB's own normaliser
+    #    (build_betfair_mapping.py), applied to both sides so a venue name
+    #    format drift counts as missing instead of silently passing.
+    venues_scheduled = _db_query(
+        "SELECT COUNT(DISTINCT stride_norm_track(track)) FROM race_schedule "
+        "WHERE race_date = %s", (_today(),))[0]
+    missing = _db_query(
+        "SELECT COALESCE(array_agg(sched.track ORDER BY sched.track), '{}') "
+        "FROM ("
+        "  SELECT MIN(track) AS track, stride_norm_track(track) AS v "
+        "  FROM race_schedule WHERE race_date = %s GROUP BY v"
+        ") sched LEFT JOIN ("
+        "  SELECT DISTINCT stride_norm_track(track) AS v "
+        "  FROM betfair_odds_snapshots "
+        "  WHERE race_date = %s AND snapshot_type = 'MORNING_CHECK' "
+        "  AND snapshot_time >= %s"
+        ") cov ON cov.v = sched.v "
+        "WHERE cov.v IS NULL",
+        (_today(), _today(), t0))[0]
+    if missing:
+        raise RuntimeError(
+            f"morning-odds: {len(missing)} of {venues_scheduled} scheduled "
+            f"venues have NO MORNING_CHECK odds today: "
+            f"{', '.join(missing)}. The day-level row check cannot see a "
+            f"single dark venue — this is the 2026-08-05 failure, which "
+            f"passed green at the time.")
+
+    # 3. Signals were derived, not just prices stored. On 2026-04-06 this
     #    job wrote 272 MORNING_CHECK rows against a 230-row baseline and
     #    produced ZERO market_signal_scores: compute_market_signals keys the
     #    baseline on the raw horse name (odds_movement.py:204-212, :231), so
