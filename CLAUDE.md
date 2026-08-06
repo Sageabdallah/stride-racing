@@ -179,6 +179,33 @@ having written no rows, sent no requests, or fetched no results and still return
 not that the right thing changed. A 200 proves the endpoint answered, not that
 the payload was right. Check the thing itself.
 
+One example teaches the letter of that rule. Three teach when to go looking for
+it, so here are three found in a single pass on 2026-08-06, at three different
+layers:
+
+- **A count standing in for a name.** `_stage_models` raised only when the
+  bucket staged zero objects, while its own docstring said the point was that
+  "a tips run without the ensemble must fail loudly". A bucket holding the four
+  `sectional_combiner` JSONs and no `.pkl` staged 4 artifacts and passed —
+  `models/racing_ensemble_v2.pkl`, which `ml_model.py:165` opens by name, was
+  absent. *Count is not identity.*
+- **A stale flag standing in for a live fact.** `"verified": true` in
+  `tipster_panel.json` was a claim made on or before 2026-04-10. By 2026-08-06
+  it was wrong for 12 of the 16 sources carrying it, and nothing had noticed,
+  because nothing ever re-asked. *A flag that can decay needs something that
+  re-checks it — `server/python/panel_liveness.py`.*
+- **Presence standing in for usefulness.** A staged panel that loads, parses
+  and reports 16 active sources can still supply exactly one weighting bucket.
+  `bucket_spread` drives a 0.8x–1.5x multiplier on the consensus injection, so
+  "the panel is present" and "the panel is doing its job" are different claims.
+  *Loaded is not working.*
+
+The shape is always the same: something cheap to measure sitting in front of
+something expensive to measure, and nobody noticing the substitution because the
+cheap thing is green. When you write a check, say out loud what it would still
+pass with — if the answer is "the exact failure I am guarding against", it is a
+proxy.
+
 **Say so when you are unsure.** Comment with findings and open no PR. A
 confident wrong patch costs more than an unanswered issue, because it gets
 reviewed as though someone already thought about it.
