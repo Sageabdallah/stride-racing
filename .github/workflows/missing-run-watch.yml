@@ -139,9 +139,16 @@ jobs:
             TD_STATUS="unknown"
             [ -n "$TD_ARN" ] && TD_STATUS=$(aws ecs describe-task-definition \
                 --task-definition "$TD_ARN" --query 'taskDefinition.status' --output text 2>&1 || echo "describe failed")
-            RUN_STATE=$(aws dynamodb get-item --table-name stride_run_state \
-                          --key "{\"job_name\":{\"S\":\"$JOB\"}}" --output json 2>/dev/null \
-                          | jq -c '.Item // "no row"' || echo '"lookup failed"')
+            # A miss returns NO output at all, not an empty object, so piping
+            # straight into jq yields an empty string and the most telling line
+            # on the page reads as though the lookup itself broke.
+            RS_RAW=$(aws dynamodb get-item --table-name stride_run_state \
+                       --key "{\"job_name\":{\"S\":\"$JOB\"}}" --output json 2>&1)
+            if [ -z "$RS_RAW" ]; then
+              RUN_STATE="no row at all — this job has never recorded a success"
+            else
+              RUN_STATE=$(echo "$RS_RAW" | jq -c '.Item // .' 2>/dev/null || echo "$RS_RAW")
+            fi
             ERRS=$(aws cloudwatch get-metric-statistics --namespace AWS/Scheduler \
                      --metric-name TargetErrorCount --statistics Sum \
                      --start-time "$(date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ)" \
