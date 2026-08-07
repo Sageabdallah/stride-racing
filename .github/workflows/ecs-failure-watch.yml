@@ -90,7 +90,13 @@ jobs:
             [ "$EXIT" = "0" ] && continue
 
             TID8=${TASKID:0:8}
-            DUP=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            # --state all, deliberately: a task id is permanently unique, so a
+            # CLOSED issue for it is still the record of this failure and must
+            # suppress re-filing. With --state open (the default, so dropping
+            # the flag changes nothing), closing an issue while its task is
+            # still in the ~1h stopped-task window re-files it and pays for a
+            # second triage dispatch. Verified live on #105, 2026-08-07.
+            DUP=$(gh issue list --repo "$GITHUB_REPOSITORY" --state all \
                     --search "$TID8 in:title" --json number --jq 'length' \
                     2>/dev/null || echo 0)
             if [ "${DUP:-0}" -gt 0 ]; then
