@@ -110,17 +110,72 @@ jobs:
 
             # Tolerate a task that started slightly before its schedule.
             FLOOR=$((FIRE - 300))
-            LAST=$(aws logs describe-log-streams \
-                     --log-group-name "/ecs/$FAMILY" \
-                     --order-by LastEventTime --descending --limit 1 \
-                     --query 'logStreams[0].lastEventTimestamp' --output text 2>/dev/null)
 
-            if [ -n "$LAST" ] && [ "$LAST" != "None" ] && [ "$((LAST / 1000))" -ge "$FLOOR" ]; then
-              echo "OK   $JOB — logged at $(date -u -d "@$((LAST / 1000))" +%H:%MZ)"
+            # Four independent signals, cheapest first. THE LOG GROUP ALONE IS
+            # NOT ENOUGH, and getting this wrong is worse than not watching:
+            # the container's Python stdout is block-buffered, so a task's whole
+            # log arrives in ONE flush when it exits. Every stream in
+            # /ecs/stride-* has firstEventTimestamp == lastEventTimestamp,
+            # measured 2026-08-07. A job that is still running has therefore
+            # logged nothing at all, and asking only the log would report
+            # intelligence (~30 min), consensus (hours on a Saturday card) and
+            # tips (~2-4 h) as never-started while each ran perfectly — three
+            # false alarms on the one morning the real signal has to be trusted.
+            STARTED=""
+
+            RUNNING=$(aws ecs list-tasks --cluster "$CLUSTER" --family "$FAMILY" \
+                        --desired-status RUNNING --query 'length(taskArns)' \
+                        --output text 2>/dev/null || echo 0)
+            if [ "${RUNNING:-0}" != "0" ] && [ "${RUNNING:-0}" != "None" ]; then
+              STARTED="a task is running right now"
+            fi
+
+            if [ -z "$STARTED" ]; then
+              LAST=$(aws logs describe-log-streams \
+                       --log-group-name "/ecs/$FAMILY" \
+                       --order-by LastEventTime --descending --limit 1 \
+                       --query 'logStreams[0].lastEventTimestamp' --output text 2>/dev/null)
+              if [ -n "$LAST" ] && [ "$LAST" != "None" ] && [ "$((LAST / 1000))" -ge "$FLOOR" ]; then
+                STARTED="it logged at $(date -u -d "@$((LAST / 1000))" +%H:%MZ)"
+              fi
+            fi
+
+            # Stopped tasks stay listable for about an hour, which covers a job
+            # that started and exited inside its own grace window.
+            if [ -z "$STARTED" ]; then
+              for A in $(aws ecs list-tasks --cluster "$CLUSTER" --family "$FAMILY" \
+                           --desired-status STOPPED --query 'taskArns[]' --output text 2>/dev/null); do
+                S=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$A" \
+                      --query 'tasks[0].startedAt' --output text 2>/dev/null)
+                if [ -z "$S" ] || [ "$S" = "None" ]; then
+                  S=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$A" \
+                        --query 'tasks[0].createdAt' --output text 2>/dev/null)
+                fi
+                if [ -n "$S" ] && [ "$S" != "None" ]; then
+                  SE=$(date -u -d "$S" +%s 2>/dev/null || echo 0)
+                  if [ "$SE" -ge "$FLOOR" ]; then
+                    STARTED="a task started at $S"
+                    break
+                  fi
+                fi
+              done
+            fi
+
+            if [ -z "$STARTED" ]; then
+              LSD=$(aws dynamodb get-item --table-name stride_run_state \
+                      --key "{\"job_name\":{\"S\":\"$JOB\"}}" \
+                      --query 'Item.last_success_date.S' --output text 2>/dev/null)
+              if [ "$LSD" = "$TODAY" ]; then
+                STARTED="stride_run_state already records a success today"
+              fi
+            fi
+
+            if [ -n "$STARTED" ]; then
+              echo "OK   $JOB — $STARTED"
               continue
             fi
 
-            echo "MISS $JOB — no log line since its ${HHMM} AEST slot"
+            echo "MISS $JOB — no running task, no log line, no stopped task, no run-state row since its ${HHMM} AEST slot"
             MISSING="${MISSING}${JOB} "
 
             TITLE="Never ran: $JOB has no trace for $TODAY"
@@ -156,8 +211,11 @@ jobs:
                      --query 'Datapoints[0].Sum' --output text 2>/dev/null || echo "n/a")
 
             {
-              echo "\`$JOB\` was due at **$HHMM AEST** on $TODAY. Its log group"
-              echo "\`/ecs/$FAMILY\` carries no event at or after that time, ${GRACE} minutes past the slot."
+              echo "\`$JOB\` was due at **$HHMM AEST** on $TODAY and ${GRACE} minutes later there is"
+              echo "still no sign it ever started. Four independent signals were checked and all four"
+              echo "came back empty: no RUNNING task in the \`$FAMILY\` family, no log event in"
+              echo "\`/ecs/$FAMILY\` at or after the slot, no STOPPED task started since the slot, and"
+              echo "no \`last_success_date\` of today in \`stride_run_state\`."
               echo
               echo "This is the never-started class, not a crash and not an empty result — a task that"
               echo "runs and fails writes a log stream and is picked up by \`ecs-failure-watch\`; a task"
