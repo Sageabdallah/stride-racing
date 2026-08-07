@@ -1,6 +1,6 @@
 # .github/workflows/morning-watch.yml
 #
-# Covers the gap. The 07:00 job is a Fargate scheduled task, so no
+# Covers the gap. The 05:30 consensus job is a Fargate scheduled task, so no
 # workflow_run trigger will ever see it fail.
 #
 # This checks the OUTCOME, not the exit code — did rows actually land. That is
@@ -39,10 +39,29 @@ name: Morning outcome watch
 
 on:
   schedule:
-    # 21:20 UTC == 07:20 AEST. The 07:00 task gets 20 minutes to finish.
+    # 22:50 UTC == 08:50 AEST.
+    #
+    # This used to be 07:20, twenty minutes after a consensus job that started
+    # at 07:00. #101 moved consensus to 05:30 and left this behind, which looks
+    # like more slack and is the opposite. consensus_agent accumulates every
+    # race into `all_mentions` and writes it in ONE batch at the end
+    # (consensus_agent.py:1858), so `consensus_mentions` is empty for the whole
+    # run, not filling as it goes. A Saturday card takes hours — measured
+    # ~2.6 min/race — so a 07:20 check would read a perfectly healthy run that
+    # is 40 races in as zero rows, and file the silent-no-op issue against it.
+    #
+    # That false issue would be indistinguishable from the real ones this
+    # watcher filed on Aug 5, 6 and 7 (#88, #95, #103), which is precisely how
+    # a watcher stops being read.
+    #
+    # 08:50 sits after the 08:05 tips start, so consensus has had its full
+    # window. Detecting a consensus failure later costs nothing that matters:
+    # tips has already begun by then either way, and a crashed consensus is
+    # caught within 30 minutes by ecs-failure-watch regardless.
+    #
     # AEST is UTC+10 year-round in NSW during winter; revisit in October when
     # daylight saving starts and this drifts an hour.
-    - cron: "20 21 * * *"
+    - cron: "50 22 * * *"
   workflow_dispatch:        # so you can test it right now without waiting
 
 permissions:
@@ -198,7 +217,7 @@ jobs:
           \`pf-morning-racecards\` run produced **neither** a racecard nor a quiet-day
           sentinel for that date.
 
-          So this is very probably not a consensus defect. The 07:00 job had nothing to
+          So this is very probably not a consensus defect. The consensus job had nothing to
           work from. Zero mentions is the same number whichever job failed, which is why
           this branch exists separately: starting from \`consensus_agent.py\` here means
           spending a whole run to arrive back at 05:30.
