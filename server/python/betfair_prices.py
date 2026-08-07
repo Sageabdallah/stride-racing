@@ -91,8 +91,9 @@ def _direct_context(date_str: str):
     mapped, unmapped_markets, _ = betfair_markets.map_markets(
         catalogue, schedule, bridge)
     if not mapped and catalogue:
+        venues = sorted({str(m.get("venue") or "?") for m in unmapped_markets})
         print(f"[BETFAIR_PRICES] {len(catalogue)} markets but 0 mapped for "
-              f"{date_str}; is race_schedule seeded for the date?",
+              f"{date_str}; unmapped venues: {', '.join(venues)}",
               file=sys.stderr)
     _DIRECT_CTX.update({"date": date_str, "token": token, "app_key": app_key,
                         "source": source, "mapped": mapped})
