@@ -66,6 +66,25 @@ That is not a missing file, it is not recoverable from this repository, and it i
 not something to reconstruct by guessing. Work from the code, or say what you
 could not determine.
 
+`server/python/tipster_panel.json` is gitignored on the same grounds and gets the
+same treatment. It holds which 16 of 37 sources are trusted, which weighting
+bucket each sits in, and which carry the proofed-results boost — the vetting
+work, not a description of it, and `historical_accuracy` is designed not to stay
+null. The repo is PUBLIC and git is a one-way door, so it is never committed;
+it lives in the private models bucket under `config/` and is staged into every
+task by `_stage_panel()` in `infra/jobs/handler.py`. Upload it with
+`infra/09c_upload_panel.sh`; prove it reaches a container with
+`gh workflow run verify-jobs.yml -f jobs=panel-proof`.
+
+**Absent, `consensus_agent.py` raises `PanelUnavailable` and exits 6.** That is
+deliberate — the old behaviour returned an empty source list and scored the day
+on Perplexity alone, reporting success, which is how the panel stayed dead in
+the cloud from the day it went live. To run without it on purpose — local dev,
+CI, anywhere with no bucket credential — set **`STRIDE_PANEL_OPTIONAL=true`**.
+Consensus then runs panel-less and says so on stderr. CI does not execute
+`consensus_agent.py`, so it needs neither the variable nor a credential today;
+set the variable rather than staging a panel if that ever changes.
+
 ## Commands
 - `/stride-full` — full daily pipeline run (results → health → build → tips → blackbook → performance)
 - `/stride-health` — health check dashboard
@@ -159,6 +178,33 @@ having written no rows, sent no requests, or fetched no results and still return
 **Verify content, not proxies.** A moved image digest proves something changed,
 not that the right thing changed. A 200 proves the endpoint answered, not that
 the payload was right. Check the thing itself.
+
+One example teaches the letter of that rule. Three teach when to go looking for
+it, so here are three found in a single pass on 2026-08-06, at three different
+layers:
+
+- **A count standing in for a name.** `_stage_models` raised only when the
+  bucket staged zero objects, while its own docstring said the point was that
+  "a tips run without the ensemble must fail loudly". A bucket holding the four
+  `sectional_combiner` JSONs and no `.pkl` staged 4 artifacts and passed —
+  `models/racing_ensemble_v2.pkl`, which `ml_model.py:165` opens by name, was
+  absent. *Count is not identity.*
+- **A stale flag standing in for a live fact.** `"verified": true` in
+  `tipster_panel.json` was a claim made on or before 2026-04-10. By 2026-08-06
+  it was wrong for 12 of the 16 sources carrying it, and nothing had noticed,
+  because nothing ever re-asked. *A flag that can decay needs something that
+  re-checks it — `server/python/panel_liveness.py`.*
+- **Presence standing in for usefulness.** A staged panel that loads, parses
+  and reports 16 active sources can still supply exactly one weighting bucket.
+  `bucket_spread` drives a 0.8x–1.5x multiplier on the consensus injection, so
+  "the panel is present" and "the panel is doing its job" are different claims.
+  *Loaded is not working.*
+
+The shape is always the same: something cheap to measure sitting in front of
+something expensive to measure, and nobody noticing the substitution because the
+cheap thing is green. When you write a check, say out loud what it would still
+pass with — if the answer is "the exact failure I am guarding against", it is a
+proxy.
 
 **Say so when you are unsure.** Comment with findings and open no PR. A
 confident wrong patch costs more than an unanswered issue, because it gets

@@ -244,3 +244,40 @@ def test_missing_database_url_fails_before_any_research_spend(monkeypatch):
         ca.run_consensus_agent("2026-08-06")
     assert "DATABASE_URL" in str(e.value)
     assert spends == {"preflight": 0, "research": 0}
+# ------------------------------------------------- the panel is not optional
+
+def test_missing_panel_raises_instead_of_scoring_on_an_empty_list(
+        tmp_path, monkeypatch):
+    """The defect that kept the panel dead in the cloud since day one.
+
+    load_tipster_panel returned {"sources": []} on a missing file, so
+    fetch_panel_pages logged "No active+verified panel members" and
+    consensus scored the whole day on Perplexity alone and exited 0.
+    Nothing crashed; the picks were just quietly worse.
+    """
+    import consensus_agent as ca
+    monkeypatch.delenv(ca.PANEL_OPTIONAL_ENV, raising=False)
+    monkeypatch.setattr(ca, "__file__", str(tmp_path / "consensus_agent.py"))
+    with pytest.raises(ca.PanelUnavailable) as e:
+        ca.load_tipster_panel()
+    assert "models bucket" in str(e.value)
+    assert ca.PANEL_OPTIONAL_ENV in str(e.value)
+
+
+def test_panel_optional_env_runs_panel_less_on_purpose(tmp_path, monkeypatch):
+    """Local dev and CI have no bucket credential. Absent BY DESIGN has to be
+    a thing you can say, or the guard above just gets deleted."""
+    import consensus_agent as ca
+    monkeypatch.setenv(ca.PANEL_OPTIONAL_ENV, "true")
+    monkeypatch.setattr(ca, "__file__", str(tmp_path / "consensus_agent.py"))
+    assert ca.load_tipster_panel() == {"sources": [], "bucket_definitions": {}}
+
+
+def test_a_present_panel_still_loads(tmp_path, monkeypatch):
+    import json as _json
+    import consensus_agent as ca
+    (tmp_path / "tipster_panel.json").write_text(
+        _json.dumps({"sources": [{"id": "x", "active": True,
+                                  "verified": True}]}))
+    monkeypatch.setattr(ca, "__file__", str(tmp_path / "consensus_agent.py"))
+    assert len(ca.load_tipster_panel()["sources"]) == 1

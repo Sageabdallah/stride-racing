@@ -80,6 +80,11 @@ def _s3():
     return boto3.client("s3", region_name=REGION)
 
 
+# The artifact the scorer opens by name (ml_model.py:165). Listed rather than
+# inferred: a count cannot tell "the ensemble is here" from "four JSONs are".
+REQUIRED_MODEL_ARTIFACTS = ("racing_ensemble_v2.pkl",)
+
+
 def _stage_models() -> None:
     """Fargate: pull model artifacts into server/python/models/. No-op on
     Lambda (read-only fs, and no Lambda job loads the model). Raises when
@@ -99,6 +104,12 @@ def _stage_models() -> None:
     n = 0
     for page in _s3().get_paginator("list_objects_v2").paginate(Bucket=bucket):
         for o in page.get("Contents", []):
+            # config/ is not a model artifact. Without this skip it would
+            # land a second copy at models/tipster_panel.json that nothing
+            # reads, and a bucket holding only config would satisfy the
+            # "models bucket is EMPTY" check below.
+            if o["Key"].startswith("config/"):
+                continue
             name = os.path.basename(o["Key"])
             if name:
                 _s3().download_file(bucket, o["Key"], os.path.join(dest, name))
@@ -108,6 +119,67 @@ def _stage_models() -> None:
         raise RuntimeError(
             f"models bucket s3://{bucket} is EMPTY — run "
             "infra/09b_upload_models.sh from the box that has the artifacts")
+    # Count was a PROXY for "the ensemble is here", and CLAUDE.md's own rule is
+    # to verify content rather than proxies. A bucket holding the four
+    # sectional_combiner JSONs and no .pkl staged 4 artifacts and satisfied the
+    # check above, while the file the scorer actually opens — ml_model.py:165,
+    # models/racing_ensemble_v2.pkl — was absent. That is the same failure this
+    # whole pass keeps finding: a green check standing in front of a missing
+    # thing. Name the artifact instead of counting its neighbours.
+    missing = [f for f in REQUIRED_MODEL_ARTIFACTS
+               if not os.path.exists(os.path.join(dest, f))]
+    if missing:
+        raise RuntimeError(
+            f"models bucket s3://{bucket} staged {n} artifact(s) but not "
+            f"{', '.join(missing)} — ml_model.py loads that by name, so the "
+            f"scorer would fail at 08:05 with the day already half gone, or "
+            f"worse, score on a fallback. Re-run infra/09b_upload_models.sh.")
+
+
+PANEL_KEY = "config/tipster_panel.json"
+
+
+def _stage_panel() -> bool:
+    """Pull the tipster panel out of the private models bucket.
+
+    Same reasoning as _stage_models: the repo is PUBLIC and this file is
+    gitignored, so it is not in the build context and cannot be in the
+    image. It carries which 16 of 37 sources are trusted, which bucket each
+    is weighted into, and which get the proofed-results boost — the vetting,
+    not a description of it. historical_accuracy is null today and will not
+    stay null, and git is a one-way door: a file published while it is
+    low-value stays published in every clone once it is not.
+
+    Called from dispatch() rather than from the consensus jobs, so every
+    path through this handler stages it — Fargate, Lambda, proof variants,
+    and any job added later that nobody remembers to wire up.
+
+    Returns rather than raising, and that is deliberate: results-collect
+    must not go red because the panel is missing. The loud failure belongs
+    to the CONSUMER — consensus_agent.load_tipster_panel raises
+    PanelUnavailable (exit 6) — so a job that needs the panel fails and a
+    job that does not carries on. A best-effort stage is only safe because
+    something else is not best-effort.
+    """
+    bucket = os.environ.get("STRIDE_MODELS_BUCKET", "").strip()
+    if not bucket:
+        return False
+    dest = f"{_root()}/server/python/tipster_panel.json"
+    try:
+        # Lambda's task root is read-only, so staging cannot work there at
+        # all. No Lambda job runs consensus today; if one ever does, the
+        # consumer's guard is what catches it rather than this returning a
+        # quiet False that reads like "nothing to do".
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        _s3().download_file(bucket, PANEL_KEY, dest)
+        print(f"[panel] staged from s3://{bucket}/{PANEL_KEY}")
+        return True
+    except Exception as e:
+        print(f"[panel] NOT staged from s3://{bucket}/{PANEL_KEY}: "
+              f"{type(e).__name__}: {e}. Jobs that read the panel will fail "
+              f"loudly; run infra/09c_upload_panel.sh if it was never "
+              f"uploaded.", file=sys.stderr)
+        return False
 
 
 ARTIFACTS_PREFIX = "artifacts"
@@ -760,11 +832,77 @@ def job_tips_proof() -> dict:
 
 
 def job_consensus_proof() -> dict:
-    """Consensus in --dry-run: proves the container, secrets, DB and panel
-    setup without LLM spend and without overwriting today's consensus file
-    (which the tips hard-gate depends on)."""
+    """Consensus in --dry-run: proves the container, secrets and panel setup
+    without LLM spend and without overwriting today's consensus file (which
+    the tips hard-gate depends on).
+
+    The racecard relay was missing and made this claim false. Fargate tasks
+    start with an empty filesystem, so with no card staged run_consensus
+    returns at its `load_racecard_meetings` check — which sits ABOVE
+    load_tipster_panel — prints "No racecard found", writes an empty
+    consensus file and exits 0. Verified 2026-08-06 (ECS task 417b4554):
+    PASSED, and not one line of panel or secret setup ran. A proof that
+    cannot reach what it proves is worse than no proof, because it is
+    reported as evidence.
+    """
+    _sync_down("server/python/intelligence")
+    if _require_racecard("consensus-proof") == "quiet":
+        return {"last_success_date": _today(), "quiet_day": True}
     out = _run_ok("consensus_agent.py", _today(), "--dry-run")
+    # The line run_consensus prints once the panel is loaded. Absent means
+    # the run stopped short of it again, whatever the exit code said.
+    if "[PANEL]" not in out:
+        raise RuntimeError(
+            "consensus-proof: exited 0 without reaching the tipster panel. "
+            "Something returned before load_tipster_panel — check for 'No "
+            "racecard found' or 'No runners' above.")
     return {"last_success_date": _today(), "detail": out[-400:]}
+
+
+def job_panel_proof() -> dict:
+    """Does the tipster panel actually fetch? --dry-run cannot answer that.
+
+    dry_run returns before tavily_client.extract is called, so it proves the
+    list parses and nothing more. This does the real extracts and nothing
+    else: no races, no Perplexity, no Claude, no DB. Never scheduled —
+    dispatched by hand, like the other proof variants.
+
+    Exit 1 is "staged, but the sources have rotted" — a finding for the URL
+    pass, not a staging failure, and the same shape as job_preflight's RED
+    verdict. Accepting it is not leniency, it is the difference between two
+    opposite instructions: the documented response to a red panel-proof is to
+    set STRIDE_PANEL_OPTIONAL and run without the panel. At the measured 4 of
+    16 usable sources, failing on exit 1 would report the panel as broken on
+    the first day it was ever shipped working, and the operator would then
+    correctly follow the runbook and disable it. A red that means the opposite
+    of what its reader will do is worse than no check.
+
+    Only PANEL_STAGED 0 — the panel never reached the container — is what this
+    job exists to detect.
+    """
+    out = _run_ok("consensus_agent.py", _today(), "--panel-only",
+                  ok_codes=(0, 1, 6))
+    staged, usable, total = None, None, None
+    for line in out.splitlines():
+        if line.startswith("PANEL_STAGED"):
+            staged = line.split()[1] == "1"
+        elif line.startswith("PANEL_USABLE"):
+            _, u, t = line.split()
+            usable, total = int(u), int(t)
+    if staged is None:
+        raise RuntimeError(
+            "panel-proof: consensus_agent.py --panel-only printed no "
+            "PANEL_STAGED marker — it exited before reaching the panel at all, "
+            "which is neither of the outcomes this job knows how to report.")
+    if not staged:
+        raise RuntimeError(
+            "panel-proof: the panel is NOT in the container. _stage_panel "
+            "could not fetch config/tipster_panel.json from the models "
+            "bucket — run infra/09c_upload_panel.sh. Until it is there, "
+            "consensus_agent exits 6 every morning.")
+    return {"last_success_date": _today(), "panel_staged": True,
+            "sources_usable": usable, "sources_total": total,
+            "degraded": bool(usable is not None and total and usable < total)}
 
 
 def job_nightly_etl() -> dict:
@@ -838,6 +976,7 @@ JOBS = {
     # a path before it runs for real.
     "tips-proof": job_tips_proof,
     "consensus-proof": job_consensus_proof,
+    "panel-proof": job_panel_proof,
     "nightly-etl": job_nightly_etl,
     "weekly-digest": job_weekly_digest,
 }
@@ -849,6 +988,7 @@ def dispatch(event=None, context=None):
         raise RuntimeError(f"unknown STRIDE_JOB {job!r}; known: {sorted(JOBS)}")
     _load_secrets()
     _stage_models()
+    _stage_panel()
     try:
         result = JOBS[job]()
         _put_state(job, **result)

@@ -307,13 +307,52 @@ def match_horse_to_field(extracted_name: str, field_names: list[str]) -> str | N
     return scores[0][1]
 
 
+PANEL_OPTIONAL_ENV = "STRIDE_PANEL_OPTIONAL"
+
+
+class PanelUnavailable(RuntimeError):
+    """The tipster panel is absent. Fatal unless explicitly made optional."""
+
+
 def load_tipster_panel() -> dict:
-    """Load tipster_panel.json from the same directory."""
+    """Load tipster_panel.json from the same directory.
+
+    Raises rather than returning an empty list. Returning `{"sources": []}`
+    on a missing file is what let the panel be absent from every Fargate
+    task since the cloud went live, with one stderr line as the only
+    evidence: fetch_panel_pages then logged "No active+verified panel
+    members" and consensus ran on Perplexity alone, scoring every race and
+    reporting success. A degraded panel does not crash anything — it just
+    makes worse picks, quietly, which is why it has to be the loud kind of
+    failure instead.
+
+    The guard lives HERE, in the consumer, not in whichever job happens to
+    invoke it. Fargate stages the panel in dispatch(); the Mac scheduler
+    has it on disk; a future Lambda would have neither. Putting the check
+    at the read means every one of those paths is covered by construction,
+    including paths that do not exist yet.
+
+    STRIDE_PANEL_OPTIONAL=true is the deliberate escape for local dev and
+    CI, which have no bucket credential. Documented in CLAUDE.md — the same
+    treatment .claude/skills/ gets, and for the same reason: absent by
+    design must be written down, not discovered.
+    """
     panel_path = Path(__file__).resolve().parent / "tipster_panel.json"
-    if not panel_path.exists():
-        print("[PANEL] ERROR: tipster_panel.json not found", file=sys.stderr)
+    if panel_path.exists():
+        return json.loads(panel_path.read_text(encoding="utf-8"))
+
+    if os.environ.get(PANEL_OPTIONAL_ENV, "").strip().lower() in ("true", "1", "yes"):
+        print(f"[PANEL] tipster_panel.json absent and {PANEL_OPTIONAL_ENV} is "
+              f"set — running panel-less on purpose. Consensus scores will "
+              f"come from Perplexity alone.", file=sys.stderr)
         return {"sources": [], "bucket_definitions": {}}
-    return json.loads(panel_path.read_text(encoding="utf-8"))
+
+    raise PanelUnavailable(
+        f"{panel_path} not found. The file is gitignored (the repo is "
+        f"PUBLIC) and is staged from the private models bucket at task "
+        f"start — see infra/09c_upload_panel.sh and _stage_panel() in "
+        f"infra/jobs/handler.py. Set {PANEL_OPTIONAL_ENV}=true to run "
+        f"without it on purpose.")
 
 
 def fetch_panel_pages(
@@ -411,8 +450,15 @@ def fetch_panel_pages(
                     "fetch_duration_ms": elapsed_ms,
                 })
             else:
+                # Tavily reports WHY in failed_results, and this only ever
+                # read results[0], so a moved URL and a site that blocks
+                # extraction were both logged as the same bare "EMPTY".
+                # Racenet had been a plain 404 since some time before
+                # 2026-08-06 and nothing said so.
+                failed = (extract_result or {}).get("failed_results") or []
+                why = failed[0].get("error", "") if failed else "no content"
                 print(
-                    f"  EMPTY [{bucket:15}] {name} ({elapsed_ms}ms)",
+                    f"  EMPTY [{bucket:15}] {name} ({elapsed_ms}ms): {why}",
                     file=sys.stderr,
                 )
                 panel_log_rows.append({
@@ -1850,13 +1896,100 @@ def run_consensus_agent(
     return results_by_race
 
 
+def run_panel_only(date_str: str) -> int:
+    """Fetch the tipster panel and report per source. Returns an exit code.
+
+    The panel is one of consensus's two inputs and there was no way to
+    exercise it on its own. --dry-run cannot: it returns before Tavily is
+    called, so it proves the list parses and nothing else. A full run does
+    fetch, but costs a day's Perplexity and Claude budget and writes to the
+    database to find out, which is not a test anyone runs twice.
+
+    So: real Tavily extracts, no races, no Perplexity, no Claude, no
+    database connection, no consensus file. Two things can be wrong and
+    they need different answers, so they exit differently — the panel file
+    missing from the image is exit 6, and sources that no longer extract
+    are exit 1. Not 2: argparse already exits 2 on a bad command line, and
+    a reader debugging a red job should not have to tell those apart. The URLs were last edited 2026-04-10; tip pages move.
+    """
+    try:
+        panel = load_tipster_panel()
+    except PanelUnavailable as e:
+        print("PANEL_STAGED 0")
+        print(f"[PANEL-PROOF] FATAL: {e}", file=sys.stderr)
+        return 6
+    active = [s for s in panel.get("sources", [])
+              if s.get("active") and s.get("verified")]
+    print(f"[PANEL-PROOF] {len(panel.get('sources', []))} sources in file, "
+          f"{len(active)} active+verified", file=sys.stderr)
+    if not active:
+        print("PANEL_STAGED 0")
+        print("[PANEL-PROOF] FATAL: no active+verified sources. In the cloud "
+              "this is almost certainly the file missing from the image — "
+              "server/python/tipster_panel.json is in .gitignore, so it is "
+              "not in the build context and load_tipster_panel() returns "
+              "empty with only a stderr line to say so.", file=sys.stderr)
+        return 6
+
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    if not tavily_key:
+        print("PANEL_STAGED 0")
+        print("[PANEL-PROOF] FATAL: TAVILY_API_KEY not set", file=sys.stderr)
+        return 6
+    from tavily import TavilyClient
+
+    usage = _load_usage(date_str)
+    _, rows = fetch_panel_pages(
+        TavilyClient(api_key=tavily_key), panel, date_str, usage,
+        dry_run=False, accuracy_multipliers=None,
+    )
+
+    ok = [r for r in rows if r["fetch_status"] == "SUCCESS"]
+    # Two facts, two markers: the panel REACHED the container, and how much of
+    # it works. Conflating them is what would have read a healthy first deploy
+    # as a staging failure.
+    print("PANEL_STAGED 1")
+    print(f"PANEL_USABLE {len(ok)} {len(rows)}")
+    print(f"\n[PANEL-PROOF] {len(ok)}/{len(rows)} sources returned usable "
+          f"content", file=sys.stderr)
+    for r in sorted(rows, key=lambda x: (x["fetch_status"], x["tipster_name"])):
+        print(f"  {r['fetch_status']:8} {r['tipster_name'][:32]:34} "
+              f"{r['content_length']:>8,} chars  {r['fetch_url'][:60]}",
+              file=sys.stderr)
+    # Measured 2026-08-06 from a machine with the panel present: 3/16.
+    # Racenet is a plain 404; racing.com, Racing and Sports and Timeform all
+    # refuse the fetch, and extract_depth="advanced" changes none of it — the
+    # URLs are stale or the sites now block extraction. The file was last
+    # edited 2026-04-10.
+    #
+    # A floor rather than "all failed", because all-failed is the only case
+    # the old shape could catch, and 3/16 is not a working panel. Half is a
+    # starting line, not a measured optimum: move it when there is a number
+    # worth moving it to.
+    FLOOR = 0.5
+    if len(ok) < FLOOR * len(rows):
+        print(f"[PANEL-PROOF] FATAL: {len(ok)}/{len(rows)} usable is below "
+              f"the {FLOOR:.0%} floor. Consensus still runs — the panel is a "
+              f"quality input, not a hard dependency — so this will not stop "
+              f"a race day. It means the tipster half of consensus is mostly "
+              f"absent and the scores are Perplexity-only.", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="STRIDE Consensus Agent V2")
     parser.add_argument("date", help="Race date YYYY-MM-DD")
     parser.add_argument("--track", default=None, help="Filter to specific track")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without executing API calls")
     parser.add_argument("--max-races", type=int, default=None, help="Limit number of races")
+    parser.add_argument("--panel-only", action="store_true",
+                        help="Fetch the tipster panel and report; no races, "
+                             "no Perplexity/Claude, no DB writes")
     args = parser.parse_args()
+
+    if args.panel_only:
+        sys.exit(run_panel_only(args.date))
 
     try:
         run_consensus_agent(
@@ -1868,6 +2001,11 @@ def main():
     except ExtractionModelUnavailable as e:
         print(f"[CONSENSUS] FATAL: {e}", file=sys.stderr)
         sys.exit(3)
+    except PanelUnavailable as e:
+        # 6, the same code --panel-only uses for "panel absent", so one
+        # number means one thing however consensus was invoked.
+        print(f"[CONSENSUS] FATAL: {e}", file=sys.stderr)
+        sys.exit(6)
 
     # Exit contract. A day that scored races but found nothing is a broken run,
     # not a quiet one, and the pipeline must be able to tell: without a non-zero

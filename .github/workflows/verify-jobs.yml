@@ -67,6 +67,7 @@ jobs:
               case "$JOB" in
                 tips-proof)      TD=stride-tips-pipeline ;;
                 consensus-proof) TD=stride-consensus-agent ;;
+                panel-proof)     TD=stride-consensus-agent ;;
                 *)               TD="stride-$JOB" ;;
               esac
               OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}]}]}"

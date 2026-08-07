@@ -618,3 +618,257 @@ def test_consensus_finishes_before_tips_reads_it(handler):
     10:00, three hours later. Not morning-odds at 08:00, which runs
     odds_movement.py and never references consensus."""
     assert handler.JOB_TIMEOUTS["consensus_agent.py"] < 3 * 3600
+
+
+# ------------------------------------------------------- proof jobs that proof
+
+def test_consensus_proof_fails_if_it_never_reached_the_panel(handler,
+                                                             monkeypatch):
+    """The defect this job actually had, pinned.
+
+    With no card staged, run_consensus returns at its load_racecard_meetings
+    check — which sits above load_tipster_panel — prints "No racecard found",
+    writes an empty consensus file and exits 0. The job reported PASSED
+    (ECS task 417b4554, 2026-08-06) while proving none of the container,
+    secret or panel setup its docstring claims.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(
+        handler, "_run_ok",
+        lambda *a, **k: "[CONSENSUS] No racecard found for 2026-08-06. "
+                        "Writing empty consensus file.")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_consensus_proof()
+    assert "without reaching the tipster panel" in str(e.value)
+
+
+def test_consensus_proof_passes_once_the_panel_line_appears(handler,
+                                                            monkeypatch):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(
+        handler, "_run_ok",
+        lambda *a, **k: "[PANEL] 16 active+verified tipsters in panel")
+    out = handler.job_consensus_proof()
+    assert out["last_success_date"]
+
+
+def test_consensus_proof_stages_the_card_before_running(handler, monkeypatch):
+    """Ordering: the card has to be relayed BEFORE consensus_agent starts, or
+    the assertion above can only ever fail. Fargate tasks start empty."""
+    _neutralise_io(handler, monkeypatch)
+    order = []
+    monkeypatch.setattr(handler, "_prepare_racecard",
+                        lambda: order.append("card") or "card")
+    monkeypatch.setattr(handler, "_run_ok",
+                        lambda *a, **k: order.append("run") or "[PANEL] 16")
+    handler.job_consensus_proof()
+    assert order == ["card", "run"], order
+
+
+def test_panel_proof_asks_for_a_real_fetch_not_a_dry_run(handler, monkeypatch):
+    """--dry-run returns before tavily_client.extract, so it can never answer
+    "does the panel fetch". panel-proof must pass --panel-only instead."""
+    _neutralise_io(handler, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        handler, "_run_ok",
+        lambda *a, **k: calls.append(a) or "PANEL_STAGED 1\nPANEL_USABLE 4 16\n")
+    handler.job_panel_proof()
+    assert "--panel-only" in calls[0]
+    assert "--dry-run" not in calls[0]
+
+
+# ------------------------------------------------------------- panel staging
+
+def test_dispatch_stages_the_panel_for_every_job(handler, monkeypatch):
+    """Staging lives in dispatch, so no job can be added without it.
+
+    Wiring it per-job is how the panel would go missing again: the next
+    consensus-adjacent job someone adds is the one nobody remembers to wire.
+    Covering it here means Fargate, Lambda and the proof variants are all
+    covered by construction, including paths that do not exist yet.
+    """
+    order = []
+    monkeypatch.setattr(handler, "_load_secrets", lambda: order.append("secrets"))
+    monkeypatch.setattr(handler, "_stage_models", lambda: order.append("models"))
+    monkeypatch.setattr(handler, "_stage_panel", lambda: order.append("panel"))
+    monkeypatch.setattr(handler, "_put_state", lambda *a, **k: None)
+    monkeypatch.setitem(handler.JOBS, "unit-test-job",
+                        lambda: order.append("job") or {"ok": 1})
+    monkeypatch.setenv("STRIDE_JOB", "unit-test-job")
+    handler.dispatch()
+    assert "panel" in order, "dispatch never staged the panel"
+    assert order.index("panel") < order.index("job"), (
+        "the panel was staged after the job ran, which is no staging at all")
+
+
+def test_stage_panel_does_not_take_unrelated_jobs_red(handler, monkeypatch):
+    """A missing panel must fail the CONSUMER, not results-collect.
+
+    The loud failure belongs to consensus_agent.load_tipster_panel; this
+    returning False keeps a best-effort stage safe, because something else
+    is not best-effort.
+    """
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+
+    class _Boom:
+        def download_file(self, *a, **k):
+            raise RuntimeError("NoSuchKey")
+    monkeypatch.setattr(handler, "_s3", lambda: _Boom())
+    monkeypatch.setattr(handler, "_root", lambda: "/tmp/stride-panel-test")
+    assert handler._stage_panel() is False        # must not raise
+
+
+def test_stage_models_does_not_flatten_config_into_models(handler,
+                                                          monkeypatch):
+    """config/ is not a model artifact.
+
+    Without the skip, the panel lands a second time at
+    models/tipster_panel.json where nothing reads it, and a bucket holding
+    only config would satisfy the "models bucket is EMPTY" assertion —
+    turning a genuinely missing ensemble into a silent pass.
+    """
+    import pytest as _pytest
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setattr(handler, "_root", lambda: "/tmp/stride-panel-test")
+    got = []
+
+    class _S3:
+        def get_paginator(self, _):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [{"Key": "config/tipster_panel.json"}]}]
+            return P()
+
+        def download_file(self, b, k, d):
+            got.append(k)
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    with _pytest.raises(RuntimeError) as e:
+        handler._stage_models()
+    assert got == [], f"config/ was downloaded as a model artifact: {got}"
+    assert "EMPTY" in str(e.value)
+
+
+def test_the_panel_escape_hatch_is_documented(handler):
+    """"Written down, not discovered by accident three weeks from now."
+
+    The variable is the whole fallback story for local dev and CI, so it
+    lives beside the .claude/skills/ note rather than only in a docstring.
+    """
+    from pathlib import Path
+    md = (Path(__file__).resolve().parents[3] / "CLAUDE.md").read_text()
+    assert "STRIDE_PANEL_OPTIONAL" in md
+    assert "tipster_panel.json" in md
+
+
+def test_stage_models_names_the_artifact_instead_of_counting(handler,
+                                                             monkeypatch,
+                                                             tmp_path):
+    """A count is a proxy; the scorer opens one file by name.
+
+    Staging the four sectional_combiner JSONs and no .pkl satisfied
+    "the bucket is not empty" while models/racing_ensemble_v2.pkl — the file
+    ml_model.py:165 loads — was absent. The tips job would then discover it
+    at 08:05, with the morning already spent.
+    """
+    import pytest as _pytest
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+
+    class _S3:
+        def get_paginator(self, _):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [
+                        {"Key": "sectional_combiner_mile.json"},
+                        {"Key": "sectional_combiner_sprint.json"}]}]
+            return P()
+
+        def download_file(self, b, k, d):
+            open(d, "w").close()
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    with _pytest.raises(RuntimeError) as e:
+        handler._stage_models()
+    assert "racing_ensemble_v2.pkl" in str(e.value)
+    assert "EMPTY" not in str(e.value), "counted instead of named"
+
+
+def test_stage_models_passes_when_the_named_artifact_lands(handler,
+                                                           monkeypatch,
+                                                           tmp_path):
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+
+    class _S3:
+        def get_paginator(self, _):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [{"Key": "racing_ensemble_v2.pkl"}]}]
+            return P()
+
+        def download_file(self, b, k, d):
+            open(d, "w").close()
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    handler._stage_models()          # must not raise
+
+
+def test_panel_proof_treats_rotted_sources_as_a_finding_not_a_failure(
+        handler, monkeypatch):
+    """Exit 1 means staged-but-degraded. Failing on it inverts the runbook.
+
+    At the measured 4 of 16 usable sources, --panel-only returns 1 (below its
+    50% floor). With _run_ok's default ok_codes=(0,) that raised, so
+    panel-proof would have gone RED on the first day the panel was ever
+    shipped working — and the documented response to a red panel-proof is to
+    set STRIDE_PANEL_OPTIONAL and run without the panel. A red that makes its
+    reader disable the healthy thing is worse than no check.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok",
+                        lambda *a, **k: "PANEL_STAGED 1\nPANEL_USABLE 4 16\n")
+    out = handler.job_panel_proof()
+    assert out["panel_staged"] is True
+    assert (out["sources_usable"], out["sources_total"]) == (4, 16)
+    assert out["degraded"] is True
+
+
+def test_panel_proof_accepts_the_degraded_exit_code_from_the_script(
+        handler, monkeypatch):
+    """The acceptance has to reach _run_ok, not just the parsing below it."""
+    seen = {}
+
+    def _capture(script, *args, **kw):
+        seen["ok_codes"] = kw.get("ok_codes", (0,))
+        return "PANEL_STAGED 1\nPANEL_USABLE 16 16\n"
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok", _capture)
+    handler.job_panel_proof()
+    assert 1 in seen["ok_codes"], (
+        "exit 1 must be accepted or a degraded panel reads as a staging "
+        "failure")
+    assert 6 in seen["ok_codes"], (
+        "exit 6 must reach the handler so it can raise the specific message, "
+        "not _run_ok's generic 'exited 6'")
+
+
+def test_panel_proof_fails_when_the_panel_never_reached_the_container(
+        handler, monkeypatch):
+    """The one thing this job exists to detect."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok", lambda *a, **k: "PANEL_STAGED 0\n")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_panel_proof()
+    assert "NOT in the container" in str(e.value)
+    assert "09c_upload_panel.sh" in str(e.value)
+
+
+def test_panel_proof_fails_when_no_marker_was_printed_at_all(handler,
+                                                             monkeypatch):
+    """Neither outcome reported is its own outcome. Absent a marker the run
+    stopped before the panel, and reporting that as a pass is the exact shape
+    consensus-proof already had."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_run_ok", lambda *a, **k: "some other output")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_panel_proof()
+    assert "no PANEL_STAGED marker" in str(e.value)
