@@ -193,6 +193,66 @@ def test_consensus_passes_with_consensus_file(handler, monkeypatch, tmp_path):
     handler.job_consensus_agent()   # must not raise
 
 
+# -------------------------------------------------------- baseline-night
+
+def test_baseline_night_fails_when_no_snapshot_rows_committed(handler,
+                                                              monkeypatch):
+    """Mirrors the MORNING_CHECK postcondition, for the snapshot that had
+    none. capture_snapshot swallows its own DB write errors (odds_movement
+    .py: `except Exception: print(...)`) and returns {} when the API gives
+    nothing, so exit 0 has never meant rows were committed."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    monkeypatch.setattr(handler, "_db_query", lambda sql, p: (0,))
+    with pytest.raises(RuntimeError) as e:
+        handler.job_baseline_night()
+    assert "no BASELINE_NIGHT rows" in str(e.value)
+
+
+def test_baseline_night_passes_with_snapshot_rows(handler, monkeypatch):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    monkeypatch.setattr(handler, "_db_query", lambda sql, p: (40,))
+    out = handler.job_baseline_night()
+    assert out["baseline_rows"] == 40
+    assert "quiet_day" not in out
+
+
+def test_baseline_night_quiet_day_does_not_run_or_query(handler, monkeypatch):
+    """A quiet day is handled the way every other card-dependent job handles
+    it: return early, no snapshot attempt, no DB query, and no false 'wrote
+    zero rows' alarm on a day with nothing to capture."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_prepare_racecard", lambda: "quiet")
+
+    def _fail_query(sql, p):
+        raise AssertionError("baseline-night queried the DB on a quiet day")
+    monkeypatch.setattr(handler, "_db_query", _fail_query)
+
+    def _fail_run(*a, **k):
+        raise AssertionError("baseline-night ran odds_movement.py on a "
+                             "quiet day")
+    monkeypatch.setattr(handler, "_run_ok", _fail_run)
+
+    out = handler.job_baseline_night()
+    assert out["quiet_day"] is True
+    assert out["baseline_rows"] == 0
+
+
+def test_baseline_night_fails_when_the_card_is_missing(handler, monkeypatch):
+    """The 00:30 regression, pinned.
+
+    A baseline job scheduled before racecard-collect finds no card and
+    raises here — every day, including healthy ones. The schedule-ordering
+    tests in test_schedule_state.py are what keep the clock right; this is
+    what makes the consequence explicit at the job level."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_prepare_racecard", lambda: "missing")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_baseline_night()
+    assert "no racecard" in str(e.value)
+
+
 def test_morning_odds_fails_when_no_snapshot_rows_committed(handler,
                                                             monkeypatch):
     _neutralise_io(handler, monkeypatch)
@@ -220,20 +280,63 @@ def test_morning_odds_fails_on_baseline_present_but_zero_signals(handler,
     assert "ZERO market_signal_scores" in str(e.value)
 
 
-def test_morning_odds_allows_zero_signals_when_no_baseline(handler,
-                                                           monkeypatch):
-    """Day one has no baseline, so zero signals is correct, not a failure.
+def test_morning_odds_fails_when_there_is_no_baseline_at_all(handler,
+                                                             monkeypatch):
+    """Supersedes "day one has no baseline, so zero signals is correct".
 
-    This is the assertion that keeps the check from becoming a daily false
-    alarm — the failure mode that trains an operator to ignore alarms.
+    That assumption was written to stop a daily false alarm, and it was
+    right on day one. It stopped being right the moment baseline-night was
+    supposed to be running: `if baseline and not signals` can only fire once
+    baseline is already nonzero, so from 2026-05-04 to 2026-08-06 — every
+    day baseline-night went unscheduled — the check was structurally unable
+    to fire, and market_signal_scores stayed empty with every morning green.
+
+    baseline-night now runs at 04:15 with its own "wrote zero rows"
+    postcondition, so a non-quiet morning reaching here with no baseline
+    means that alarm should already have fired. Raising here too is not a
+    duplicate: it is the difference between "the baseline job failed" and
+    "the baseline job passed and its rows are not visible to this one".
     """
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
-    counts = iter([(272,), (0,), (0,)])     # morning, no baseline, no signals
+    counts = iter([(272,), (0,)])           # morning rows, then no baseline
     monkeypatch.setattr(handler, "_db_query", lambda sql, p: next(counts))
-    out = handler.job_morning_odds()
-    assert out["morning_rows"] == 272
-    assert out["signal_rows"] == 0
+    with pytest.raises(RuntimeError) as e:
+        handler.job_morning_odds()
+    assert "ZERO BASELINE_NIGHT rows" in str(e.value)
+
+
+def test_morning_odds_relays_the_signals_file_before_it_asserts(handler,
+                                                                monkeypatch):
+    """The evidence must survive the postcondition that judges it.
+
+    market_signals_<date>.json is what consensus_blender actually reads at
+    tips time (consensus_blender.py:315) — not the DB table — and Fargate
+    tasks share no filesystem, so a file that is not synced up does not
+    exist as far as the tips job is concerned. On 2026-08-06 the row
+    assertion fired and the file never left the container.
+
+    Ordering, not merely presence: _sync_up has to happen BEFORE the
+    assertions, or every failing check silently also deletes the day's
+    degraded-but-usable market file.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    order = []
+    monkeypatch.setattr(handler, "_sync_up",
+                        lambda *a, **k: order.append("sync") or 0)
+
+    def _q(sql, p):
+        order.append("query")
+        return (272,) if "MORNING_CHECK" in sql else (0,)
+    monkeypatch.setattr(handler, "_db_query", _q)
+
+    with pytest.raises(RuntimeError):
+        handler.job_morning_odds()
+    assert "sync" in order, "the signals file was never relayed"
+    assert order.index("sync") < len(order) - 1, (
+        "sync_up ran last — the failing assertion above it would have "
+        "stranded the file in a container that is about to exit")
 
 
 def test_results_collect_treats_a_timeout_on_today_as_non_fatal(handler,
@@ -345,7 +448,7 @@ def test_run_sizes_the_timeout_to_the_script(handler, monkeypatch):
     expected = {
         "stride_build.py": 3400,
         "consensus_agent.py": 9000,
-        "run_tips_pipeline.py": 10800,
+        "run_tips_pipeline.py": 21600,
         "download_racecards.py": 840,
     }
     for script, timeout in expected.items():
@@ -500,10 +603,13 @@ def test_bounds_cover_a_metro_saturday(handler):
 
 
 def test_stride_build_still_dies_inside_its_gap(handler):
-    """consensus syncs down stride_build's output at 07:00. A bound past the
-    06:00->07:00 gap would let consensus start on yesterday's intelligence
+    """consensus syncs down stride_build's output. A bound past the
+    04:20->05:30 gap would let consensus start on yesterday's intelligence
     instead of failing loudly — the silent stale-data trade this whole scheme
-    exists to avoid."""
+    exists to avoid. The chain moved on 2026-08-06 and the gap WIDENED from
+    3600s to 4200s; this stays at the tighter number, because the bound only
+    ever needed to cover ~90 races (3,285s) and a bound is not improved by
+    being closer to its gap."""
     assert handler.JOB_TIMEOUTS["stride_build.py"] < 3600
 
 

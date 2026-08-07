@@ -128,3 +128,123 @@ def test_every_update_schedule_call_passes_state(script):
         assert "--state" in stanza, (
             f"{script}: an update-schedule call omits --state; "
             f"update is full-replacement, so State reverts to ENABLED")
+
+
+# ------------------------------------------- ordering, not just statefulness
+
+def _fargate_crons() -> dict:
+    """{task family: (hour, minute)} parsed from the real writer.
+
+    Keyed on the FAMILY, not the schedule name: the name carries the time as
+    a label and would make these tests pass or fail on a rename rather than
+    on when the job actually fires. Six fields, EventBridge style:
+    `cron(M H D M ? Y)`.
+    """
+    import re
+    src = (LIB.parent / "07b_fargate_schedules.sh").read_text()
+    out = {}
+    for cron, family in re.findall(
+            r'^sched_ecs\s+\S+\s+"([^"]+)"\s+(\S+)', src, re.M):
+        minute, hour = cron.split()[0], cron.split()[1]
+        out[family] = (int(hour), int(minute))
+    return out
+
+
+def _scheduled_names() -> set:
+    import re
+    src = (LIB.parent / "07b_fargate_schedules.sh").read_text()
+    return set(re.findall(r'^sched_ecs\s+(\S+)', src, re.M))
+
+
+def test_card_dependent_schedules_all_fire_after_racecard_collect():
+    """Every job that calls _require_racecard needs the 05:30 task's output.
+
+    racecard-collect is the only writer of racecards/racecard_<today>.json
+    AND — via seed_race_schedule.py in the same task — of race_schedule for
+    today. betfair_prices maps the Betfair catalogue THROUGH race_schedule,
+    so a card-dependent job scheduled before 05:30 has neither: it raises in
+    _require_racecard, the task fails, SNS fires, every day, on healthy days
+    included.
+
+    This is not hypothetical. baseline-night was first written for 00:30 —
+    the time scheduler.ts used on the Mac, where download_racecards_wednesday
+    put a week of cards on disk every Wednesday 4 PM. That premise did not
+    survive the move to Fargate, and nothing in the suite would have caught
+    it: the unit tests stub _prepare_racecard, so they cannot see a clock.
+    """
+    crons = _fargate_crons()
+    card_dependent = ["stride-baseline-night", "stride-intelligence-build",
+                      "stride-consensus-agent", "stride-morning-odds",
+                      "stride-tips-pipeline"]
+    collect = crons["stride-racecard-collect"]
+    for family in card_dependent:
+        assert family in crons, f"{family} is not scheduled"
+        assert crons[family] > collect, (
+            f"{family} fires at "
+            f"{crons[family][0]:02d}:{crons[family][1]:02d}, before "
+            f"racecard-collect at {collect[0]:02d}:{collect[1]:02d} — "
+            f"there is no card and no race_schedule row for today at that "
+            f"hour, so _require_racecard raises every day")
+
+
+def test_the_morning_chain_runs_in_dependency_order():
+    """Each job must fire after the one whose output it syncs down.
+
+    Fargate tasks share no filesystem, so "after" is not a nicety: a job that
+    starts before its producer finishes reads YESTERDAY's file out of S3 and
+    reports success on it. baseline-night before the morning check because
+    compute_market_signals diffs MORNING_CHECK against BASELINE_NIGHT, and a
+    baseline captured afterwards measures nothing — which is how
+    market_signal_scores went empty from 2026-04-18 without an alarm.
+    """
+    c = _fargate_crons()
+    chain = [("stride-racecard-collect", "stride-intelligence-build"),
+             ("stride-intelligence-build", "stride-consensus-agent"),
+             ("stride-consensus-agent", "stride-tips-pipeline"),
+             ("stride-baseline-night", "stride-morning-odds"),
+             ("stride-morning-odds", "stride-tips-pipeline")]
+    for before, after in chain:
+        assert c[before] < c[after], (
+            f"{after} at {c[after][0]:02d}:{c[after][1]:02d} does not run "
+            f"after {before} at {c[before][0]:02d}:{c[before][1]:02d}")
+
+
+def test_every_retimed_schedule_retires_the_name_it_replaced():
+    """A re-timed job must delete its old schedule, not just add a new one.
+
+    The name encodes the fire time, so re-timing renames. create-schedule on
+    the new name leaves the OLD name enabled and untouched: the job then runs
+    twice a day, and the later run overwrites the earlier one's output from a
+    stale sync-down. Nothing else in the deploy would notice — schedule-audit
+    reports state, not whether a name should still exist.
+    """
+    import re
+    src = (LIB.parent / "07b_fargate_schedules.sh").read_text()
+    retired = set(re.findall(r'^retire_schedule\s+(\S+)', src, re.M))
+    for name in retired:
+        assert name not in _scheduled_names(), (
+            f"{name} is both retired and scheduled — the delete runs before "
+            f"the create, so this just re-creates what it deleted")
+
+
+def test_every_schedule_name_states_the_time_it_actually_fires():
+    """The -HHMM suffix must match the cron, or the name is a lie.
+
+    This is the guard against the exact class of bug that cost four months:
+    a time carried in a NAME (or a docstring) that no longer matches
+    reality. baseline-night was written for 00:30 because
+    betfair_snapshot_coverage_audit.py still said "~00:30" long after the
+    Mac stopped running it. A schedule renamed without a re-time, or
+    re-timed without a rename, plants the same trap for the next reader.
+    """
+    import re
+    src = (LIB.parent / "07b_fargate_schedules.sh").read_text()
+    for name, cron in re.findall(r'^sched_ecs\s+(\S+)\s+"([^"]+)"', src, re.M):
+        suffix = name.rsplit("-", 1)[-1]
+        assert re.fullmatch(r"\d{4}", suffix), (
+            f"{name}: schedule names must end in -HHMM so the name states "
+            f"when the job fires")
+        minute, hour = cron.split()[0], cron.split()[1]
+        assert suffix == f"{int(hour):02d}{int(minute):02d}", (
+            f"{name} says {suffix} but fires at "
+            f"{int(hour):02d}:{int(minute):02d}")

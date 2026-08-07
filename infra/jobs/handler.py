@@ -71,8 +71,8 @@ def _root() -> str:
 #
 # Two facts of the runtime shape everything here: Lambda's filesystem is
 # read-only (so any job that writes repo paths runs on Fargate), and Fargate
-# tasks do NOT share a filesystem (so the 05:30 racecard -> 06:00
-# intelligence -> 07:00 consensus -> 10:00 tips chain relays its file
+# tasks do NOT share a filesystem (so the 04:00 racecard -> 04:20
+# intelligence -> 05:30 consensus -> 08:05 tips chain relays its file
 # artifacts through S3). Models are proprietary IP in a PUBLIC repo: never
 # in git or the image — staged from the private models bucket at startup.
 
@@ -179,44 +179,44 @@ def _sync_down(rel_dir: str) -> int:
 #                     build, none of which survives a Fargate task exit
 #   race 2   243.4s   steady state
 #
-# so a 31-race metro Saturday is ~290 + 31*243 = ~7,800s. 10800 leaves room
-# for larger fields without being unbounded.
+# so a 31-race metro Saturday is ~290 + 31*243 = ~7,800s.
 #
-# Raising this makes a full card COMPLETE; it does not make the 10:00 schedule
-# sound. A card that costs ~2.2h from a 10:00 start publishes tips around
-# 12:15, after the early races have jumped. The fix for that is the per-race
-# cost — ~243s is spent in the quant/franking feature engines, not in the
-# 2,000-iteration simulation itself — or an earlier start. Both are real work,
-# neither belongs in a timeout constant, and a bigger card only widens the gap.
 # The gap that binds a job is the gap to the job that READS ITS OUTPUT, which
 # is not always the next one on the clock. consensus_agent was first bounded at
 # 2700s against morning-odds at 08:00; morning-odds runs odds_movement.py,
 # which does not reference consensus at all. The only reader of
 # consensus_<date>.json is run_tips_pipeline (via consensus_blender
-# .load_consensus_intelligence) at 10:00, so the real gap is three hours, not
-# one, and the old bound was tight for no reason.
+# .load_consensus_intelligence), so the real gap is the one to tips.
 #
-# Measured per-race cost, from the only two real cards the cloud chain has run:
+# --- 2026-08-06: the earlier start, and the one bound that had to move -------
 #
-#   stride_build      269.1s /  8 races (2026-08-02)   ~36s/race
-#                    1132.0s / 31 races (2026-08-05)
-#   consensus_agent  ~2280.0s / 31 races (2026-08-05)   ~74s/race
+# The note above said raising the tips bound "does not make the 10:00 schedule
+# sound... the fix is the per-race cost, or an earlier start." The earlier
+# start is now taken: the whole chain moved (infra/07b_fargate_schedules.sh),
+# card 04:00 -> intelligence 04:20 -> consensus 05:30 -> tips 08:05.
 #
-# Both bounds above were sized on a 31-race midweek card. A metro Saturday of
-# 8-10 meetings is plausibly ~90 races, which costs stride_build ~3,250s and
-# consensus_agent ~6,600s — each blowing 2700s, on the day of the week the
-# system exists to serve. Sized below for ~90 races with headroom.
+# The chain was moved so the GAPS stayed wide enough for the bounds already
+# here, not the other way round. stride_build keeps 3400 inside a 04:20->05:30
+# gap of 4200s; consensus_agent keeps 9000 inside a 05:30->08:05 gap of 9300s.
+# Neither loosens. If either schedule is edited again, check the gap first: a
+# bound wider than its gap converts a loud timeout into the next task silently
+# syncing down yesterday's file.
+#
+# Only the tips bound changes, and only because the card it must cover got
+# measured properly. From the tips files' own timing block:
+#
+#   run_tips_pipeline  5875.1s / 31 races (2026-08-05)   ~190.0s/race
+#                      1540.9s /  8 races (2026-08-06)   ~192.6s/race
+#
+# The two agree to 1.4%, and 190s is the LOW estimate — the per-race
+# decomposition above, taken on 18-runner Belmont fields, says 243s, and
+# Saturday fields are metro and big. At 90 races that is 290 + 90*243 =
+# ~22,100s. The old 10,800s bound covered ~43 races: it would have killed
+# every recent Saturday part-way through, on the day the system exists for.
 JOB_TIMEOUTS = {
-    # Bounded by the 06:00 -> 07:00 gap: consensus syncs down this output, so
-    # a bound past 3600s would let it start on yesterday's intelligence
-    # instead of failing loudly. 3400 covers ~94 races and still dies inside
-    # the gap. A Saturday bigger than that does not fit the hour at all, and
-    # the fix then is an earlier start, not a larger number.
     "stride_build.py": 3400,
-    # Bounded by 07:00 -> 10:00 (tips), NOT 08:00 (morning-odds, which does
-    # not read consensus). 9000 finishes by 09:30 and covers ~120 races.
     "consensus_agent.py": 9000,
-    "run_tips_pipeline.py": 10800,  # measured ~7,800s for 31 races; no consumer
+    "run_tips_pipeline.py": 21600,
 }
 DEFAULT_TIMEOUT = 840  # Lambda-era bound; unchanged for the remaining jobs
 
@@ -357,6 +357,60 @@ def _db_now():
     return _db_query("SELECT NOW()", ())[0]
 
 
+def job_baseline_night() -> dict:
+    """Captures the reference snapshot job_morning_odds diffs against.
+
+    The only job in the daily chain never ported to Fargate. It ran on the
+    Mac as scheduler.ts's `consensus_baseline_odds`, and every
+    BASELINE_NIGHT row in the database was written by it; there has been
+    none since 2026-05-04. compute_market_signals derives movement by
+    diffing MORNING_CHECK against BASELINE_NIGHT, so with no baseline every
+    runner falls back to neutral 50 however healthy odds capture itself is
+    — which is why market_signal_scores has been empty since 2026-04-18.
+
+    NOT at 00:30, which is when scheduler.ts ran it and what
+    betfair_snapshot_coverage_audit.py still documented. That time is a
+    Mac-era constant and does not survive the migration: the Mac downloaded
+    a week of cards every Wednesday 4 PM (scheduler.ts
+    `download_racecards_wednesday`), so a card for today existed at
+    midnight. On Fargate racecard-collect writes it at 05:31 the same
+    morning and seed_race_schedule.py seeds race_schedule in the same task
+    — and betfair_prices maps the Exchange catalogue THROUGH race_schedule.
+    At 00:30 there is neither, so this job would raise in
+    _require_racecard every single day. Hence 04:15: after the 04:00
+    collect has landed both, before the morning check. The price is a ~2h
+    lever arm instead of an overnight one; widening it means seeding
+    tomorrow's card tonight, which is a separate change.
+
+    Carries the same "exited 0 but wrote no rows" postcondition
+    morning-odds has for MORNING_CHECK, so a silent repeat of this gap
+    fails loudly here rather than surfacing four months later as a
+    different job's missing output.
+    """
+    _sync_down("server/python/intelligence")
+    # odds_movement reads the card for its fallback odds, same as
+    # morning-odds — and _prepare_racecard is what proves the 05:30 collect
+    # actually landed before this runs.
+    if _require_racecard("baseline-night") == "quiet":
+        return {"last_success_date": _today(), "baseline_rows": 0,
+                "quiet_day": True}
+    t0 = _db_now()
+    _run_ok("odds_movement.py", _today(), "--snapshot", "baseline_night")
+
+    rows = _db_query(
+        "SELECT COUNT(*) FROM betfair_odds_snapshots WHERE race_date = %s "
+        "AND snapshot_type = 'BASELINE_NIGHT' AND snapshot_time >= %s",
+        (_today(), t0))[0]
+    if not rows:
+        raise RuntimeError(
+            "baseline-night: odds_movement.py exited 0 but committed no "
+            "BASELINE_NIGHT rows — the morning check will have nothing to "
+            "diff against and every runner will default to neutral, same as "
+            "every day since 2026-05-04.")
+
+    return {"last_success_date": _today(), "baseline_rows": rows}
+
+
 def job_morning_odds() -> dict:
     _sync_down("server/python/intelligence")
     # odds_movement reads the card for fallback odds
@@ -381,29 +435,54 @@ def job_morning_odds() -> dict:
             "morning-odds: odds_movement.py exited 0 but committed no "
             "MORNING_CHECK rows — the market pillar has no data today.")
 
-    # 2. Signals were derived, not just prices stored. On 2026-04-06 this
+    # 2. Relay the signals file BEFORE asserting on it. market_signals_
+    #    <date>.json is what consensus_blender actually reads at tips time
+    #    (consensus_blender.py:315) — the DB table is not that path — and
+    #    Fargate tasks share no filesystem, so a file that is not synced up
+    #    does not exist as far as 08:15 is concerned. Ordered before the
+    #    assertions deliberately: every check below is about whether the
+    #    market pillar is HEALTHY, and failing one must not also delete the
+    #    degraded-but-usable artifact from the run. On 2026-08-06 the
+    #    row assertion fired and market_signals_2026-08-06.json never left
+    #    the container. The alarm still fires — the exception is raised, the
+    #    job still goes red, _put_state still records it. Only the evidence
+    #    survives the failure now.
+    _sync_up("server/python/intelligence")
+
+    # 3. A baseline exists at all. baseline-night runs at 04:15 with its own
+    #    "wrote zero rows" postcondition, so reaching a non-quiet morning
+    #    with zero baseline rows means that alarm should already have fired.
+    #    Checked and raised on before signals are queried: the old
+    #    `if baseline and not signals` could only fire once baseline was
+    #    already nonzero, which is exactly why it never fired once in the
+    #    four months baseline-night went unscheduled.
+    baseline = _db_query(
+        "SELECT COUNT(*) FROM betfair_odds_snapshots WHERE race_date = %s "
+        "AND snapshot_type = 'BASELINE_NIGHT'", (_today(),))[0]
+    if not baseline:
+        raise RuntimeError(
+            f"morning-odds: ZERO BASELINE_NIGHT rows for {_today()} — "
+            f"baseline-night should have raised on this at 04:15 if it did "
+            f"not run clean today. Confirm it actually fired before treating "
+            f"this as a first day with nothing to diff against.")
+
+    # 4. Signals were derived, not just prices stored. On 2026-04-06 this
     #    job wrote 272 MORNING_CHECK rows against a 230-row baseline and
     #    produced ZERO market_signal_scores: compute_market_signals keys the
     #    baseline on the raw horse name (odds_movement.py:204-212, :231), so
     #    any name-format drift between the two snapshots misses every lookup
     #    and every runner silently falls back to neutral 50. Three of the
     #    five MORNING_CHECK days on record wrote no signals at all.
-    #    Conditional on a baseline existing: with no baseline, zero signals
-    #    is the documented and correct day-one behaviour, not a failure.
-    baseline = _db_query(
-        "SELECT COUNT(*) FROM betfair_odds_snapshots WHERE race_date = %s "
-        "AND snapshot_type = 'BASELINE_NIGHT'", (_today(),))[0]
     signals = _db_query(
         "SELECT COUNT(*) FROM market_signal_scores WHERE race_date = %s",
         (_today(),))[0]
-    if baseline and not signals:
+    if not signals:
         raise RuntimeError(
             f"morning-odds: {baseline} baseline rows and {rows} morning rows, "
             f"but ZERO market_signal_scores — the baseline join matched "
             f"nothing, so every runner defaulted to neutral. This is the "
             f"2026-04-06 failure, which passed green at the time.")
 
-    _sync_up("server/python/intelligence")
     return {"last_success_date": _today(), "morning_rows": rows,
             "signal_rows": signals}
 
@@ -742,6 +821,7 @@ def job_weekly_digest() -> dict:
 
 JOBS = {
     "racecard-collect": job_racecard_collect,
+    "baseline-night": job_baseline_night,
     "morning-odds": job_morning_odds,
     "tip-time-snapshot": job_tip_time_snapshot,
     "late-odds-watch": job_late_odds_watch,
