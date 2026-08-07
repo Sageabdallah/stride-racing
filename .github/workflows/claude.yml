@@ -283,6 +283,22 @@ jobs:
           # used and the permissions above are real. claude[bot] means the App
           # token came back and they are not.
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Without this the action refuses the run outright — "Workflow initiated
+          # by non-human actor: github-actions (type: Bot)" — before any prompt is
+          # read. Every watcher reaches this job by workflow_dispatch under
+          # GITHUB_TOKEN, so the actor is always a bot and the whole unattended
+          # path was dead on arrival: morning-watch, auto-triage and tips-watch
+          # each filed their issue, dispatched, and the dispatch failed silently
+          # from the operator's side. Issues #88, #95 and #103 carry no agent
+          # comment for exactly this reason (first observed on run 31140440747).
+          #
+          # Named, not "*": only this repository's own workflows may drive the
+          # agent. The action's default refusal exists to stop a bot on a public
+          # repo from driving an agent with write access — that concern is
+          # answered here by the pinned github_token and contents:read above, not
+          # by the actor check. The write-capable `claude` job is untouched and
+          # stays human-allowlisted.
+          allowed_bots: "github-actions"
           prompt: |
             You are diagnosing a production failure, unattended. Nobody will read
             this until morning.
