@@ -1,0 +1,228 @@
+# .github/workflows/missing-run-watch.yml
+#
+# The third failure class, and the only one nothing watched.
+#
+#   ran and crashed        -> ecs-failure-watch files the log tail
+#   ran, exited 0, no rows -> morning-watch / tips-watch / the handler postconditions
+#   NEVER RAN AT ALL       -> nothing. Until this file.
+#
+# A job that never starts produces no ECS task, so no "ECS Task State Change"
+# event is emitted and the stride-ecs-task-failed rule cannot fire. EventBridge
+# Scheduler then retries the invocation up to 185 times over 24 hours and
+# discards it into nothing: no DLQ is configured on any of the 17 schedules, and
+# there are zero alarms in the AWS/Scheduler namespace (audited 2026-08-07).
+# Every downstream check assumes a task ran, so the whole day is silent. That is
+# the outage that looks exactly like a quiet morning.
+#
+# What it asserts is deliberately the weakest useful claim: did this job write
+# ANY log line today, after its scheduled fire time. Not "did it succeed", not
+# "did it produce rows" — those have their own watchers, and duplicating them
+# here would make this file fire on days the others already cover.
+#
+# The weak claim is also what makes it quiet-day-proof. Roughly a third of days
+# have no target-track racing, and on those days the jobs still run and still
+# log; only their OUTPUT is legitimately empty. So this watcher needs no
+# quiet-day exception, which is the check that has historically been got wrong.
+#
+# The AWS-side evidence is gathered HERE, not left to the agent: this job holds
+# OIDC credentials and the triage agent deliberately holds none, so a "why did
+# it not fire" question it cannot answer would come back as a shrug. Schedule
+# state, task-definition status, scheduler metrics and the run-state row all go
+# into the issue body.
+
+name: Missing run watch
+
+on:
+  schedule:
+    # 18:12Z..23:42Z == 04:12..09:42 AEST, the whole morning chain plus margin.
+    # AEST is UTC+10 year-round in NSW during winter; revisit in October when
+    # daylight saving starts and every hour below drifts by one.
+    - cron: "12,42 18-23 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would be filed, file nothing"
+        required: false
+        default: "false"
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: missing-run-watch
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-2
+  CLUSTER: stride
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: Did each chain job leave a trace today?
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -uo pipefail
+
+          # job | family | schedule name | HH:MM AEST | grace minutes
+          # Grace covers Fargate provisioning and Scheduler jitter. It is the
+          # time after which "no log line yet" stops being normal.
+          JOBS=$(cat <<'SPEC'
+          racecard-collect|stride-racecard-collect|stride-racecard-0400|04:00|25
+          baseline-night|stride-baseline-night|stride-baseline-0415|04:15|25
+          intelligence-build|stride-intelligence-build|stride-intelligence-0420|04:20|25
+          consensus-agent|stride-consensus-agent|stride-consensus-0530|05:30|25
+          morning-odds|stride-morning-odds|stride-morning-odds-0730|07:30|25
+          tips-pipeline|stride-tips-pipeline|stride-tips-0805|08:05|25
+          SPEC
+          )
+
+          TODAY=$(TZ=Australia/Sydney date +%F)
+          NOW=$(date -u +%s)
+          MISSING=""
+          FILED=0
+
+          for SPEC_LINE in $JOBS; do
+            JOB=$(echo "$SPEC_LINE" | cut -d'|' -f1)
+            FAMILY=$(echo "$SPEC_LINE" | cut -d'|' -f2)
+            SCHED=$(echo "$SPEC_LINE" | cut -d'|' -f3)
+            HHMM=$(echo "$SPEC_LINE" | cut -d'|' -f4)
+            GRACE=$(echo "$SPEC_LINE" | cut -d'|' -f5)
+
+            # AEST is UTC+10; state the offset rather than relying on the
+            # runner's TZ database for arithmetic.
+            FIRE=$(date -u -d "${TODAY}T${HHMM}:00+10:00" +%s)
+            DEADLINE=$((FIRE + GRACE * 60))
+            [ "$NOW" -lt "$DEADLINE" ] && continue
+
+            # Tolerate a task that started slightly before its schedule.
+            FLOOR=$((FIRE - 300))
+            LAST=$(aws logs describe-log-streams \
+                     --log-group-name "/ecs/$FAMILY" \
+                     --order-by LastEventTime --descending --limit 1 \
+                     --query 'logStreams[0].lastEventTimestamp' --output text 2>/dev/null)
+
+            if [ -n "$LAST" ] && [ "$LAST" != "None" ] && [ "$((LAST / 1000))" -ge "$FLOOR" ]; then
+              echo "OK   $JOB — logged at $(date -u -d "@$((LAST / 1000))" +%H:%MZ)"
+              continue
+            fi
+
+            echo "MISS $JOB — no log line since its ${HHMM} AEST slot"
+            MISSING="${MISSING}${JOB} "
+
+            TITLE="Never ran: $JOB has no trace for $TODAY"
+            DUP=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                    --search "\"$JOB\" \"$TODAY\" in:title" --json number --jq 'length' 2>/dev/null || echo 0)
+            if [ "${DUP:-0}" -gt 0 ]; then
+              echo "     already filed, skipping"; continue
+            fi
+
+            # Everything the agent cannot reach, gathered while we still hold
+            # credentials.
+            SCHED_JSON=$(aws scheduler get-schedule --name "$SCHED" \
+                           --query '{state:State,expr:ScheduleExpression,tz:ScheduleExpressionTimezone,taskdef:Target.EcsParameters.TaskDefinitionArn,dlq:Target.DeadLetterConfig}' \
+                           --output json 2>&1 || echo '{"error":"get-schedule failed"}')
+            TD_ARN=$(echo "$SCHED_JSON" | jq -r '.taskdef // empty')
+            TD_STATUS="unknown"
+            [ -n "$TD_ARN" ] && TD_STATUS=$(aws ecs describe-task-definition \
+                --task-definition "$TD_ARN" --query 'taskDefinition.status' --output text 2>&1 || echo "describe failed")
+            RUN_STATE=$(aws dynamodb get-item --table-name stride_run_state \
+                          --key "{\"job_name\":{\"S\":\"$JOB\"}}" --output json 2>/dev/null \
+                          | jq -c '.Item // "no row"' || echo '"lookup failed"')
+            ERRS=$(aws cloudwatch get-metric-statistics --namespace AWS/Scheduler \
+                     --metric-name TargetErrorCount --statistics Sum \
+                     --start-time "$(date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ)" \
+                     --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --period 21600 \
+                     --query 'Datapoints[0].Sum' --output text 2>/dev/null || echo "n/a")
+
+            {
+              echo "\`$JOB\` was due at **$HHMM AEST** on $TODAY. Its log group"
+              echo "\`/ecs/$FAMILY\` carries no event at or after that time, ${GRACE} minutes past the slot."
+              echo
+              echo "This is the never-started class, not a crash and not an empty result — a task that"
+              echo "runs and fails writes a log stream and is picked up by \`ecs-failure-watch\`; a task"
+              echo "that runs and produces nothing is picked up by the outcome watchers. No trace at all"
+              echo "means either the invocation never reached ECS, or the container died before it could"
+              echo "log. Nothing else in this repository detects it."
+              echo
+              echo "**Schedule as it stands right now**"
+              echo '```json'
+              echo "$SCHED_JSON"
+              echo '```'
+              echo
+              echo "- task definition status: \`$TD_STATUS\`"
+              echo "- AWS/Scheduler TargetErrorCount, last 6h: \`$ERRS\` (\`None\`/\`n/a\` means the metric never fired, which is normal — it is only emitted on a rejected invocation)"
+              echo "- \`stride_run_state\` row: \`$RUN_STATE\`"
+              echo
+              echo "Read those first. \`state\` not \`ENABLED\`, a task definition that is not \`ACTIVE\`,"
+              echo "or a non-zero TargetErrorCount each point at a different cause. \`dlq\` is expected"
+              echo "to be \`null\` — no schedule has one, which is why this watcher exists."
+              echo
+              if [ "$JOB" = "racecard-collect" ]; then
+                echo "**This one is chain-fatal.** Everything downstream starves without the day's"
+                echo "racecard, so treat a missing racecard as the cause of any other missing job"
+                echo "reported for $TODAY rather than as one failure among several."
+                echo
+              fi
+              echo "@claude Interpret the evidence above and check the repository side: whether a recent"
+              echo "commit changed this schedule's definition, and whether the task definition family is"
+              echo "still registered by the infra scripts."
+              echo
+              echo "Rules for this task:"
+              echo "- You hold NO AWS credentials. Do not attempt any \`aws\` command; the evidence above"
+              echo "  is all there is, and it was gathered for exactly that reason."
+              echo "- Open a PR against \`main\`. Never commit to \`main\` directly."
+              echo "- Do not touch anything under \`infra/*.sh\`."
+              echo "- Do not re-run any job to reproduce. Several write to production tables."
+              echo "- If the cause is not clear, comment with findings and open no PR."
+            } > body.md
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "     DRY RUN — would file:"; sed 's/^/       /' body.md; continue
+            fi
+
+            URL=$(gh issue create --repo "$GITHUB_REPOSITORY" \
+                    --title "$TITLE" --label auto-triage --body-file body.md)
+            NUM=${URL##*/}
+            FILED=$((FILED + 1))
+            echo "     filed #$NUM"
+
+            # One agent per sweep, on the EARLIEST missing job. A chain outage
+            # reports every downstream job as missing too, and they share one
+            # cause upstream; dispatching for each would spend six runs to
+            # rediscover the first. JOBS is in chain order, so the first filing
+            # of a sweep is the right one.
+            if [ "$FILED" -eq 1 ]; then
+              gh workflow run claude.yml --repo "$GITHUB_REPOSITORY" \
+                -f source=missing-run-watch \
+                -f failed_workflow="$JOB" \
+                -f run_id= \
+                -f issue_number="$NUM" \
+                || echo "::warning::claude.yml dispatch failed for #$NUM — the issue stands on its own"
+            fi
+          done
+
+          {
+            echo "## Missing run watch — $TODAY"
+            echo
+            if [ -z "$MISSING" ]; then
+              echo "Every chain job past its deadline has logged today."
+            else
+              echo "No trace today for: **${MISSING}**"
+              echo
+              echo "$FILED issue(s) filed this sweep."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
