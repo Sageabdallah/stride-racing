@@ -332,12 +332,23 @@ jobs:
               1. Read the failing log. If a run id is given:
                      gh run view ${{ inputs.run_id }} --log-failed
                  If it is empty, the failure is an ECS/Fargate job with no GitHub
-                 run to read — say so and work from the issue and the code.
+                 run to read. Do NOT go looking for it: you hold no AWS
+                 credentials and every aws command will be denied. The issue body
+                 already carries the task's log tail — that excerpt IS your log.
+                 Work from it and from the code.
               2. Open the two or three files that plausibly explain it. Not more.
               3. Check whether main already carries a fix:
                      git log --oneline -20 -- <the file>
                      git log --all --oneline -S'<a distinctive string>'
               4. Post the comment and finish.
+
+            YOUR TURN BUDGET IS 40 AND IT IS ENFORCED BY A HARD KILL. Running out
+            posts nothing at all, which is strictly worse than a thin comment: the
+            operator wakes to an unexplained failure AND a failed triage run. So
+            post by turn 30 whatever state the diagnosis is in, then stop. If you
+            are at turn 25 and still unsure, that is your answer — post what you
+            ruled out. Do not spend turns on a tool that was denied once; a denial
+            means it is not on the allowlist and retrying it cannot succeed.
 
             The comment should say, in a few sentences each:
               - WHAT failed, in one line.
@@ -368,8 +379,15 @@ jobs:
           # agent can CHANGE, not what it can read or disclose. The only
           # deliverable is a comment on a public repo, so the tool surface should
           # be the four read commands and the one write command that produces it.
+          # 20 was not enough and the failure mode was total: run 31141151125 hit
+          # the cap at turn 21 having posted nothing, so an ECS failure that had
+          # already been correctly captured in issue #105 still read as
+          # untriaged. An ECS-sourced issue carries no run id, so the agent
+          # cannot spend one cheap `gh run view --log-failed` and be oriented —
+          # it has to read the log excerpt and then the code, which is what ran
+          # the budget out. 40 with a post-by-30 instruction in the prompt.
           claude_args: |
-            --max-turns 20
+            --max-turns 40
             --allowedTools "Read,Grep,Glob,Bash(gh run view:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git log:*),Bash(git show:*)"
             --settings '{"attribution":{"commit":"","pr":""}}'
 
