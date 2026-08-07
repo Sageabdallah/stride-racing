@@ -1,0 +1,171 @@
+# .github/workflows/ecs-failure-watch.yml
+#
+# The gap this closes: the pipeline's real jobs are ECS scheduled tasks, and
+# when one dies EventBridge mails the raw stop event to an inbox — no log
+# excerpt, no issue, no agent. 2026-08-07 was the shape of it: consensus
+# exited 5 at 07:19 and the traceback sat in CloudWatch until a person went
+# and fetched it by hand.
+#
+# Every half hour this lists tasks that STOPPED inside the look-back window
+# with a non-zero exit code, pulls the tail of that task's own log stream,
+# and files one issue per task with the evidence inline. Then it dispatches
+# claude.yml directly — GITHUB_TOKEN-authored issues never create workflow
+# runs, so the @claude mention in the body is for the human path, not the
+# wake-up. The dispatch lands in the read-only triage job: findings arrive
+# as comments, and the write-capable agent stays reachable only by the
+# owner. See claude.yml for that argument; this watcher does not widen it.
+#
+# exitCode null is filed too, deliberately: a task that never started
+# (CannotPullContainerError, ResourceInitializationError) has no exit code
+# and no log stream, and that class is the worst morning, not a benign one.
+
+name: ECS failure watch
+
+on:
+  schedule:
+    # every half hour, off the :00/:30 marks; 40-minute look-back overlaps
+    # the cadence so a failure cannot fall between two sweeps
+    - cron: "12,42 * * * *"
+  workflow_dispatch:
+    inputs:
+      since_minutes:
+        description: "Look-back window in minutes"
+        required: false
+        default: "40"
+
+permissions:
+  id-token: write   # OIDC: read ECS task state and CloudWatch logs
+  contents: read
+  issues: write     # file the failure report
+  actions: write    # dispatch claude.yml (triage job, read-only)
+
+concurrency:
+  group: ecs-failure-watch
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-2
+  CLUSTER: stride
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: File one issue per freshly failed task
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SINCE_MIN: ${{ inputs.since_minutes || '40' }}
+        run: |
+          set -euo pipefail
+          SINCE_EPOCH=$(date -u -d "-${SINCE_MIN} minutes" +%s)
+          FILED=0
+
+          ARNS=$(aws ecs list-tasks --cluster "$CLUSTER" --desired-status STOPPED \
+                   --query 'taskArns[]' --output text)
+          if [ -z "$ARNS" ] || [ "$ARNS" = "None" ]; then
+            echo "No stopped tasks visible."; exit 0
+          fi
+
+          for ARN in $ARNS; do
+            # one task per call: batch DescribeTasks has rejected mixed
+            # identifier lists from this cluster before
+            T=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$ARN" \
+                  --query 'tasks[0]' --output json) || continue
+            FAMILY=$(echo "$T" | jq -r '.taskDefinitionArn | split("/")[-1] | split(":")[0]')
+            TASKID=$(echo "$ARN" | awk -F/ '{print $NF}')
+            STOPPED=$(echo "$T" | jq -r '.stoppedAt // empty' | sed 's/\.[0-9]*//')
+            EXIT=$(echo "$T" | jq -r '.containers[0].exitCode // "none"')
+            REASON=$(echo "$T" | jq -r '.stoppedReason // "unknown"')
+
+            [ -z "$STOPPED" ] && continue
+            S_EPOCH=$(date -u -d "$STOPPED" +%s 2>/dev/null || echo 0)
+            [ "$S_EPOCH" -lt "$SINCE_EPOCH" ] && continue
+            [ "$EXIT" = "0" ] && continue
+
+            TID8=${TASKID:0:8}
+            DUP=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                    --search "$TID8 in:title" --json number --jq 'length' \
+                    2>/dev/null || echo 0)
+            if [ "${DUP:-0}" -gt 0 ]; then
+              echo "$FAMILY $TID8 already filed, skipping"; continue
+            fi
+
+            if [ "$FILED" -ge 5 ]; then
+              echo "::warning::More than 5 failures in one sweep; $FAMILY $TID8 not filed this round (next sweep will catch it)"
+              continue
+            fi
+
+            WHEN_AEST=$(TZ=Australia/Sydney date -d "$STOPPED" +"%Y-%m-%d %H:%M AEST")
+
+            # the task's own log tail is the "what and why"
+            if ! aws logs get-log-events \
+                   --log-group-name "/ecs/$FAMILY" \
+                   --log-stream-name "job/job/$TASKID" \
+                   --limit 60 --no-start-from-head --output json 2>/dev/null \
+                 | jq -r '.events[].message' > logtail.txt || [ ! -s logtail.txt ]; then
+              printf '%s\n' "No log stream exists for this task." \
+                "That usually means the container never started (image pull or" \
+                "resource initialization) — the stop reason above is the whole story." > logtail.txt
+            fi
+
+            case "$FAMILY" in
+              stride-consensus-agent) HINT="server/python/consensus_agent.py. exit 5 = DB mirror failed after retries (_store_with_retry). exit 6 = tipster panel unavailable; documented escape is STRIDE_PANEL_OPTIONAL=true in the stride/prod secret (helps future runs only). The research spend is already gone — do NOT re-run consensus out of schedule." ;;
+              stride-tips-pipeline)   HINT="server/python/run_tips_pipeline.py then backfill_tips_contract.py. Do NOT re-run out of schedule: it re-upserts day-1 ledger rows at later prices." ;;
+              stride-baseline-night)  HINT="First scheduled 2026-08-08. Failure degrades morning-odds to a neutral market pillar; it is not chain-fatal." ;;
+              stride-morning-odds)    HINT="server/python/odds_movement.py. Venue mapping resolves against the day's schedule since #96; 'is race_schedule seeded?' in betfair_prices.py is a known red herring." ;;
+              stride-racecard-collect) HINT="server/python/download_racecards.py + seed_race_schedule.py. Chain-fatal: everything downstream starves. In the verify-jobs safe set, so it can be re-run to reproduce." ;;
+              *) HINT="Job registry: infra/jobs/handler.py. If it is in the verify-jobs safe set it can be re-run to reproduce; the excluded four (tips, tip-time, morning-odds, consensus) must not be." ;;
+            esac
+
+            {
+              echo "ECS task for \`$FAMILY\` stopped **$WHEN_AEST** with exit code \`$EXIT\`."
+              echo
+              echo "- task: \`$TASKID\`"
+              echo "- stop reason: \`$REASON\`"
+              echo "- log stream: \`/ecs/$FAMILY\` / \`job/job/$TASKID\`"
+              echo
+              echo "Start here: $HINT"
+              echo
+              echo "Last lines of the task's own log:"
+              echo
+              echo '```'
+              tail -c 6000 logtail.txt
+              echo '```'
+              echo
+              echo "@claude Diagnose from the log excerpt and the file named above, then propose the fix."
+              echo
+              echo "Rules for this task:"
+              echo "- Open a PR against \`main\`. Never commit to \`main\` directly."
+              echo "- Do not touch anything under \`infra/*.sh\`."
+              echo "- Do not re-run LLM-spending or ledger-writing jobs (consensus-agent, tips-pipeline, morning-odds, tip-time-snapshot) to reproduce."
+              echo "- Do not backfill or insert rows to make a check pass."
+              echo "- If the cause is not clear from the logs, comment with findings and open no PR."
+            } > body.md
+
+            URL=$(gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "ECS failure: $FAMILY exit $EXIT — $WHEN_AEST ($TID8)" \
+              --label auto-triage \
+              --body-file body.md)
+            NUM=${URL##*/}
+            FILED=$((FILED+1))
+            echo "Filed #$NUM for $FAMILY ($TID8, exit $EXIT)"
+
+            # GITHUB_TOKEN-authored issues cannot wake claude.yml; dispatch is
+            # the documented exception and lands in the read-only triage job
+            gh workflow run claude.yml --repo "$GITHUB_REPOSITORY" \
+              -f source=ecs-failure-watch \
+              -f failed_workflow="$FAMILY" \
+              -f run_id= \
+              -f issue_number="$NUM" \
+              || echo "::warning::claude.yml dispatch failed for #$NUM — issue stands on its own"
+          done
+
+          echo "Sweep done: $FILED issue(s) filed."
