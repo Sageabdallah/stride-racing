@@ -19,10 +19,29 @@ import sys
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+# CONN_ERRORS: connection-level failures that mean OUR infrastructure broke,
+# as opposed to a provider having nothing for the date. The warn-and-continue
+# handlers below must not swallow these — a dead socket turned into
+# "0 rows, exit 0".
+from intelligence_common import CONN_ERRORS
+
+
+@contextmanager
+def _db_phase():
+    """One connection per DB-touching phase. The whole-run connection died
+    under Step 3/4's minutes of network and subprocess time (Neon closes
+    idle sockets) and took every later step with it."""
+    conn = _get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 from sp_health import compute_sp_health
 
@@ -285,8 +304,12 @@ def check_existing_results(conn, tipped_races: List[TippedRace]) -> Tuple[List[T
 
 
 
-def fetch_and_store_results(conn, needed: List[TippedRace], parallel: bool = False) -> Dict:
-    """Fetch race results from API and store in race_results_history."""
+def fetch_and_store_results(needed: List[TippedRace], parallel: bool = False) -> Dict:
+    """Fetch race results from API and store in race_results_history.
+
+    Opens its own connection only after the fetch loop: the fetching can run
+    minutes, and a connection opened before it arrives at import time dead.
+    """
     dates_needed = sorted({tr.date for tr in needed})
     if not dates_needed:
         print("  [RESULTS] No races to fetch", file=sys.stderr)
@@ -329,7 +352,8 @@ def fetch_and_store_results(conn, needed: List[TippedRace], parallel: bool = Fal
                 print(f"  [RESULTS] Error fetching {d}: {e}", file=sys.stderr)
 
     if all_meetings:
-        import_meetings(all_meetings, conn)
+        with _db_phase() as conn:
+            import_meetings(all_meetings, conn)
         for m in all_meetings:
             for race in m.get("races", []):
                 runners = race.get("runners", [])
@@ -593,6 +617,8 @@ def trigger_franking_updates(conn, dates: List[str]) -> Dict:
         summary["horses_recomputed"] = len(results) if results else 0
         print(f"  [FRANKING] Re-computed {summary['horses_recomputed']} horses", file=sys.stderr)
 
+    except CONN_ERRORS:
+        raise
     except Exception as e:
         summary["error"] = str(e)
         print(f"  [FRANKING] Error: {e}", file=sys.stderr)
@@ -725,11 +751,11 @@ def collect_results(dates: List[str], parallel: bool = False,
         print("  No tipped races found for these dates.", file=sys.stderr)
         return {"status": "no_tips", "dates": dates}
 
-    conn = _get_connection()
-    ensure_table(conn)
+    with _db_phase() as conn:
+        ensure_table(conn)
 
-    print("\n[Step 2] Checking existing results in database...", file=sys.stderr)
-    needed, existing = check_existing_results(conn, tipped_races)
+        print("\n[Step 2] Checking existing results in database...", file=sys.stderr)
+        needed, existing = check_existing_results(conn, tipped_races)
 
     if dry_run:
         print(f"\n[DRY RUN] Would fetch results for {len(needed)} races:", file=sys.stderr)
@@ -737,13 +763,14 @@ def collect_results(dates: List[str], parallel: bool = False,
             tips_str = ", ".join(h.horse_name for h in tr.horses)
             print(f"  {tr.track} R{tr.race_number} ({tr.date}): {tips_str}", file=sys.stderr)
         print(f"\n[DRY RUN] Already have results for {len(existing)} races", file=sys.stderr)
-        conn.close()
         return {"status": "dry_run", "needed": len(needed), "existing": len(existing)}
 
+    # Steps 3-4 are minutes of provider API and subprocess time; no
+    # connection may be open across them.
     fetch_summary = {"dates_fetched": 0, "rows_imported": 0}
     if needed:
         print(f"\n[Step 3] Fetching results for {len(needed)} races...", file=sys.stderr)
-        fetch_summary = fetch_and_store_results(conn, needed, parallel=parallel)
+        fetch_summary = fetch_and_store_results(needed, parallel=parallel)
     else:
         print(f"\n[Step 3] All results already in database", file=sys.stderr)
 
@@ -757,50 +784,57 @@ def collect_results(dates: List[str], parallel: bool = False,
     else:
         print(f"\n[Step 4] No new races to fetch sectionals for", file=sys.stderr)
 
-    print(f"\n[Step 5] Scoring tip accuracy...", file=sys.stderr)
-    tip_results = score_tip_accuracy(conn, tipped_races)
+    with _db_phase() as conn:
+        print(f"\n[Step 5] Scoring tip accuracy...", file=sys.stderr)
+        tip_results = score_tip_accuracy(conn, tipped_races)
 
-    print(f"\n[Step 5b] Matching shadow tracker results...", file=sys.stderr)
-    try:
-        from shadow_pl_tracker import cmd_results as shadow_cmd_results
-        shadow_total = 0
-        for date in dates:
-            shadow_total += (shadow_cmd_results(date) or 0)
-        print(f"  Shadow tracker: {shadow_total} rows matched", file=sys.stderr)
-    except Exception as e:
-        print(f"  Shadow matching failed (non-fatal): {e}", file=sys.stderr)
+        print(f"\n[Step 5b] Matching shadow tracker results...", file=sys.stderr)
+        try:
+            from shadow_pl_tracker import cmd_results as shadow_cmd_results
+            shadow_total = 0
+            for date in dates:
+                shadow_total += (shadow_cmd_results(date) or 0)
+            print(f"  Shadow tracker: {shadow_total} rows matched", file=sys.stderr)
+        except CONN_ERRORS:
+            raise
+        except Exception as e:
+            print(f"  Shadow matching failed (non-fatal): {e}", file=sys.stderr)
 
-    print(f"\n[Step 5c] Settling selection ledger rows...", file=sys.stderr)
-    try:
-        from selection_ledger import settle_pending_rows
-        ledger_settled = 0
-        for date in dates:
-            out = settle_pending_rows(conn, date) or {}
-            ledger_settled += out.get("settled") or 0
-            if out.get("reason") and "net_settlement" in str(out["reason"]):
-                # Missing migration: the loud warning is already emitted —
-                # once per run is enough, and every date would fail the same way.
-                break
-        print(f"  Selection ledger: {ledger_settled} rows settled", file=sys.stderr)
-    except Exception as e:
-        print(f"  Ledger settlement failed (non-fatal): {e}", file=sys.stderr)
+        print(f"\n[Step 5c] Settling selection ledger rows...", file=sys.stderr)
+        try:
+            from selection_ledger import settle_pending_rows
+            ledger_settled = 0
+            for date in dates:
+                out = settle_pending_rows(conn, date) or {}
+                ledger_settled += out.get("settled") or 0
+                if out.get("reason") and "net_settlement" in str(out["reason"]):
+                    # Missing migration: the loud warning is already emitted —
+                    # once per run is enough, and every date would fail the same way.
+                    break
+            print(f"  Selection ledger: {ledger_settled} rows settled", file=sys.stderr)
+        except CONN_ERRORS:
+            raise
+        except Exception as e:
+            print(f"  Ledger settlement failed (non-fatal): {e}", file=sys.stderr)
 
     franking_summary = {"horses_recomputed": 0}
     if not skip_franking and needed:
         print(f"\n[Step 6] Triggering franking updates...", file=sys.stderr)
-        franking_summary = trigger_franking_updates(conn, dates)
+        # Own phase: compute_all_franking_scores is minutes of work and the
+        # scoring connection would sit idle under it.
+        with _db_phase() as conn:
+            franking_summary = trigger_franking_updates(conn, dates)
     elif skip_franking:
         print(f"\n[Step 6] Skipping franking (--skip-franking)", file=sys.stderr)
     else:
         print(f"\n[Step 6] No new results to trigger franking for", file=sys.stderr)
 
     print(f"\n[Step 7] Building summary...", file=sys.stderr)
-    summary = build_summary(conn, tip_results, dates)
+    with _db_phase() as conn:
+        summary = build_summary(conn, tip_results, dates)
 
     elapsed = time.time() - t_start
     print(f"\nCompleted in {elapsed:.1f}s", file=sys.stderr)
-
-    conn.close()
 
     return {
         "status": "completed",
