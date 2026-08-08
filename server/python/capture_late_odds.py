@@ -224,65 +224,83 @@ def run(date_str: str, dry_run: bool = False, now: Optional[datetime] = None,
     conn = None
     captured_ids: set = set()
     if not dry_run and snapshot_write_enabled():
-        try:
-            conn = _connect()
-        except Exception as e:
-            print(f"  [LATE_ODDS] DB connect failed (non-fatal): {e}", file=sys.stderr)
-            conn = None
+        # A connect FAILURE is fatal: with races due, every one would log
+        # "no DB — skipped" and the job would still exit 0 — the
+        # silent-no-op class. _connect() returning None (no DATABASE_URL
+        # configured) keeps the graceful no-DB degrade for dev hosts, and
+        # --watch isolates each iteration so a raise here cannot kill the
+        # day's watcher.
+        conn = _connect()
         captured_ids = already_captured_race_ids(conn, date_str)
 
     summary = {"date": date_str, "scheduled": len(schedule), "due": len(due),
                "captured": 0, "rows": 0, "skipped_already_captured": 0,
                "races": []}
-    for race in due:
-        race_id = make_race_id(date_str, race["track"], race["race_number"],
-                               race.get("meet_id"))
-        label = f"{race['track']} R{race['race_number']}"
-        if race_id in captured_ids:
-            summary["skipped_already_captured"] += 1
-            continue
+    persist_attempts = 0
+    try:
+        for race in due:
+            race_id = make_race_id(date_str, race["track"], race["race_number"],
+                                   race.get("meet_id"))
+            label = f"{race['track']} R{race['race_number']}"
+            if race_id in captured_ids:
+                summary["skipped_already_captured"] += 1
+                continue
 
-        captured_at = datetime.now(timezone.utc)
-        stj = compute_seconds_to_jump(race["jump_time"], captured_at)
-        runners, pull_source = fetch_race_market(date_str, race)
-        if not runners:
-            print(f"  [LATE_ODDS] {label}: market pull failed — will retry "
-                  f"next run (T{stj:+d}s)", file=sys.stderr)
-            continue
+            captured_at = datetime.now(timezone.utc)
+            stj = compute_seconds_to_jump(race["jump_time"], captured_at)
+            runners, pull_source = fetch_race_market(date_str, race)
+            if not runners:
+                print(f"  [LATE_ODDS] {label}: market pull failed — will retry "
+                      f"next run (T{stj:+d}s)", file=sys.stderr)
+                continue
 
-        rows = build_snapshot_rows(
-            race_date=date_str, track=race["track"],
-            race_number=race["race_number"], runners=runners,
-            snapshot_kind="late_t5", captured_at=captured_at,
-            source_api=pull_source, meet_id=race.get("meet_id"),
-            jump_time=race["jump_time"])
-        if not rows:
-            print(f"  [LATE_ODDS] {label}: no priced runners at T{stj:+d}s",
-                  file=sys.stderr)
-            continue
+            rows = build_snapshot_rows(
+                race_date=date_str, track=race["track"],
+                race_number=race["race_number"], runners=runners,
+                snapshot_kind="late_t5", captured_at=captured_at,
+                source_api=pull_source, meet_id=race.get("meet_id"),
+                jump_time=race["jump_time"])
+            if not rows:
+                print(f"  [LATE_ODDS] {label}: no priced runners at T{stj:+d}s",
+                      file=sys.stderr)
+                continue
 
-        if dry_run:
-            print(f"  [DRY-RUN] {label}: would insert {len(rows)} late_t5 rows "
-                  f"at T{stj:+d}s", file=sys.stderr)
-            for row in rows[:3]:
-                print(f"    {row['horse_name']}: {row['bookmaker']} "
-                      f"${row['decimal_odds']:.2f}", file=sys.stderr)
-            summary["captured"] += 1
-            summary["rows"] += len(rows)
-            continue
+            if dry_run:
+                print(f"  [DRY-RUN] {label}: would insert {len(rows)} late_t5 rows "
+                      f"at T{stj:+d}s", file=sys.stderr)
+                for row in rows[:3]:
+                    print(f"    {row['horse_name']}: {row['bookmaker']} "
+                          f"${row['decimal_odds']:.2f}", file=sys.stderr)
+                summary["captured"] += 1
+                summary["rows"] += len(rows)
+                continue
 
-        if conn is None:
-            print(f"  [LATE_ODDS] {label}: {len(rows)} rows built, no DB — skipped",
-                  file=sys.stderr)
-            continue
+            if conn is None:
+                print(f"  [LATE_ODDS] {label}: {len(rows)} rows built, no DB — skipped",
+                      file=sys.stderr)
+                continue
 
-        result = persist_rows(conn, rows)
-        if result["written"] > 0:
-            summary["captured"] += 1
-            summary["rows"] += result["written"]
-            captured_ids.add(race_id)
-            print(f"  [LATE_ODDS] {label}: {result['written']} rows at "
-                  f"T{stj:+d}s", file=sys.stderr)
+            persist_attempts += 1
+            result = persist_rows(conn, rows)
+            if result["written"] > 0:
+                summary["captured"] += 1
+                summary["rows"] += result["written"]
+                captured_ids.add(race_id)
+                print(f"  [LATE_ODDS] {label}: {result['written']} rows at "
+                      f"T{stj:+d}s", file=sys.stderr)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # persist_rows never raises by design; without this, a dead connection
+    # meant every race reported "written: 0" and the job still exited 0.
+    if persist_attempts and summary["rows"] == 0:
+        raise RuntimeError(
+            f"built rows for {persist_attempts} race(s) but wrote 0 — "
+            f"persist is failing (see [ODDS_SNAP] errors above)")
 
     return summary
 
