@@ -17,8 +17,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from intelligence_common import (
-    get_connection, load_todays_runners, json_write,
-    INTELLIGENCE_DIR,
+    load_todays_runners, json_write,
+    INTELLIGENCE_DIR, CONN_ERRORS, ReconnectingRunner,
 )
 
 
@@ -384,6 +384,10 @@ def _load_horse_prep_profiles(conn, horse_ids):
             }
         cur.close()
         return profiles
+    except CONN_ERRORS:
+        # A dead socket must reach the step retry — swallowing it here left
+        # the build to die at the next cursor() with no redial (2026-08-08).
+        raise
     except Exception as e:
         print(f"  [PREP] horse_prep_profiles table not available: {e}", file=sys.stderr)
         return {}
@@ -916,8 +920,13 @@ def build_trainer_patterns(today, conn):
             if tl in trainer_stats:
                 trainer_stats[tl]["first_up_starts"] = fu_starts
                 trainer_stats[tl]["first_up_win_pct"] = round(fu_wins / fu_starts * 100, 2) if fu_starts > 0 else 0.0
+    except CONN_ERRORS:
+        raise
     except Exception as e:
         print(f"  [WARN] first-up query failed: {e}", file=sys.stderr)
+        # Without a rollback the aborted transaction fails every later query
+        # on this connection, turning one optional query into a dead step.
+        conn.rollback()
 
     cur.execute("""
         SELECT LOWER(trainer) as trainer_lower, jockey,
@@ -968,32 +977,23 @@ def main(race_date):
     today = load_todays_runners(race_date)
     print(f"  Loaded {len(today['horse_names'])} horses across {len(today['tracks'])} tracks", file=sys.stderr)
 
-    conn = get_connection()
+    runner = ReconnectingRunner()
     files_written = []
 
     try:
-        print("  Building form_franking.json ...", file=sys.stderr)
-        data = build_form_franking(today, conn)
-        json_write(data, INTELLIGENCE_DIR / "form_franking.json")
-        files_written.append("form_franking.json")
-
-        print("  Building prep_cycles.json ...", file=sys.stderr)
-        data = build_prep_cycles(today, conn, race_date)
-        json_write(data, INTELLIGENCE_DIR / "prep_cycles.json")
-        files_written.append("prep_cycles.json")
-
-        print("  Building sectional_trends.json ...", file=sys.stderr)
-        data = build_sectional_trends(today, conn)
-        json_write(data, INTELLIGENCE_DIR / "sectional_trends.json")
-        files_written.append("sectional_trends.json")
-
-        print("  Building trainer_patterns.json ...", file=sys.stderr)
-        data = build_trainer_patterns(today, conn)
-        json_write(data, INTELLIGENCE_DIR / "trainer_patterns.json")
-        files_written.append("trainer_patterns.json")
-
+        steps = [
+            ("form_franking.json", lambda conn: build_form_franking(today, conn)),
+            ("prep_cycles.json", lambda conn: build_prep_cycles(today, conn, race_date)),
+            ("sectional_trends.json", lambda conn: build_sectional_trends(today, conn)),
+            ("trainer_patterns.json", lambda conn: build_trainer_patterns(today, conn)),
+        ]
+        for filename, step in steps:
+            print(f"  Building {filename} ...", file=sys.stderr)
+            data = runner.run(filename, step)
+            json_write(data, INTELLIGENCE_DIR / filename)
+            files_written.append(filename)
     finally:
-        conn.close()
+        runner.close()
 
     print(f"[Agent 2] Complete — wrote {len(files_written)} files", file=sys.stderr)
     return files_written

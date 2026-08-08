@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -46,7 +47,69 @@ def get_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL environment variable is not set")
-    return psycopg2.connect(url)
+    # TCP keepalives so a silently dropped Neon socket raises instead of
+    # blocking forever in pqWait (observed 2026-08-08: 40+ min hang in
+    # poll() on a peer that was already gone). Dead peer surfaces as
+    # OperationalError within ~60s, which ReconnectingRunner can redial.
+    return psycopg2.connect(
+        url,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+    )
+
+
+# Connection-level failures worth redialling for. Empty when psycopg2 is
+# absent (`except ()` catches nothing, so every error propagates as-is).
+CONN_ERRORS = ((psycopg2.OperationalError, psycopg2.InterfaceError)
+               if psycopg2 is not None else ())
+
+
+class ReconnectingRunner:
+    """Owns a DB connection across builder steps, redialling when it drops.
+
+    The intelligence agents held one connection for their whole run, and
+    Neon closes idle sockets: a mid-run drop poisoned every later step and
+    killed the build at the next cursor() (2026-08-08, Agent 2). Builder
+    steps are read-only, so on a connection-level error the runner discards
+    the socket and re-runs the whole step on a fresh one — same pattern as
+    consensus_agent._store_with_retry.
+    """
+
+    def __init__(self, connect=None, attempts=2, base_delay=2.0):
+        self._connect = connect or get_connection
+        self._attempts = attempts
+        self._base_delay = base_delay
+        self._conn = None
+
+    def run(self, label, step):
+        """Call step(conn); on a dropped connection, redial and re-run."""
+        last = None
+        for i in range(self._attempts):
+            try:
+                if self._conn is None or getattr(self._conn, "closed", 0):
+                    self._conn = self._connect()
+                return step(self._conn)
+            except CONN_ERRORS as e:
+                last = e
+                self._discard()
+                if i < self._attempts - 1:
+                    print(f"  [RECONNECT] {label}: {type(e).__name__} — "
+                          f"redialling and re-running step", file=sys.stderr)
+                    time.sleep(self._base_delay * (2 ** i))
+        raise last
+
+    def _discard(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def close(self):
+        self._discard()
 
 
 def parse_distance_m(distance_str):
