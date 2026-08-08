@@ -486,6 +486,79 @@ def extract_odds(runner):
     return None
 
 
+# --- Book coherence -------------------------------------------------------
+# A race whose implied win-price book cannot be a market must be visible
+# before money is assigned to it. On 2026-08-08 three races carried books of
+# 232-312% (bot orders parked at $1.12-$1.16 on unformed runners) and one ran
+# at 83% (4 of 7 runners priced); the pipeline de-vigged the impossible sums
+# into plausible-looking trueMarketProbs and staked 31u into them (settled
+# -7.50u, vs +12.90u across the coherent races). Thresholds are provisional
+# until the unconditional [BOOK] detect logs accumulate; the measured card
+# was bimodal — 40 coherent races 0.83-1.50, 4 corrupt 2.31-3.12, an 82pp
+# void between — so the ceiling sits in empty space today.
+BOOK_MIN_PRICED = 4
+BOOK_SUM_CEILING = 1.60
+BOOK_SUM_FLOOR = 0.90
+BOOK_TOP2_CEILING = 1.10
+BOOK_TOP2_MIN_FIELD = 8
+BOOK_COVERAGE_FLOOR = 0.70
+
+
+def assess_book_coherence(runners):
+    """Judge whether a race's price book could be a real win market.
+
+    Price selection mirrors calculate_overround exactly (reference price,
+    falling back to the execution price) so the verdict is about the same
+    number the pipeline divides by. `runners` is the post-scratching field,
+    so coverage is priced-vs-declared-active, never priced-vs-priced.
+
+    Named blind spots (the proxy test this check would still pass with):
+    1. A book whose every price is wrong by a common factor sums normally
+       and passes — no field-level sum can see it. The capture-side
+       one-sided-ladder guard in betfair_odds_snapshot.py owns that failure.
+    2. A lone parked short price in a large field can hide inside a normal
+       total: the top-2 arm catches pairs and extreme singles, not every
+       single. Measured: a $1.16 phantom plus long outsiders passes.
+    3. The floor and coverage arms are independent ORs, so a thin book that
+       also sums low passes both while its de-vig divisor is understated.
+    The detect logs exist to tune all three before enforcement tightens.
+    """
+    from market_prob import reference_price
+    probs = []
+    for r in runners:
+        odds = reference_price(r.get("odds")) or extract_odds(r)
+        if odds and odds > 1:
+            probs.append(1.0 / odds)
+    probs.sort(reverse=True)
+    n_active = len(runners)
+    n_priced = len(probs)
+    book = sum(probs)
+    coverage = (n_priced / n_active) if n_active else 0.0
+    top2 = sum(probs[:2])
+
+    reasons = []
+    if n_priced < BOOK_MIN_PRICED:
+        reasons.append("unpriceable")
+    else:
+        if book > BOOK_SUM_CEILING:
+            reasons.append("book_over_ceiling")
+        if book < BOOK_SUM_FLOOR:
+            reasons.append("book_under_floor")
+        if n_active >= BOOK_TOP2_MIN_FIELD and top2 > BOOK_TOP2_CEILING:
+            reasons.append("top2_impossible")
+        if coverage < BOOK_COVERAGE_FLOOR:
+            reasons.append("coverage_thin")
+    return {
+        "n_active": n_active,
+        "n_priced": n_priced,
+        "book": round(book, 4),
+        "coverage": round(coverage, 4),
+        "top2": round(top2, 4),
+        "incoherent": bool(reasons),
+        "reasons": reasons,
+    }
+
+
 def calculate_intelligence_adjustment(h):
     """
     Extract intelligence signals and compute a composite adjustment.
@@ -2409,6 +2482,8 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
     total_mc_time = 0
     total_db_time = 0
     total_llm_time = 0
+    book_scored_races = 0
+    book_incoherent_races = 0
 
     for meet in racecard:
         track = meet.get("course") or meet.get("track") or "Unknown"
@@ -2672,6 +2747,26 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     print(f"    [INTEL] {intel_enriched}/{len(horses)} horses enriched with intelligence", file=sys.stderr)
 
             overround = calculate_overround(runners)
+            # Judge the book BEFORE calibrate_and_score divides by it: an
+            # impossible sum is laundered by the de-vig into plausible-looking
+            # trueMarketProbs (100/1.16 = 86.2% over a 3.12 book reads as a
+            # calm 27.6%), so this is the last site where the raw prices can
+            # testify. Detect logging is unconditional, like [MC_FLAT] — the
+            # artifact is byte-identical; only stakes are behind the flag.
+            book_verdict = assess_book_coherence(runners)
+            book_scored_races += 1
+            if book_verdict["incoherent"]:
+                book_incoherent_races += 1
+            print("    [BOOK] " + json.dumps({
+                "track": track, "race": race_num,
+                "book": book_verdict["book"],
+                "coverage": book_verdict["coverage"],
+                "top2": book_verdict["top2"],
+                "n_priced": book_verdict["n_priced"],
+                "n_active": book_verdict["n_active"],
+                "verdict": ("INCOHERENT" if book_verdict["incoherent"] else "OK"),
+                "reasons": book_verdict["reasons"],
+            }), file=sys.stderr)
             horses = calibrate_and_score(horses, overround, race_class=race_class)
 
             llm_tip_type = "win"
@@ -2765,6 +2860,20 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             for h in top3:
                 h["confidence"] = compute_confidence(h, pace_clarity=_pace_clarity)
                 h["staking"] = compute_staking(h)
+            # Enforcement zeroes the money, not a label: bet_status="NO_BET"
+            # races still staked 1u per pick on 2026-08-08 because bet_status
+            # never touches `staking`. Zeroing here propagates through
+            # build_export_pick -> bet_pick -> the ledger.
+            if book_verdict["incoherent"] and _flag_enabled("STRIDE_BOOK_COHERENCE_ENFORCE"):
+                for h in top3:
+                    if h.get("staking") not in (None, "", "0u"):
+                        print("    [BOOK_REFUSED] " + json.dumps({
+                            "horse": h.get("horse", "?"),
+                            "track": track, "race": race_num,
+                            "reasons": book_verdict["reasons"],
+                            "staking_before": h.get("staking"),
+                        }), file=sys.stderr)
+                    h["staking"] = "0u"  # a refused row must never book P&L
 
             raw_probs = [h.get("rawModelProb", 0) for h in horses]
             mc_spread = (max(raw_probs) - min(raw_probs)) if len(raw_probs) > 1 else 0
@@ -3143,6 +3252,21 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
         print(f"\n  [WARN] {len(failed_races)} race(s) failed:", file=sys.stderr)
         for r in failed_races:
             print(f"    - {r['track']} R{r['race_number']}: {r['error']}", file=sys.stderr)
+
+    if book_scored_races:
+        _book_rate = book_incoherent_races / book_scored_races
+        print(f"  [BOOK_SUMMARY] {book_incoherent_races}/{book_scored_races} "
+              f"scored races incoherent ({_book_rate:.0%})", file=sys.stderr)
+        # When MOST of the card is incoherent the price source itself is
+        # broken, and a card of mostly-zeroed stakes published as green is
+        # the silent-no-op class: fail loudly instead. 2026-08-08 measured
+        # 5/45 (11%) so this would not have fired; the 2026-08-05 Canterbury
+        # capture (whole races at $1.02) would have.
+        if _book_rate > 0.40 and _flag_enabled("STRIDE_BOOK_COHERENCE_ENFORCE"):
+            raise RuntimeError(
+                f"book coherence: {book_incoherent_races}/{book_scored_races} races "
+                f"incoherent — the price source is broken; refusing to publish "
+                f"a mostly-zero-stake card as a green run")
 
     all_picks = collect_day_picks(all_race_tips)
 
