@@ -41,10 +41,11 @@ def normalize_finish_position(raw_position, field_size: Optional[int] = None) ->
 
 
 def get_db_connection():
+    from intelligence_common import KEEPALIVE_KWARGS
     database_url = os.environ.get('DATABASE_URL')
     if not database_url:
         raise ValueError("DATABASE_URL environment variable required")
-    return psycopg2.connect(database_url)
+    return psycopg2.connect(database_url, **KEEPALIVE_KWARGS)
 
 
 def get_pending_races(conn, target_date: Optional[str] = None) -> List[Dict]:

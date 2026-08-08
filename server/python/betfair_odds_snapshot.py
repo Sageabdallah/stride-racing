@@ -188,7 +188,8 @@ def _connect():
     if not url:
         return None
     import psycopg2
-    return psycopg2.connect(url)
+    from intelligence_common import KEEPALIVE_KWARGS
+    return psycopg2.connect(url, **KEEPALIVE_KWARGS)
 
 
 def _print_report(mapped, unmapped_markets, unmapped_runners, rows, skipped):

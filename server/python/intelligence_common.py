@@ -39,6 +39,21 @@ def _load_env():
                     os.environ[key] = val
 
 
+# TCP keepalives so a silently dropped Neon socket raises instead of
+# blocking forever in pqWait (observed 2026-08-08: 40+ min hang in
+# poll() on a peer that was already gone). Dead peer surfaces as
+# OperationalError within ~60s, which ReconnectingRunner can redial.
+# Exported as a dict so scripts with their own connect helpers (each has
+# its own DATABASE_URL resolution and error contract) share one set of
+# numbers without routing through get_connection().
+KEEPALIVE_KWARGS = dict(
+    keepalives=1,
+    keepalives_idle=30,
+    keepalives_interval=10,
+    keepalives_count=3,
+)
+
+
 def get_connection():
     """Return a psycopg2 connection using DATABASE_URL."""
     _load_env()
@@ -47,17 +62,7 @@ def get_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL environment variable is not set")
-    # TCP keepalives so a silently dropped Neon socket raises instead of
-    # blocking forever in pqWait (observed 2026-08-08: 40+ min hang in
-    # poll() on a peer that was already gone). Dead peer surfaces as
-    # OperationalError within ~60s, which ReconnectingRunner can redial.
-    return psycopg2.connect(
-        url,
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=3,
-    )
+    return psycopg2.connect(url, **KEEPALIVE_KWARGS)
 
 
 # Connection-level failures worth redialling for. Empty when psycopg2 is

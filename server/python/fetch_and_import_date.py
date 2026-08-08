@@ -59,6 +59,7 @@ from psycopg2.extras import execute_values
 sys.path.insert(0, SCRIPT_DIR)
 import pf_client
 import pf_results_mapper as mapper
+from intelligence_common import KEEPALIVE_KWARGS
 
 
 def fetch_date(date_str, metro_only=False):
@@ -212,7 +213,7 @@ def main():
     print(f"  JSON saved: {out_file}")
 
     print(f"\n  Importing into race_results_history...")
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DATABASE_URL, **KEEPALIVE_KWARGS)
     rows, skipped_races, skipped_runners = import_meetings(meetings, conn)
     conn.close()
 

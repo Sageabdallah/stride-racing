@@ -48,11 +48,12 @@ def _load_env():
 
 def _get_connection():
     import psycopg2
+    from intelligence_common import KEEPALIVE_KWARGS
     _load_env()
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL not set")
-    conn = psycopg2.connect(url)
+    conn = psycopg2.connect(url, **KEEPALIVE_KWARGS)
     conn.autocommit = True
     return conn
 

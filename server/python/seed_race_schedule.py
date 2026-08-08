@@ -35,6 +35,8 @@ from pathlib import Path
 
 import psycopg2
 
+from intelligence_common import KEEPALIVE_KWARGS
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CARD_DIRS = (PROJECT_ROOT / "racecards",
              Path(__file__).resolve().parent / "racecards")
@@ -103,7 +105,7 @@ def main() -> int:
     if not url:
         print("CONFIG ERROR: DATABASE_URL not set", file=sys.stderr)
         return 2
-    conn = psycopg2.connect(url)
+    conn = psycopg2.connect(url, **KEEPALIVE_KWARGS)
     cur = conn.cursor()
 
     card_found, inserted = seed_from_racecard(cur, args.date)
