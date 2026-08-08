@@ -77,6 +77,7 @@ the direction rather than the single name.
 from __future__ import annotations
 
 import os
+import re
 
 # The list as it stood in download_racecards.py, byte for byte. Do not edit
 # this to try a wider set — use STRIDE_TARGET_TRACKS, see above.
@@ -130,8 +131,25 @@ def matches(course: str, targets) -> bool:
     suite stayed green. One matcher means the next correction lands
     everywhere at once.
     """
-    course_lower = (course or "").lower()
-    return any(t in course_lower for t in targets)
+    # Both sides are stripped to bare alphanumerics before the substring
+    # test. The odds pipeline stores plain_norm'd course names ("eaglefarm"),
+    # while seven of odds_movement's targets carry a space — "eagle farm",
+    # "moonee valley", "warwick farm", "murray bridge", "gold coast",
+    # "sunshine coast", "kembla grange" — so a raw substring test could never
+    # match them and each lost its entire market pillar whenever it raced.
+    # Proven live 2026-08-08: Eagle Farm's 9 races had 459 price rows
+    # captured and then dropped at this comparison; the four venues that
+    # survived did so only because a shorter single-word target happened to
+    # be a substring ("caulfield", "belmont"). Display-form courses
+    # ("Eagle Farm") match exactly as before, since stripping both sides
+    # preserves every match the raw test made.
+    course_plain = re.sub(r"[^a-z0-9]+", "", (course or "").lower())
+    for t in targets:
+        t_plain = re.sub(r"[^a-z0-9]+", "", str(t).lower())
+        # An empty target must never match everything.
+        if t_plain and t_plain in course_plain:
+            return True
+    return False
 
 
 def target_source() -> str:
