@@ -207,11 +207,11 @@ def test_cli_missing_config_exits_2(cli_env, monkeypatch):
     assert rc == 2
 
 
-# --- one-sided ladder guard -------------------------------------------------
-# A short back price with no lay side and no trade history is a parked
-# speculative offer, not a market (2026-08-08: one bot at ~$209 across
-# unformed runners fed the market pillar phantom baselines). The guard must
-# drop exactly that shape and nothing else.
+# --- unformed-book guard ----------------------------------------------------
+# A short quote with no market behind it (no lay AND never traded, or an
+# absurd spread to the lay/traded side) is a parked offer, not a price.
+# Default is SHADOW mode: the row is kept and the verdict reported, so the
+# decision to reject is made on counted evidence (STRIDE_UNFORMED_BOOK_REJECT).
 
 def _one_runner_book(back=None, back_size=209.56, lay=None, ltp=None):
     mapped = [{
@@ -238,43 +238,70 @@ def _guard_rows(**kw):
                                     "betfair_delayed", "baseline")
 
 
-def test_short_one_sided_never_traded_is_dropped():
+def test_shadow_mode_keeps_the_row_and_reports_the_verdict(monkeypatch):
+    monkeypatch.delenv("STRIDE_UNFORMED_BOOK_REJECT", raising=False)
+    rows, skipped = _guard_rows(back=1.16)
+    assert len(rows) == 1, "shadow mode must not change captured data"
+    assert rows[0]["decimal_odds"] == 1.16
+    assert len(skipped) == 1
+    assert skipped[0]["reason"].startswith("WOULD REJECT (flag off)")
+    assert "unformed book at 1.16" in skipped[0]["reason"]
+
+
+def test_reject_mode_drops_the_short_one_sided_quote(monkeypatch):
+    monkeypatch.setenv("STRIDE_UNFORMED_BOOK_REJECT", "true")
     rows, skipped = _guard_rows(back=1.16)
     assert rows == []
     assert len(skipped) == 1
-    assert "one-sided book at 1.16" in skipped[0]["reason"]
+    assert "unformed book at 1.16" in skipped[0]["reason"]
     assert "back_size=209.56" in skipped[0]["reason"]
 
 
-def test_short_price_with_lay_side_is_kept():
-    rows, skipped = _guard_rows(back=1.16, lay=1.18)
+def test_spread_arm_catches_the_just_shane_shape(monkeypatch):
+    # canterbury R4 2026-08-05: back 1.03 while lay 510.00 / last traded
+    # 120.66 — the no-depth arm alone is blind to it (5/6 recall).
+    monkeypatch.setenv("STRIDE_UNFORMED_BOOK_REJECT", "true")
+    rows, skipped = _guard_rows(back=1.03, lay=510.0, ltp=120.66)
+    assert rows == []
+    assert "unformed book at 1.03" in skipped[0]["reason"]
+
+
+def test_worst_legitimate_spread_is_kept(monkeypatch):
+    # back 1.54 / lay 2.78 = 1.81x, the widest genuine short-price spread in
+    # the 2471-row corpus. Must pass under the 3.0x ceiling.
+    monkeypatch.setenv("STRIDE_UNFORMED_BOOK_REJECT", "true")
+    rows, skipped = _guard_rows(back=1.54, lay=2.78, ltp=1.6)
+    assert skipped == []
+    assert rows[0]["decimal_odds"] == 1.54
+
+
+def test_short_price_with_tight_market_is_kept(monkeypatch):
+    monkeypatch.setenv("STRIDE_UNFORMED_BOOK_REJECT", "true")
+    rows, skipped = _guard_rows(back=1.16, lay=1.18, ltp=1.15)
     assert skipped == []
     assert rows[0]["decimal_odds"] == 1.16
 
 
-def test_short_price_with_trade_history_is_kept():
-    rows, skipped = _guard_rows(back=1.16, ltp=1.15)
-    assert skipped == []
-    assert rows[0]["decimal_odds"] == 1.16
-
-
-def test_long_one_sided_outsider_is_kept():
-    # 96 of the 2026-08-08 depth rows were legitimately one-sided outsiders
-    # (5.40-180.00); an unconditioned no-lay test would throw them away.
+def test_long_one_sided_outsider_is_kept(monkeypatch):
+    # 96 depth rows on 2026-08-08 were legitimately one-sided outsiders
+    # (5.40-180.00); the guard is conditioned on the price being short.
+    monkeypatch.setenv("STRIDE_UNFORMED_BOOK_REJECT", "true")
     rows, skipped = _guard_rows(back=180.0)
     assert skipped == []
     assert rows[0]["decimal_odds"] == 180.0
 
 
-def test_guard_boundary_is_exclusive_at_three():
+def test_guard_boundary_is_exclusive_at_max_price(monkeypatch):
+    monkeypatch.setenv("STRIDE_UNFORMED_BOOK_REJECT", "true")
     rows, skipped = _guard_rows(back=3.0)
     assert skipped == []
     assert rows[0]["decimal_odds"] == 3.0
 
 
-def test_ltp_only_runner_is_not_guarded():
-    # decimal_odds falling back to lastPriceTraded means the runner HAS
-    # traded — the guard must not fire on it.
+def test_ltp_fallback_with_sane_trade_is_kept(monkeypatch):
+    # decimal_odds falling back to lastPriceTraded with no absurd spread:
+    # the runner HAS traded at that level, the guard must not fire.
+    monkeypatch.setenv("STRIDE_UNFORMED_BOOK_REJECT", "true")
     rows, skipped = _guard_rows(back=None, ltp=1.3)
     assert skipped == []
     assert rows[0]["decimal_odds"] == 1.3

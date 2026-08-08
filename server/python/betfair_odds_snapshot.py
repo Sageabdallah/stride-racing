@@ -57,6 +57,53 @@ SNAPSHOT_TABLE = "runner_odds_snapshots"
 # roi/04's SNAPSHOT_KINDS CHECK constraint. Betfair captures default to
 # 'baseline' (a reference capture, not the pipeline's tip_time moment).
 SNAPSHOT_KINDS = ("tip_time", "late_t5", "morning", "baseline")
+
+# A short quote with nothing behind it is not a price. Measured over all 2471
+# depth-carrying runner_odds_snapshots rows this fires on exactly 6, and all 6
+# are known-bad — Lissaro 1.01, Just Shane 1.03, Sazerac 1.12, Star Decorum
+# 1.16, Raw Grunt 1.16, Lucky Moon 1.16 — each of which repriced to
+# 34.00-150.00 on the same selection_id once real money arrived. Zero false
+# positives: the worst legitimate short-price spread in the same corpus is
+# 1.81x (back 1.54 / lay 2.78) against 495x for Just Shane.
+UNFORMED_BOOK_MAX_PRICE = 3.0
+UNFORMED_BOOK_MAX_SPREAD = 3.0
+
+
+def _unformed_book(price, lay_price, ltp):
+    """True when a short quote has no market behind it.
+
+    The spread arms are not optional garnish on the no-depth test:
+    - a bare "no lay offer and never traded" test misses Just Shane, stored
+      at 1.03 while the same capture carried lay 510.00 and last traded
+      120.66 — that is 5/6 recall, not 6/6;
+    - it can also never fire on the lastPriceTraded fallback path, because
+      ltp is non-None by construction there — structurally blind to one of
+      the two routes into an unbacked price.
+
+    total_matched is deliberately unused: it is 0.00 in all 2471 depth rows
+    (EX_BEST_OFFERS never populates it), so any filter keyed on it rejects
+    the entire card.
+
+    Residual false positive to watch: a genuine late plunge (backable 2.50,
+    last traded 8.00) trips the ltp arm. Zero such rows exist in the corpus;
+    the shadow mode below exists to find the first one.
+    """
+    if lay_price is None and ltp is None:
+        return True
+    if lay_price is not None and lay_price / price > UNFORMED_BOOK_MAX_SPREAD:
+        return True
+    if ltp is not None and ltp / price > UNFORMED_BOOK_MAX_SPREAD:
+        return True
+    return False
+
+
+def _unformed_reject_enabled() -> bool:
+    """Default OFF: rejecting changes captured prices for every consumer, so
+    it is enabled deliberately, not as a side effect of a merge. When off the
+    guard still reports what it WOULD reject, so the decision to enable is
+    made on counted evidence."""
+    return os.environ.get("STRIDE_UNFORMED_BOOK_REJECT",
+                          "false").strip().lower() in ("true", "1", "yes")
 DEFAULT_KIND = "baseline"
 
 # One exchange, one "bookmaker" per roi/04's one-row-per-bookmaker design.
@@ -137,25 +184,30 @@ def build_snapshot_rows(mapped_markets: Sequence[dict], books: Sequence[dict],
                 skipped.append({"market_id": market_id, "selection_id": sel,
                                 "reason": "no back offer or traded price above 1.0"})
                 continue
-            # A short price with no lay offer and no trade history is not a
-            # market price — it is a lone speculative offer parked at the
-            # bottom of an unformed ladder. Measured 2026-08-08: one bot
-            # posted ~$209 at 1.12-1.16 across unformed runners on three
-            # tracks; both overnight and morning captures read the standing
-            # order back as "the price", movement graded 0, and the market
-            # pillar published STABLE/50 on runners whose real prices opened
-            # 55-60 (or, against a later sane price, fabricated STRONG_DRIFT
-            # on 48 runners in one day). Genuine short prices always carry a
-            # lay side or trades; genuine one-sided runners are outsiders —
-            # hence the guard is conditioned on the price being short. On the
-            # 2 462 depth rows of 2026-08-08 it drops exactly the 5 known-bad
-            # rows and none of the 96 legitimately one-sided outsiders.
-            if decimal_odds < 3.0 and lay_price is None and ltp is None:
+            # Guard against quotes from unformed order books. 2026-08-08:
+            # standing offers at 1.01-1.16 across unformed runners were read
+            # back as "the price" by both snapshot passes; movement graded
+            # 0.0/STABLE on the frozen ones, and against later sane prices
+            # fabricated STRONG_DRIFT/15 on 48 runners — 85.7% of the card's
+            # STRONG_DRIFT grades. Whether the parked quote was a genuine
+            # lone lay order or a Betfair cross-matching artifact is
+            # unresolved (both fit the stored evidence); this guard rejects
+            # the quote identically under either mechanism, which is why it
+            # sits here at the read site rather than in the API request.
+            if (decimal_odds < UNFORMED_BOOK_MAX_PRICE
+                    and _unformed_book(decimal_odds, lay_price, ltp)):
+                _reason = (f"unformed book at {decimal_odds} "
+                           f"(back_size={back_size} lay={lay_price} "
+                           f"ltp={ltp}) — quote has no market behind it")
+                if _unformed_reject_enabled():
+                    skipped.append({"market_id": market_id,
+                                    "selection_id": sel,
+                                    "reason": _reason})
+                    continue
+                # Shadow mode (default): keep the row, report the verdict.
                 skipped.append({"market_id": market_id, "selection_id": sel,
-                                "reason": f"one-sided book at {decimal_odds}"
-                                          f" (no lay offer, never traded,"
-                                          f" back_size={back_size})"})
-                continue
+                                "reason": "WOULD REJECT (flag off) — "
+                                          + _reason})
             start = market.get("start_time")
             rows.append({
                 "race_id": market["race_id"],
