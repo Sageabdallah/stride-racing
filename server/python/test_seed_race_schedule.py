@@ -60,7 +60,7 @@ def _wire(monkeypatch, tmp_path, total_rows):
     monkeypatch.setenv("DATABASE_URL", "postgresql://fixture/only")
     monkeypatch.setattr(seed_race_schedule, "CARD_DIRS", (tmp_path,))
     monkeypatch.setattr(seed_race_schedule.psycopg2, "connect",
-                        lambda url: FakeConn(total_rows))
+                        lambda url, **kwargs: FakeConn(total_rows))
     # No card means main() falls back to the prediction_audit projection; stub
     # it so the fallback never needs a real connection.
     fake = type(sys)("results_projection")
