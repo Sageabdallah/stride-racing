@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -88,6 +89,25 @@ def _load_llm_modules():
     except Exception as e:
         print(f"  [LLM] Not available: {e}", file=sys.stderr)
         return None
+
+
+def _race_seed(date_str, track, race_num):
+    """Deterministic per-race MC seed from race identity.
+
+    Same card + same code => identical draws, so a re-run reproduces its own
+    tips exactly and a bad tip can be diagnosed after the fact. It also makes
+    comparing two code versions on one card common-random-numbers by
+    construction — with the old `int(time.time()) % 100000` seed every re-run
+    was a different tips file, and a model delta had to be dug out from under
+    ~1pp of resampling noise per runner.
+
+    Hashing the race identity keeps races decorrelated from each other on the
+    same card. Set STRIDE_MC_SEED_SALT to any new value when independent
+    draws are wanted on purpose (e.g. measuring the MC's own sampling error).
+    """
+    key = (f"{os.environ.get('STRIDE_MC_SEED_SALT', '')}"
+           f"|{date_str}|{track}|{race_num}")
+    return zlib.crc32(key.encode("utf-8")) % 100000
 
 
 def _configure_mc_runtime_flags():
@@ -2642,7 +2662,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 "mc_model": "plackett_luce",
                 "pace_mode": "basic",
                 "uncertainty": "on",
-                "seed": int(time.time()) % 100000,
+                "seed": _race_seed(date_str, track, race_num),
                 "raceClass": race_class,
                 "raceDate": date_str,
                 "raceNumber": race_num,
