@@ -205,3 +205,76 @@ def test_cli_missing_config_exits_2(cli_env, monkeypatch):
     monkeypatch.setenv("BETFAIR_APP_KEY", "")
     rc = snap.main(["--date", DATE], post=make_post(), connect=FakeConn)
     assert rc == 2
+
+
+# --- one-sided ladder guard -------------------------------------------------
+# A short back price with no lay side and no trade history is a parked
+# speculative offer, not a market (2026-08-08: one bot at ~$209 across
+# unformed runners fed the market pillar phantom baselines). The guard must
+# drop exactly that shape and nothing else.
+
+def _one_runner_book(back=None, back_size=209.56, lay=None, ltp=None):
+    mapped = [{
+        "market_id": "1.999", "race_id": "2026-08-08|x|R1",
+        "race_date": "2026-08-08", "track": "X", "race_number": 1,
+        "start_time": None,
+        "runners": [{"selection_id": 1, "horse_id": "h1",
+                     "horse_name": "Ghost Order"}],
+    }]
+    ex = {}
+    if back is not None:
+        ex["availableToBack"] = [{"price": back, "size": back_size}]
+    if lay is not None:
+        ex["availableToLay"] = [{"price": lay, "size": 50.0}]
+    books = [{"marketId": "1.999", "totalMatched": 0.0,
+              "runners": [{"selectionId": 1, "status": "ACTIVE",
+                           "ex": ex, "lastPriceTraded": ltp}]}]
+    return mapped, books
+
+
+def _guard_rows(**kw):
+    mapped, books = _one_runner_book(**kw)
+    return snap.build_snapshot_rows(mapped, books, CAPTURED_AT,
+                                    "betfair_delayed", "baseline")
+
+
+def test_short_one_sided_never_traded_is_dropped():
+    rows, skipped = _guard_rows(back=1.16)
+    assert rows == []
+    assert len(skipped) == 1
+    assert "one-sided book at 1.16" in skipped[0]["reason"]
+    assert "back_size=209.56" in skipped[0]["reason"]
+
+
+def test_short_price_with_lay_side_is_kept():
+    rows, skipped = _guard_rows(back=1.16, lay=1.18)
+    assert skipped == []
+    assert rows[0]["decimal_odds"] == 1.16
+
+
+def test_short_price_with_trade_history_is_kept():
+    rows, skipped = _guard_rows(back=1.16, ltp=1.15)
+    assert skipped == []
+    assert rows[0]["decimal_odds"] == 1.16
+
+
+def test_long_one_sided_outsider_is_kept():
+    # 96 of the 2026-08-08 depth rows were legitimately one-sided outsiders
+    # (5.40-180.00); an unconditioned no-lay test would throw them away.
+    rows, skipped = _guard_rows(back=180.0)
+    assert skipped == []
+    assert rows[0]["decimal_odds"] == 180.0
+
+
+def test_guard_boundary_is_exclusive_at_three():
+    rows, skipped = _guard_rows(back=3.0)
+    assert skipped == []
+    assert rows[0]["decimal_odds"] == 3.0
+
+
+def test_ltp_only_runner_is_not_guarded():
+    # decimal_odds falling back to lastPriceTraded means the runner HAS
+    # traded — the guard must not fire on it.
+    rows, skipped = _guard_rows(back=None, ltp=1.3)
+    assert skipped == []
+    assert rows[0]["decimal_odds"] == 1.3

@@ -137,6 +137,25 @@ def build_snapshot_rows(mapped_markets: Sequence[dict], books: Sequence[dict],
                 skipped.append({"market_id": market_id, "selection_id": sel,
                                 "reason": "no back offer or traded price above 1.0"})
                 continue
+            # A short price with no lay offer and no trade history is not a
+            # market price — it is a lone speculative offer parked at the
+            # bottom of an unformed ladder. Measured 2026-08-08: one bot
+            # posted ~$209 at 1.12-1.16 across unformed runners on three
+            # tracks; both overnight and morning captures read the standing
+            # order back as "the price", movement graded 0, and the market
+            # pillar published STABLE/50 on runners whose real prices opened
+            # 55-60 (or, against a later sane price, fabricated STRONG_DRIFT
+            # on 48 runners in one day). Genuine short prices always carry a
+            # lay side or trades; genuine one-sided runners are outsiders —
+            # hence the guard is conditioned on the price being short. On the
+            # 2 462 depth rows of 2026-08-08 it drops exactly the 5 known-bad
+            # rows and none of the 96 legitimately one-sided outsiders.
+            if decimal_odds < 3.0 and lay_price is None and ltp is None:
+                skipped.append({"market_id": market_id, "selection_id": sel,
+                                "reason": f"one-sided book at {decimal_odds}"
+                                          f" (no lay offer, never traded,"
+                                          f" back_size={back_size})"})
+                continue
             start = market.get("start_time")
             rows.append({
                 "race_id": market["race_id"],
