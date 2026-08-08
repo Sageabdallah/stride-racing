@@ -512,16 +512,34 @@ def assess_book_coherence(runners):
     number the pipeline divides by. `runners` is the post-scratching field,
     so coverage is priced-vs-declared-active, never priced-vs-priced.
 
-    Named blind spots (the proxy test this check would still pass with):
-    1. A book whose every price is wrong by a common factor sums normally
-       and passes — no field-level sum can see it. The capture-side
-       one-sided-ladder guard in betfair_odds_snapshot.py owns that failure.
-    2. A lone parked short price in a large field can hide inside a normal
-       total: the top-2 arm catches pairs and extreme singles, not every
-       single. Measured: a $1.16 phantom plus long outsiders passes.
-    3. The floor and coverage arms are independent ORs, so a thin book that
-       also sums low passes both while its de-vig divisor is understated.
-    The detect logs exist to tune all three before enforcement tightens.
+    Reasons are classed: corruption (book_over_ceiling, top2_impossible —
+    prices that cannot coexist) vs coverage (unpriceable, book_under_floor,
+    coverage_thin — the market model is blind to part of the field). The
+    split is load-bearing: replayed on tips_2026-08-05, coverage arms flag
+    20 of 31 races and withhold 0u (unpriced races stake nothing anyway)
+    while exactly one race is genuine corruption — a run-level rule that
+    counts both classes together aborts on coverage.
+
+    Named blind spots (the proxy test this check would still pass with),
+    all measured on the 2026-08-08 card:
+    1. NOT an EV guard: of 38u negative-EV stakes, only 7u sat inside the
+       refused races; 31u was negative EV inside coherent 105-149% books.
+    2. A book wrong by a common factor sums normally and passes (prices
+       could shift 17-48% with nothing firing) — the capture-side
+       unformed-book guard in betfair_odds_snapshot.py owns that failure,
+       as does the fetch_from_db any-snapshot_kind staleness path.
+    3. A lone parked short in a long field can hide inside a normal total:
+       the top-2 arm catches pairs and extreme singles, not every single.
+    4. Floor and coverage arms are independent ORs: Eagle Farm R3 (73.3%
+       priced, book 143.5%) implies a true book near 196% — divisor 1.36x
+       too small — and passes. A joint book/coverage arm was measured and
+       rejected: it destroys the 82pp bimodal gap that makes the ceiling
+       non-fitted, and loses the Morphettville R1 under-round catch.
+    5. Deliberately no per-runner implied-probability cap: $1.10 implies
+       90.9% and is a real price; the pressure to keep raising such a cap
+       is how a check gets weakened until it passes everything. Only the
+       field is asked to be possible.
+    The detect logs exist to tune all of this before enforcement tightens.
     """
     from market_prob import reference_price
     probs = []
@@ -548,6 +566,8 @@ def assess_book_coherence(runners):
             reasons.append("top2_impossible")
         if coverage < BOOK_COVERAGE_FLOOR:
             reasons.append("coverage_thin")
+    corrupt = any(r in ("book_over_ceiling", "top2_impossible")
+                  for r in reasons)
     return {
         "n_active": n_active,
         "n_priced": n_priced,
@@ -555,6 +575,7 @@ def assess_book_coherence(runners):
         "coverage": round(coverage, 4),
         "top2": round(top2, 4),
         "incoherent": bool(reasons),
+        "corrupt": corrupt,
         "reasons": reasons,
     }
 
@@ -2484,6 +2505,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
     total_llm_time = 0
     book_scored_races = 0
     book_incoherent_races = 0
+    book_corrupt_races = 0
 
     for meet in racecard:
         track = meet.get("course") or meet.get("track") or "Unknown"
@@ -2751,22 +2773,29 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             # impossible sum is laundered by the de-vig into plausible-looking
             # trueMarketProbs (100/1.16 = 86.2% over a 3.12 book reads as a
             # calm 27.6%), so this is the last site where the raw prices can
-            # testify. Detect logging is unconditional, like [MC_FLAT] — the
-            # artifact is byte-identical; only stakes are behind the flag.
+            # testify. The verdict is always computed (so enforce works
+            # alone); output is behind STRIDE_BOOK_COHERENCE because the
+            # durable record goes into the ARTIFACT — the handler truncates
+            # stderr to its last 4000 chars, so 45 stderr verdicts would not
+            # survive a cloud run.
             book_verdict = assess_book_coherence(runners)
             book_scored_races += 1
             if book_verdict["incoherent"]:
                 book_incoherent_races += 1
-            print("    [BOOK] " + json.dumps({
-                "track": track, "race": race_num,
-                "book": book_verdict["book"],
-                "coverage": book_verdict["coverage"],
-                "top2": book_verdict["top2"],
-                "n_priced": book_verdict["n_priced"],
-                "n_active": book_verdict["n_active"],
-                "verdict": ("INCOHERENT" if book_verdict["incoherent"] else "OK"),
-                "reasons": book_verdict["reasons"],
-            }), file=sys.stderr)
+            if book_verdict["corrupt"]:
+                book_corrupt_races += 1
+            if _flag_enabled("STRIDE_BOOK_COHERENCE") or _flag_enabled("STRIDE_BOOK_COHERENCE_ENFORCE"):
+                print("    [BOOK] " + json.dumps({
+                    "track": track, "race": race_num,
+                    "book": book_verdict["book"],
+                    "coverage": book_verdict["coverage"],
+                    "top2": book_verdict["top2"],
+                    "n_priced": book_verdict["n_priced"],
+                    "n_active": book_verdict["n_active"],
+                    "verdict": ("INCOHERENT" if book_verdict["incoherent"] else "OK"),
+                    "corrupt": book_verdict["corrupt"],
+                    "reasons": book_verdict["reasons"],
+                }), file=sys.stderr)
             horses = calibrate_and_score(horses, overround, race_class=race_class)
 
             llm_tip_type = "win"
@@ -3232,6 +3261,21 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 "primary_pick": primary_pick,
                 "full_field": full_field,
             })
+            # The durable record of the book verdict lives in the artifact:
+            # the handler keeps only the last 4000 chars of stderr, so a
+            # per-race stderr line does not survive a cloud run. Gated so the
+            # artifact schema is unchanged until the flag is a decision.
+            if _flag_enabled("STRIDE_BOOK_COHERENCE") or _flag_enabled("STRIDE_BOOK_COHERENCE_ENFORCE"):
+                all_race_tips[-1]["book_coherence"] = {
+                    "book": book_verdict["book"],
+                    "coverage": book_verdict["coverage"],
+                    "top2": book_verdict["top2"],
+                    "n_priced": book_verdict["n_priced"],
+                    "n_active": book_verdict["n_active"],
+                    "incoherent": book_verdict["incoherent"],
+                    "corrupt": book_verdict["corrupt"],
+                    "reasons": book_verdict["reasons"],
+                }
           except Exception as _race_err:
             _rn = int(race.get("race_number", 0) or 0)
             print(f"  [RACE_ERROR] {track} R{_rn} failed: {_race_err}", file=sys.stderr)
@@ -3253,20 +3297,26 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
         for r in failed_races:
             print(f"    - {r['track']} R{r['race_number']}: {r['error']}", file=sys.stderr)
 
-    if book_scored_races:
-        _book_rate = book_incoherent_races / book_scored_races
+    if book_scored_races and (_flag_enabled("STRIDE_BOOK_COHERENCE")
+                              or _flag_enabled("STRIDE_BOOK_COHERENCE_ENFORCE")):
+        _corrupt_rate = book_corrupt_races / book_scored_races
         print(f"  [BOOK_SUMMARY] {book_incoherent_races}/{book_scored_races} "
-              f"scored races incoherent ({_book_rate:.0%})", file=sys.stderr)
-        # When MOST of the card is incoherent the price source itself is
-        # broken, and a card of mostly-zeroed stakes published as green is
-        # the silent-no-op class: fail loudly instead. 2026-08-08 measured
-        # 5/45 (11%) so this would not have fired; the 2026-08-05 Canterbury
-        # capture (whole races at $1.02) would have.
-        if _book_rate > 0.40 and _flag_enabled("STRIDE_BOOK_COHERENCE_ENFORCE"):
-            raise RuntimeError(
-                f"book coherence: {book_incoherent_races}/{book_scored_races} races "
-                f"incoherent — the price source is broken; refusing to publish "
-                f"a mostly-zero-stake card as a green run")
+              f"scored races incoherent "
+              f"({book_corrupt_races} corrupt, "
+              f"{book_incoherent_races - book_corrupt_races} coverage)",
+              file=sys.stderr)
+        # Corruption-vs-coverage split is load-bearing: replayed, 2026-08-02
+        # is 8/8 coverage-only (no baseline yet, 0u staked) and 2026-08-05 is
+        # 20 coverage + 1 corrupt — a rule counting both classes would abort
+        # both cards. And this NEVER raises: a raise here fires before the
+        # artifact write, so tips_<date>.json would not exist and the
+        # backfill/sync never run — the exact 2026-08-06 no-artifact lesson.
+        # A broken price source is announced, loudly, on a card that exists.
+        if _corrupt_rate > 0.40:
+            print(f"  [BOOK_ALERT] {book_corrupt_races}/{book_scored_races} "
+                  f"races have CORRUPT books ({_corrupt_rate:.0%}) — the "
+                  f"price source is broken; every stake on this card "
+                  f"deserves suspicion", file=sys.stderr)
 
     all_picks = collect_day_picks(all_race_tips)
 

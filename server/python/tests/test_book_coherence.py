@@ -106,3 +106,22 @@ def test_scratched_free_field_counts_declared_runners():
     # The helper rounds coverage to 4dp for the log line.
     assert v["coverage"] == pytest.approx(4 / 12, abs=1e-4)
     assert "coverage_thin" in v["reasons"]
+
+
+def test_corruption_and_coverage_classes_are_split():
+    # The split is load-bearing: replayed on 2026-08-05, coverage arms flag
+    # 20 of 31 races (0u withheld — unpriced races stake nothing anyway)
+    # while exactly one race is genuine corruption. A run-level rule that
+    # counts both classes together aborts on coverage days.
+    corrupt = assess_book_coherence(_field(
+        [1.16, 1.16, 3.8, 3.95, 5.9, 6.2, 9.6, 9.6, 11.0, 13.5, 15.5]))
+    assert corrupt["corrupt"] is True
+
+    coverage_only = assess_book_coherence(
+        _field([3.3, 3.8, 5.9, 11.0], n_active=7))
+    assert coverage_only["incoherent"] is True
+    assert coverage_only["corrupt"] is False
+
+    unpriced = assess_book_coherence(_field([2.0, 3.0], n_active=10))
+    assert unpriced["incoherent"] is True
+    assert unpriced["corrupt"] is False
