@@ -411,7 +411,8 @@ def main() -> int:
     args = parser.parse_args()
 
     import psycopg2
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    from intelligence_common import KEEPALIVE_KWARGS
+    conn = psycopg2.connect(os.environ["DATABASE_URL"], **KEEPALIVE_KWARGS)
     try:
         if args.reconcile_results:
             return reconcile_results(conn, args.reconcile_results)
