@@ -15,8 +15,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from intelligence_common import (
-    get_connection, load_todays_runners, json_write,
+    load_todays_runners, json_write,
     normalize_going, classify_distance, INTELLIGENCE_DIR,
+    CONN_ERRORS, ReconnectingRunner,
 )
 from market_overlay_common import build_market_overlay_map_from_sp
 
@@ -244,6 +245,9 @@ def build_barrier_map(today, conn):
                 "outside_win_rate": float(owr) if owr else None,
                 "avg_winner_barrier_ratio": float(awbr) if awbr else None,
             })
+    except CONN_ERRORS:
+        # A dead socket must reach the step retry, not this warn-and-continue.
+        raise
     except Exception as e:
         print(f"  [WARN] track_day_bias query failed: {e}", file=sys.stderr)
         conn.rollback()
@@ -406,6 +410,8 @@ def build_class_distance_patterns(today, conn):
             HAVING COUNT(*) >= 10
         """)
         raw_rows = cur.fetchall()
+    except CONN_ERRORS:
+        raise
     except Exception as e:
         print(f"  [WARN] class movement query failed: {e}", file=sys.stderr)
         conn.rollback()
@@ -473,32 +479,23 @@ def main(race_date):
     today = load_todays_runners(race_date)
     print(f"  Loaded {len(today['races'])} races across {len(today['tracks'])} tracks", file=sys.stderr)
 
-    conn = get_connection()
+    runner = ReconnectingRunner()
     files_written = []
 
     try:
-        print("  Building barrier_map.json ...", file=sys.stderr)
-        data = build_barrier_map(today, conn)
-        json_write(data, INTELLIGENCE_DIR / "barrier_map.json")
-        files_written.append("barrier_map.json")
-
-        print("  Building flemington_straight.json ...", file=sys.stderr)
-        data = build_flemington_straight(today, conn)
-        json_write(data, INTELLIGENCE_DIR / "flemington_straight.json")
-        files_written.append("flemington_straight.json")
-
-        print("  Building class_distance_patterns.json ...", file=sys.stderr)
-        data = build_class_distance_patterns(today, conn)
-        json_write(data, INTELLIGENCE_DIR / "class_distance_patterns.json")
-        files_written.append("class_distance_patterns.json")
-
-        print("  Building market_overlays.json ...", file=sys.stderr)
-        data = build_market_overlays(today, conn)
-        json_write(data, INTELLIGENCE_DIR / "market_overlays.json")
-        files_written.append("market_overlays.json")
-
+        steps = [
+            ("barrier_map.json", lambda conn: build_barrier_map(today, conn)),
+            ("flemington_straight.json", lambda conn: build_flemington_straight(today, conn)),
+            ("class_distance_patterns.json", lambda conn: build_class_distance_patterns(today, conn)),
+            ("market_overlays.json", lambda conn: build_market_overlays(today, conn)),
+        ]
+        for filename, step in steps:
+            print(f"  Building {filename} ...", file=sys.stderr)
+            data = runner.run(filename, step)
+            json_write(data, INTELLIGENCE_DIR / filename)
+            files_written.append(filename)
     finally:
-        conn.close()
+        runner.close()
 
     print(f"[Agent 1] Complete — wrote {len(files_written)} files", file=sys.stderr)
     return files_written
