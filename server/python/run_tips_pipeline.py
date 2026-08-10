@@ -1125,24 +1125,50 @@ def apply_safety_filters(scored_horses, race_class=""):
 # Phase A research: 2026-04-14, n=330 horses across 3 race dates.
 PACE_CLARITY_FILTER_ENABLED = True
 
-def compute_confidence(h, pace_clarity=None):
+def compute_confidence(h, pace_clarity=None, ev_mode=None):
     calib = h.get("winPercentage", 0) / 100.0
     odds = h.get("marketOdds") or 999
     edge = h.get("modelEdge", 0)
     true_mkt = h.get("trueMarketProb", 0) / 100.0
-    ev = (calib / true_mkt) - 1.0 if true_mkt > 0 else -999.0
+
+    # Which price the gate measures EV against (STRIDE_EV_GATE_AT_PRICE,
+    # default OFF — legacy tiers are byte-identical when off).
+    #
+    # "devigged" (legacy): EV against trueMarketProb, which has the overround
+    # removed. Because modelEdge = calibrated - true_market, calib/true_mkt - 1
+    # is identically edge/true_mkt — so `ev > 0.0` is algebraically the same
+    # test as `edge > 0.0` and contributes nothing. The HIGH gate below
+    # therefore reduces to `edge > 1.0pp` at every price band.
+    #
+    # "at_price": EV against the quoted price the bet actually settles at.
+    # Break-even needs edge > true_mkt * (overround - 1) — in a 118% book that
+    # is 6.1pp at $2.50 and 3.0pp at $5.00, against a gate asking for 1.0pp.
+    # The legacy form cannot see the vig it is being charged, so it rates
+    # structurally losing bets HIGH at short prices.
+    mode = ev_mode or ("at_price" if _flag_enabled("STRIDE_EV_GATE_AT_PRICE") else "devigged")
+    if mode == "at_price":
+        ev = (calib * odds) - 1.0 if 1.0 < odds < 999 else -999.0
+    else:
+        ev = (calib / true_mkt) - 1.0 if true_mkt > 0 else -999.0
 
     # Absolute longshot block — calibration unreliable above $30
     if odds > 30:
         return "low"
 
-    # EV-based tiers — uniform across all price bands (overround-adjusted EV)
-    # HIGH  = genuinely +EV after overround adjustment + 1pp edge guard against noise
+    # EV-based tiers — uniform across all price bands
+    # HIGH  = genuinely +EV on the chosen price basis + 1pp edge guard against noise
     # MED   = positive model edge, EV near break-even (uncertain calibration tier)
     # LOW   = no model edge or negative EV
+    # The MED branch must use the same price basis as HIGH, or the fix is
+    # cosmetic: under flat_staking_enabled() (default on) high and medium both
+    # stake 1u, so demoting a negative-EV bet from high to medium does not stop
+    # it being backed. In "devigged" mode `ev > 0.0` and `edge > 0.0` are
+    # algebraically the same test, but modelEdge is rounded to 2dp at
+    # assignment, so the branches stay written out per mode to keep the legacy
+    # path byte-identical rather than merely equivalent.
     if ev > 0.0 and edge > 1.0:
         result = "high"
-    elif edge > 0.0:
+    elif (ev > 0.0 if mode == "at_price" else edge > 0.0):
         result = "medium"
     else:
         result = "low"
@@ -1153,6 +1179,35 @@ def compute_confidence(h, pace_clarity=None):
             result = "medium"
 
     return result
+
+
+def _log_ev_gate_transitions(horses, pace_clarity=None):
+    """Report what the at-price EV gate changed, when it is switched on.
+
+    Prints the denominator as well as the transition count on purpose: "0 of 0"
+    and "0 of 3" are different claims, and only the second one means the gate
+    ran and had nothing to change. A bare transition count would pass equally
+    well when the gate is wired to nothing.
+    """
+    if not _flag_enabled("STRIDE_EV_GATE_AT_PRICE"):
+        return
+    changed = 0
+    for h in horses:
+        legacy = compute_confidence(h, pace_clarity=pace_clarity, ev_mode="devigged")
+        current = h.get("confidence")
+        if legacy != current:
+            changed += 1
+            print("    [EV_GATE_TRANSITION] " + json.dumps({
+                "horse": h.get("horse", "?"),
+                "tier_devigged": legacy,
+                "tier_at_price": current,
+                "market_odds": h.get("marketOdds"),
+                "win_pct": h.get("winPercentage"),
+                "edge": h.get("modelEdge"),
+                "true_market_prob": h.get("trueMarketProb"),
+            }), file=sys.stderr)
+    print(f"    [EV_GATE] at-price EV: {changed} of {len(horses)} tip(s) changed tier",
+          file=sys.stderr)
 
 
 def compute_race_predictability(runners, race_class, distance_m, going):
@@ -2909,6 +2964,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             for h in top3:
                 h["confidence"] = compute_confidence(h, pace_clarity=_pace_clarity)
                 h["staking"] = compute_staking(h)
+            _log_ev_gate_transitions(top3, pace_clarity=_pace_clarity)
             # Enforcement zeroes the money, not a label: bet_status="NO_BET"
             # races still staked 1u per pick on 2026-08-08 because bet_status
             # never touches `staking`. Zeroing here propagates through
