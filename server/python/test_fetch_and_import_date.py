@@ -110,7 +110,7 @@ def _stub_execute_values(monkeypatch):
     def fake_ev(cur, sql, rows, page_size=500):
         rows = list(rows)
         cur.conn.inserted.extend(rows)
-        cur.conn.state["keys"].update(mapper.row_race_key(r) for r in rows)
+        cur.conn.state["keys"].update(mapper.row_runner_key(r) for r in rows)
     monkeypatch.setattr(faid, "execute_values", fake_ev)
 
 
@@ -216,3 +216,50 @@ def test_double_run_second_import_inserts_zero(monkeypatch):
     assert len(conn.inserted) == inserted_after_first
     # the archive is an append-only log: every committing run archives
     assert len(conn.archived_payloads()) == 2
+
+
+def test_reimport_tops_up_race_with_late_resolved_runner(monkeypatch):
+    """The #126 case: night one stores a race while one placing is still
+    pending; the next evening's re-import must insert that runner instead
+    of skipping the whole race because some of its rows exist."""
+    partial = [{"meetingId": 991, "track": "Flemington",
+                "meetingDate": "2026-07-19",
+                "raceResults": [
+                    {"raceId": "r991_1", "raceNumber": 1,
+                     "trackConditionLabel": "Good 4",
+                     "runners": RESULTS_991[0]["raceResults"][0]["runners"][:1]},
+                ]}]
+    _stub_execute_values(monkeypatch)
+    conn = FakeConn(bridge_rows=[("known hero", "hrs_aus_123")])
+
+    _stub_pf(monkeypatch, results_by_mid={991: partial})
+    first = faid.import_meetings(faid.fetch_date("2026-07-19"), conn)
+    assert first[0] == 1                   # only the resolved runner stored
+
+    _stub_pf(monkeypatch)                  # full payload the next evening
+    second = faid.import_meetings(faid.fetch_date("2026-07-19"), conn)
+    assert second[0] == 1                  # the late runner lands
+    assert {r[1] for r in conn.inserted} == {"Known Hero", "Mystery Miss"}
+    # and the runner is stored exactly once across both runs
+    assert len(conn.inserted) == 2
+
+
+def test_skipped_race_count_matches_for_multiword_tracks(monkeypatch):
+    """races_seen used str.lower() while the dedup set canonicalises, so a
+    multi-word track ('Eagle Farm' -> 'eaglefarm') never counted as
+    'already existed' even when nothing was written for it."""
+    eagle_meetings = [{"meetingId": 991, "isBarrierTrial": False,
+                       "track": {"name": "Eagle Farm", "country": "AUS"}}]
+    eagle_results = [{"meetingId": 991, "track": "Eagle Farm",
+                      "meetingDate": "2026-07-19",
+                      "raceResults": RESULTS_991[0]["raceResults"]}]
+    _stub_pf(monkeypatch, meetings=eagle_meetings,
+             results_by_mid={991: eagle_results})
+    _stub_execute_values(monkeypatch)
+    conn = FakeConn()
+    meetings = faid.fetch_date("2026-07-19")
+
+    faid.import_meetings(meetings, conn)
+    second = faid.import_meetings(meetings, conn)
+    assert second[0] == 0
+    assert second[1] == 1                  # counted despite the space in the name
