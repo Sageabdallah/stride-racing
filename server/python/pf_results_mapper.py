@@ -18,10 +18,15 @@ here:
     trials/unplaced exclusion (barrier-trial meetings filtered at the
     meeting level; scratched/no-position runners dropped at the runner
     level).
-  * the (race_date, canonical_track_key(track), race_number)
-    skip-if-existing dedup predicate (load_existing_keys + row_race_key) —
-    the stored track column keeps the source spelling; only the key
-    canonicalises, closing the F-TRACK-ALIAS double-insert hole.
+  * two skip-if-existing dedup predicates, both canonicalising the track
+    key while the stored track column keeps the source spelling (closing
+    the F-TRACK-ALIAS double-insert hole):
+      - race granularity (load_existing_keys + row_race_key) for the bulk
+        backfill tools, which never revisit a date to resolve late results;
+      - runner granularity (load_existing_runner_keys + row_runner_key)
+        for the daily importer, whose next-day re-import exists to top up
+        races stored while placings were still pending — a race-level key
+        skips such a race forever once any of its rows exist (issue #126).
   * the pf_raw_payloads archival insert (archive_payloads) — every fetched
     payload lands in the archive before the row insert, in the same
     transaction; the Starter subscription only serves ~31 days back, so this
@@ -301,6 +306,24 @@ def row_race_key(row):
     return (row[4], canonical_track_key(row[3]), row[18])
 
 
+def load_existing_runner_keys(cur, dates):
+    """Runner-granularity dedup set: race key + norm_name(horse_name) for
+    every row already stored on the given ISO dates. norm_name is the same
+    rule the ID bridge trusts to identify one horse across sources, so a
+    re-fetch cannot double-insert a runner over a spelling drift."""
+    cur.execute("""
+        SELECT race_date::text, track, race_number, horse_name
+        FROM race_results_history WHERE race_date = ANY(%s)
+    """, (list(dates),))
+    return {(r[0], canonical_track_key(r[1]), r[2], norm_name(r[3]))
+            for r in cur.fetchall()}
+
+
+def row_runner_key(row):
+    """Runner-granularity dedup key of one mapped 21-column row."""
+    return row_race_key(row) + (norm_name(row[1]),)
+
+
 # The SELECT projects the ORIGINAL-case horse_name so norm_name can strip an
 # uppercase country suffix like "(NZ)"; projecting LOWER(horse_name) here
 # hands norm_name a lowercase "(nz)" it cannot strip, corrupting the key
@@ -360,7 +383,10 @@ def build_rows(day, bridge, unknown_keys):
                 opponents = [{"horse_id": None, "horse_name": r.get("runner"),
                               "position": normalize_finish_position(r.get("position"), field_size),
                               "margin": safe_float(r.get("margin"))} for r in runners]
-                races_seen.append((race_date, str(track).lower(), rnum))
+                # same shape as row_race_key/load_existing_keys — a plain
+                # lower() here never matches the canonicalised dedup set for
+                # multi-word tracks, so "already existed" counts were wrong
+                races_seen.append((race_date, canonical_track_key(track), rnum))
                 for r in runners:
                     nk = norm_name(r.get("runner"))
                     horse_id = bridge.get(nk) or f"pf{r.get('runnerId')}"

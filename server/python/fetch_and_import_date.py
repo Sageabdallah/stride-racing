@@ -6,10 +6,14 @@ APPENDS them into race_results_history (no truncation).
 Source history: this module fetched from The Racing API until it ceased
 Australian coverage (credentials now return 401). The fetch layer is now
 Punting Form Starter via pf_client, mapped through pf_results_mapper —
-same 21 columns, same append-only contract, same
-(race_date, lower(track), race_number) skip-if-existing dedup, trials and
-scratched/no-position runners excluded, and the horse-ID bridge so PF
-runners join existing horse_ids instead of forking them. Each meeting's
+same 21 columns, same append-only contract, a RUNNER-granularity
+skip-if-existing dedup (race_date, canonical track, race_number,
+normalised horse name), trials and scratched/no-position runners
+excluded, and the horse-ID bridge so PF runners join existing horse_ids
+instead of forking them. The dedup is per runner, not per race, because
+this importer's next-day re-import exists to top up races that were
+stored while placings were still pending — a race-level key skipped such
+races forever and the yesterday leg wrote nothing, every day (#126). Each meeting's
 raw results payload is archived into pf_raw_payloads before its row
 insert, in the same transaction. There is no racing.com fallback in this
 module (there never was); racing.com remains the sectional-times source in
@@ -117,18 +121,21 @@ def fetch_date(date_str, metro_only=False):
 
 def import_meetings(meetings, conn):
     """Insert PF-sourced meetings into race_results_history, skipping
-    existing races. Each meeting's raw payload is archived BEFORE its row
-    insert, in the same transaction. Returns
-    (rows_inserted, skipped_races, skipped_runners) — the same tuple the
-    Racing API version returned."""
+    runner rows already stored — a race stored while placings were still
+    pending is topped up on re-import, not skipped wholesale. Each
+    meeting's raw payload is archived BEFORE its row insert, in the same
+    transaction. Returns (rows_inserted, skipped_races, skipped_runners) —
+    the same tuple the Racing API version returned."""
     cur = conn.cursor()
     cur.execute(mapper.RAW_TABLE_DDL)
     conn.commit()
 
     dates = sorted({m["date"] for m in meetings})
-    existing = mapper.load_existing_keys(cur, dates)
+    existing = mapper.load_existing_runner_keys(cur, dates)
+    existing_races = {k[:3] for k in existing}
     bridge = mapper.load_bridge(cur)
-    print(f"\n  Existing date/track/race combos: {len(existing)}; "
+    print(f"\n  Existing runner keys: {len(existing)} "
+          f"({len(existing_races)} races); "
           f"ID bridge: {len(bridge)} known horses")
 
     insert_sql = f"INSERT INTO race_results_history ({', '.join(mapper.RRH_COLUMNS)}) VALUES %s"
@@ -146,15 +153,16 @@ def import_meetings(meetings, conn):
         day = {"date": meeting["date"], "meetings": [pf_meeting]}
 
         rows, races_seen = mapper.build_rows(day, bridge, unknown_keys)
-        fresh = [r for r in rows if mapper.row_race_key(r) not in existing]
-        total_skipped_races += sum(1 for k in races_seen if k in existing)
+        fresh = [r for r in rows if mapper.row_runner_key(r) not in existing]
+        total_skipped_races += sum(1 for k in races_seen if k in existing_races)
         total_skipped_runners += mapper.count_excluded_runners(pf_meeting["results"])
 
         mapper.archive_payloads(cur, [meeting["raw"]])  # archive first
         if fresh:
             execute_values(cur, insert_sql, fresh, page_size=500)
         conn.commit()
-        existing.update(mapper.row_race_key(r) for r in fresh)
+        existing.update(mapper.row_runner_key(r) for r in fresh)
+        existing_races.update(mapper.row_race_key(r) for r in fresh)
         total_rows += len(fresh)
 
     if unknown_keys:
