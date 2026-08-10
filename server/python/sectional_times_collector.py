@@ -607,9 +607,15 @@ def collect_for_date_track(date_str, track_name, db_url, verbose=True):
 
     csv_text, matched_variant, diagnosis = download_csv(date_str, track_variants)
     if not csv_text:
-        # Anti-bot diagnoses print even when not verbose: a Cloudflare block
-        # must be loud in backfill/scheduled logs, not swallowed (DM-H5).
-        if verbose or "anti-bot" in diagnosis:
+        # Only an all-404 diagnosis stays quiet on the non-verbose path: 404
+        # on every variant means no meeting/CSV that day, the one benign
+        # case. Everything else — anti-bot (DM-H5), other HTTP errors,
+        # timeouts, schema drift — prints, because a scheduled run whose
+        # every failure is silent cannot be told apart from a quiet day
+        # in its log (#125).
+        all_404 = diagnosis and all(
+            d.strip().endswith("HTTP 404") for d in diagnosis.split(";"))
+        if verbose or not all_404:
             print(f"  No CSV for {track_name} on {date_str} — {diagnosis}")
         return 0, 0, 0, 0
 
@@ -753,6 +759,12 @@ def main():
                 if imported > 0:
                     print(f"  {date_str} {track_name}: {imported} imported ({matched} matched)")
                     total_imported += imported
+                elif runners > 0:
+                    # a CSV was fetched and parsed but nothing landed — say
+                    # so, or a run overlapping the daily collector logs
+                    # nothing at all and its zero looks like a dead source
+                    print(f"  {date_str} {track_name}: {runners} runners fetched, "
+                          f"0 imported ({skipped} already in sectional_times)")
                 time.sleep(0.5)
         
         print(f"\n  Total imported: {total_imported}")
