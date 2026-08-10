@@ -130,6 +130,14 @@ def fetch_direct(date_str: str) -> Dict[str, Any]:
     captured_at = datetime.now(timezone.utc)
     rows, _skipped = build_snapshot_rows(mapped, books, captured_at, source,
                                          "morning")
+    # fetch_direct feeds odds_movement and the racecard enrichment, and it is
+    # the only consumer that never calls _print_report — so an unformed-book
+    # verdict was invisible on exactly the path that decides stakes.
+    _unformed = [s for s in _skipped if "unformed book" in s.get("reason", "")]
+    if _unformed:
+        print(f"[BETFAIR_PRICES] {len(_unformed)} unformed-book quote(s): "
+              + "; ".join(s["reason"] for s in _unformed[:10]),
+              file=sys.stderr)
     tuples = [(r["track"], r["race_number"], r["horse_name"],
                r["decimal_odds"], r["captured_at"]) for r in rows]
     return {"source": source, "fetched_at": captured_at,
