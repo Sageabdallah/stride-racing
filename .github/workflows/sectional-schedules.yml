@@ -168,13 +168,23 @@ jobs:
             echo "::error::Racing QLD served an anti-bot challenge to this runner — move the qld job to runs-on: [self-hosted, syd] (see header comment)."
             exit 1
           fi
-      - name: Gate — this run landed new QLD rows
+      - name: Gate — QLD sectional data is flowing for the window
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DAYS: ${{ inputs.days || '4' }}
         run: |
           python3 - <<'EOF'
-          import os, psycopg2
+          # The question this gate answers is "are QLD sectionals landing?",
+          # NOT "did this job insert them". The daily results collector
+          # (auto_results_collector.collect_sectional_times) imports the
+          # same CSVs same-day, so this Sun/Wed backfill finding nothing
+          # new is the HEALTHY steady state — the 2026-08-09 red (#125)
+          # was exactly that overlap: all 433 window rows had been landed
+          # by the daily job hours-to-days before this job ran. Delta-zero
+          # is only an outage when the window itself is empty.
+          import os, sys, psycopg2
+          sys.path.insert(0, "server/python")
+          from sectional_times_collector import QLD_TRACKS, normalize_track_name
           days = int(os.environ.get("DAYS") or "4")
           pre = int(open("pre_count.txt").read())
           cur = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
@@ -186,19 +196,45 @@ jobs:
               # race_date is TEXT and holds occasional malformed values, so
               # never cast it: ISO-8601 strings already sort chronologically,
               # and a text comparison cannot raise on '3939-01-01' or junk.
+              # Window ends YESTERDAY: the backfill leg collects now-N..now-1,
+              # and same-day CSVs publish after this schedule fires.
               r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
-              r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
+              r"AND to_char(CURRENT_DATE - 1, 'YYYY-MM-DD')",
               (days,),
           )
-          print(f"racing_qld rows in trailing {days}-day window: {cur.fetchone()[0]}")
-          if post <= pre:
-              print("::error::This run inserted ZERO new racing_qld rows. A scheduled "
-                    "window normally contains fresh race days, so zero usually means "
-                    "the collector silently failed (source blocked, schema drift, fetch "
-                    "failure). Benign zeros: a same-day idempotent re-dispatch, or no "
-                    "meetings at all on this window's new days — check "
-                    "the collect log before dismissing.")
+          window = cur.fetchone()[0]
+          print(f"racing_qld rows in trailing {days}-day window (to yesterday): {window}")
+          # Coverage report: QLD meetings in the window with no sectional
+          # rows from ANY path. Advisory, not fatal — a track RQ never
+          # publishes a CSV for would otherwise red every run.
+          cur.execute(
+              # race_date is TEXT here too — same cast-free comparison
+              "SELECT DISTINCT race_date, track FROM race_results_history "
+              "WHERE race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+              "AND to_char(CURRENT_DATE - 1, 'YYYY-MM-DD')",
+              (days,))
+          meetings = [(d, normalize_track_name(t)) for d, t in cur.fetchall()
+                      if normalize_track_name(t) in QLD_TRACKS]
+          cur.execute(
+              "SELECT DISTINCT race_date, track FROM sectional_times "
+              "WHERE source='racing_qld' "
+              "AND race_date >= to_char(CURRENT_DATE - %s, 'YYYY-MM-DD')",
+              (days,))
+          covered = {(d, normalize_track_name(t)) for d, t in cur.fetchall()}
+          uncovered = sorted(set(meetings) - covered)
+          if uncovered:
+              print("::warning::QLD meetings in window with NO sectional rows "
+                    f"from any path: {uncovered}")
+          if post <= pre and window == 0:
+              print("::error::Zero new racing_qld rows AND the trailing window "
+                    "is empty — nothing is landing from this backfill OR the "
+                    "daily results collector. Check the collect log for the "
+                    "per-track diagnosis (non-404 failures now print).")
               raise SystemExit(1)
+          if post <= pre:
+              print("Delta zero but the window is populated: the daily results "
+                    "collector already landed these rows. Benign overlap, not "
+                    "an outage.")
           EOF
       - name: Summary
         if: always()
