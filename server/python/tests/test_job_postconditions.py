@@ -12,6 +12,8 @@ which reported success:true with 8 of 8 races failed.
 """
 
 import importlib.util
+import hashlib
+import json
 import os
 import sys
 import time
@@ -810,6 +812,104 @@ def test_stage_models_passes_when_the_named_artifact_lands(handler,
             open(d, "w").close()
     monkeypatch.setattr(handler, "_s3", lambda: _S3())
     handler._stage_models()          # must not raise
+
+
+def test_stage_models_fails_when_manifest_is_required_but_unset(
+        handler, monkeypatch, tmp_path):
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setenv("STRIDE_RELEASE_MANIFEST_REQUIRED", "true")
+    monkeypatch.delenv("STRIDE_RELEASE_MANIFEST_KEY", raising=False)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    with pytest.raises(RuntimeError, match="STRIDE_RELEASE_MANIFEST_KEY is unset"):
+        handler._stage_models()
+
+
+def _runtime_manifest(ensemble_path="racing_ensemble_v2.pkl"):
+    ensemble_payload = b"ensemble"
+    auxiliary_payload = b"weights"
+    artifacts = {
+        name: {"status": "NONE"}
+        for name in (
+            "catboost", "lightgbm", "xgboost", "ensemble", "calibrator",
+            "decision_model",
+        )
+    }
+    artifacts["ensemble"] = {
+        "status": "PRESENT",
+        "path": ensemble_path,
+        "object_key": "releases/r1/ensemble.pkl",
+        "sha256": hashlib.sha256(ensemble_payload).hexdigest(),
+    }
+    return {
+        "manifest_version": 1,
+        "release_id": "r1",
+        "created_at": "2026-08-10T00:00:00Z",
+        "source_commit": "abc123",
+        "image_digest": "sha256:image",
+        "training_data_build": {"id": "td1"},
+        "feature_schema": {"version": "v2"},
+        "artifacts": artifacts,
+        "auxiliary_artifacts": [{
+            "path": "sectional_combiner_weights.json",
+            "object_key": "releases/r1/sectional_combiner_weights.json",
+            "sha256": hashlib.sha256(auxiliary_payload).hexdigest(),
+        }],
+        "wrapper": {"version": "v1"},
+        "risk_configuration": {"version": "flat"},
+        "decision_time_configuration": {"version": "tip-time"},
+        "settlement_configuration": {"version": "v1"},
+    }, {
+        "releases/r1/ensemble.pkl": ensemble_payload,
+        "releases/r1/sectional_combiner_weights.json": auxiliary_payload,
+    }
+
+
+def test_manifest_mode_stages_auxiliary_runtime_artifacts(
+        handler, monkeypatch, tmp_path):
+    manifest, payloads = _runtime_manifest()
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setenv("STRIDE_RELEASE_MANIFEST_KEY", "releases/r1/manifest.json")
+    monkeypatch.delenv("STRIDE_RELEASE_MANIFEST_REQUIRED", raising=False)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    downloaded = []
+
+    class _S3:
+        def download_file(self, _bucket, key, destination):
+            downloaded.append(key)
+            path = Path(destination)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if key == "releases/r1/manifest.json":
+                path.write_text(json.dumps(manifest))
+            else:
+                path.write_bytes(payloads[key])
+
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    handler._stage_models()
+    models = tmp_path / "server" / "python" / "models"
+    assert (models / "racing_ensemble_v2.pkl").read_bytes() == b"ensemble"
+    assert (models / "sectional_combiner_weights.json").read_bytes() == b"weights"
+    assert "releases/r1/sectional_combiner_weights.json" in downloaded
+
+
+def test_manifest_mode_rejects_wrong_ensemble_filename(
+        handler, monkeypatch, tmp_path):
+    manifest, payloads = _runtime_manifest("renamed-ensemble.pkl")
+    monkeypatch.setenv("STRIDE_MODELS_BUCKET", "some-bucket")
+    monkeypatch.setenv("STRIDE_RELEASE_MANIFEST_KEY", "releases/r1/manifest.json")
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+
+    class _S3:
+        def download_file(self, _bucket, key, destination):
+            path = Path(destination)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if key == "releases/r1/manifest.json":
+                path.write_text(json.dumps(manifest))
+            else:
+                path.write_bytes(payloads[key])
+
+    monkeypatch.setattr(handler, "_s3", lambda: _S3())
+    with pytest.raises(RuntimeError, match="racing_ensemble_v2.pkl"):
+        handler._stage_models()
 
 
 def test_panel_proof_treats_rotted_sources_as_a_finding_not_a_failure(

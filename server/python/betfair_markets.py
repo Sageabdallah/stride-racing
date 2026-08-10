@@ -49,6 +49,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
+from identity_normalization import normalize_alnum_key, source_race_key
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pf_backfill_results import norm_name
 from providers.betfair_auth import BetfairEdgeBlocked, looks_like_edge_block
@@ -202,7 +204,7 @@ def resolve_odds_source(app_key: str, token: str,
 def plain_norm(name: Any) -> str:
     """Lowercase-alnum, matching roi/04's normalize_track_name / the DB's
     stride_norm_name — used for row fields so joins line up."""
-    return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+    return normalize_alnum_key(name)
 
 
 def norm_track(name: Any) -> str:
@@ -330,7 +332,7 @@ def load_horse_bridge(cur) -> Dict[str, str]:
 def make_race_id(race_date: Any, track: Any, race_number: int) -> str:
     # Same shape as roi/04's make_race_id (odds_snapshots.py) minus the
     # meet_id prefix Betfair cannot know.
-    return f"{race_date}|{plain_norm(track)}|R{int(race_number)}"
+    return source_race_key(race_date, track, race_number)
 
 
 def map_markets(catalogue: Sequence[dict], schedule_rows: Sequence[dict],

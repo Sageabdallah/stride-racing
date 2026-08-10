@@ -68,6 +68,8 @@ if not DATABASE_URL:
 import psycopg2
 import psycopg2.extras
 
+from training_view_contract import validate_training_view_schema
+
 try:
     import xgboost as xgb
     HAS_XGB = True
@@ -109,7 +111,7 @@ PHASE5_FEATURES = [
     # from backup/winner-pattern-d695894). Roadmap priority 1-4; additive and
     # NaN-safe; populated by attach_features in the load path. Live only after
     # the task 12 retrain promotes an artifact trained with them.
-    "prior_pb_close_underreaction",  # flagship: prior PB close + finish 3-5 + odds 6-12
+    "prior_pb_close_underreaction",  # dormant/NaN: researched odds band used own-race final SP
     "cohort_fast_close_prior",       # prior best last-200m vs cohort 25th-pctile bar (NaN-preserved)
     "pos400_win_prior",              # win-rate uplift for usual 400m in-run bucket (NaN-preserved)
     "jockey_wet_residual",           # jockey wet-minus-dry strike delta, on wet going only
@@ -266,7 +268,7 @@ FEATURE_COLUMNS = [
     # from backup/winner-pattern-d695894). Roadmap priority 1-4; additive and
     # NaN-safe; populated by attach_features in the load path. Live only after
     # the task 12 retrain promotes an artifact trained with them.
-    "prior_pb_close_underreaction",  # flagship: prior PB close + finish 3-5 + odds 6-12
+    "prior_pb_close_underreaction",  # dormant/NaN: researched odds band used own-race final SP
     "cohort_fast_close_prior",       # prior best last-200m vs cohort 25th-pctile bar (NaN-preserved)
     "pos400_win_prior",              # win-rate uplift for usual 400m in-run bucket (NaN-preserved)
     "jockey_wet_residual",           # jockey wet-minus-dry strike delta, on wet going only
@@ -291,6 +293,7 @@ def load_training_data() -> pd.DataFrame:
     """
     print("[1] Connecting to database and loading training_view_v2 ...")
     conn = psycopg2.connect(DATABASE_URL)
+    validate_training_view_schema(conn)
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """
@@ -319,6 +322,7 @@ def load_training_data() -> pd.DataFrame:
             -- provenance. Only consumed when STRIDE_TRAIN_ODDS_SOURCE != legacy.
             tip_time_odds,
             odds_source,
+            seconds_to_jump,
             -- Stored MC-stage model probability (prediction_audit via the
             -- view). Benchmark column only — never a training feature:
             -- build_feature_matrix restricts to FEATURE_COLUMNS.
@@ -1436,6 +1440,11 @@ def parse_args():
         help="Run Phase 4 feature coverage audit only (no training). Reports non-NaN/non-zero "
              "rates for distance-change sectional features and form_string coverage.",
     )
+    parser.add_argument(
+        "--dry-run-data-contract",
+        action="store_true",
+        help="Load the deployed view and build features, then stop immediately before model fitting.",
+    )
     return parser.parse_args()
 
 
@@ -1461,12 +1470,12 @@ def main():
     n_phase2 = int(df_raw["prior_z_200m"].notna().sum())
     print(f"  Rows w/ Phase 2 sectionals : {n_phase2}")
 
-        # Winner-pattern gap features (12P-8). Fully defensive: on any failure
+    # Winner-pattern gap features (12P-8). Fully defensive: on any failure
     # the frame is returned unchanged so retrain never breaks.
     try:
         from winner_pattern_features import attach_features as _attach_winner_pattern_features
         print("\n[1d] Attaching winner-pattern gap features ...")
-        df = _attach_winner_pattern_features(df)
+        df_raw = _attach_winner_pattern_features(df_raw)
     except Exception as e:
         print(f"    WARNING: winner-pattern feature attach failed: {e}")
 
@@ -1494,6 +1503,11 @@ def main():
         audit = run_coverage_audit(X, df_raw)
         elapsed = time.time() - t0
         print(f"\n  Coverage audit completed in {elapsed:.1f}s")
+        return
+
+    if args.dry_run_data_contract:
+        elapsed = time.time() - t0
+        print(f"\n  READY_FOR_MODEL_FIT — dry-run stopped before walk-forward CV ({elapsed:.1f}s)")
         return
 
     print("\n[3] Walk-Forward Temporal Cross-Validation ...")

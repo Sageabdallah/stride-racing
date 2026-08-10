@@ -35,13 +35,13 @@ def _sect_row(rid, last200, pos400):
                 splits_json={"400m": {"position": pos400}})
 
 
-def test_flagship_flag_and_leakage():
-    # H1 runs four times; only the third start should trip the flagship flag.
+def test_sp_derived_flagship_feature_stays_neutral(capsys):
+    # This history would have fired the old SP-banded feature on start three.
     rrh = pd.DataFrame([
         _rrh_row(1, 1, "Alpha", 1, 8, 5.0, "J1", date="2025-01-01"),
         _rrh_row(2, 1, "Alpha", 1, 4, 9.0, "J1", date="2025-01-08"),   # PB close (10.5<11.0), finished 4th
-        _rrh_row(3, 1, "Alpha", 1, 1, 8.0, "J1", date="2025-01-15"),   # today odds 8 -> flag should fire
-        _rrh_row(4, 1, "Alpha", 1, 2, 20.0, "J1", date="2025-01-22"),  # odds out of 6-12 band -> no flag
+        _rrh_row(3, 1, "Alpha", 1, 1, 8.0, "J1", date="2025-01-15"),
+        _rrh_row(4, 1, "Alpha", 1, 2, 20.0, "J1", date="2025-01-22"),
     ])
     st = pd.DataFrame([
         _sect_row(1, 11.0, 6),
@@ -55,13 +55,16 @@ def test_flagship_flag_and_leakage():
     # align back to id order
     feats = feats.set_index(frame["id"].values)
     f1 = feats["prior_pb_close_underreaction"]
-    assert f1.loc[3] == 1.0, f"expected flagship flag on start 3, got {f1.loc[3]}"
-    assert f1.loc[1] == 0.0 and f1.loc[2] == 0.0 and f1.loc[4] == 0.0, "flag fired outside the cohort"
+    assert f1.isna().all()
+    warning = capsys.readouterr().err
+    assert "prior_pb_close_underreaction is neutral" in warning
+    assert "own-race final sp_odds" in warning
+    assert "global rule 13" in warning
 
     # Leakage-safety: a horse's FIRST start has no prior sectionals -> NaN priors.
     fc = feats["cohort_fast_close_prior"]
     assert np.isnan(fc.loc[1]), "first start must have NaN fast-close prior (no prior data)"
-    print("PASS test_flagship_flag_and_leakage")
+    print("PASS test_sp_derived_flagship_feature_stays_neutral")
 
 
 def test_fast_close_and_pos400_lookup():
@@ -161,7 +164,10 @@ def test_non_unique_index_alignment():
     got = compute_features(dup, priors)
     assert list(got.index) == [0, 0, 0, 0] and len(got) == 4
     # values must match the baseline row-for-row (order preserved)
-    assert list(got["prior_pb_close_underreaction"].values) == list(ref["prior_pb_close_underreaction"].values)
+    np.testing.assert_equal(
+        got["prior_pb_close_underreaction"].values,
+        ref["prior_pb_close_underreaction"].values,
+    )
     print("PASS test_non_unique_index_alignment")
 
 
@@ -177,7 +183,6 @@ def test_round_trip_serialisation(tmp_path=Path("/tmp")):
 
 
 if __name__ == "__main__":
-    test_flagship_flag_and_leakage()
     test_fast_close_and_pos400_lookup()
     test_jockey_wet_residual_gating()
     test_nan_field_size_no_crash()
