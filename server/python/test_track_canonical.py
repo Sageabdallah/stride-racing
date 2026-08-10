@@ -104,6 +104,25 @@ def test_load_existing_keys_canonicalises():
                     ("2026-07-08", "fanniebay", 1)}
 
 
+def test_runner_key_canonicalises_track_and_name():
+    row = list(_row("Belmont"))
+    row[1] = "Ocean Deep (NZ)"
+    assert mapper.row_runner_key(tuple(row)) == \
+        ("2026-07-08", "belmontpark", 3, "oceandeep")
+
+
+def test_load_existing_runner_keys_canonicalises():
+    class Cur:
+        def execute(self, sql, params=None):
+            self.sql = sql
+        def fetchall(self):
+            return [("2026-07-08", "Belmont", 3, "Ocean Deep (NZ)"),
+                    ("2026-07-08", "Fannie Bay", 1, "Top End Star")]
+    keys = mapper.load_existing_runner_keys(Cur(), ["2026-07-08"])
+    assert keys == {("2026-07-08", "belmontpark", 3, "oceandeep"),
+                    ("2026-07-08", "fanniebay", 1, "topendstar")}
+
+
 # ------------------------------------------------------------- find/surviv
 
 def _groups(*sets):

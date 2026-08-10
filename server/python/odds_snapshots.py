@@ -371,7 +371,8 @@ def _connect():
     if not url:
         return None
     import psycopg2  # lazy: module must import cleanly without a DB driver
-    conn = psycopg2.connect(url, connect_timeout=3)
+    from intelligence_common import KEEPALIVE_KWARGS
+    conn = psycopg2.connect(url, connect_timeout=3, **KEEPALIVE_KWARGS)
     try:
         cur = conn.cursor()
         cur.execute("SET statement_timeout TO 5000")

@@ -10,6 +10,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from intelligence_common import CONN_ERRORS
 from results_projection import project_resulted_prediction_audit
 from providers import get_provider, validate_results
 # Single-sourced in pf_results_mapper (F-TRACK-ALIAS); imported back so the
@@ -41,10 +42,11 @@ def normalize_finish_position(raw_position, field_size: Optional[int] = None) ->
 
 
 def get_db_connection():
+    from intelligence_common import KEEPALIVE_KWARGS
     database_url = os.environ.get('DATABASE_URL')
     if not database_url:
         raise ValueError("DATABASE_URL environment variable required")
-    return psycopg2.connect(database_url)
+    return psycopg2.connect(database_url, **KEEPALIVE_KWARGS)
 
 
 def get_pending_races(conn, target_date: Optional[str] = None) -> List[Dict]:
@@ -265,6 +267,10 @@ def collect_sectional_times(dates_needed):
         if total_imported > 0:
             print(f"[AutoResults] Total QLD sectional times collected: {total_imported}", file=sys.stderr)
         return total_imported
+    except CONN_ERRORS:
+        # A dead DB socket is not "no sectionals today" — swallowing it here
+        # produced 0-imported runs that exited 0.
+        raise
     except Exception as e:
         print(f"[AutoResults] QLD Sectional collection error: {e}", file=sys.stderr)
         return 0
@@ -291,6 +297,8 @@ def collect_racing_com_sectionals(dates_needed):
         if total_imported > 0:
             print(f"[AutoResults] Total racing.com sectional times collected: {total_imported}", file=sys.stderr)
         return total_imported
+    except CONN_ERRORS:
+        raise
     except Exception as e:
         print(f"[AutoResults] Racing.com sectional collection error: {e}", file=sys.stderr)
         return 0
@@ -305,6 +313,8 @@ def _ensure_sp_backfill_index(conn):
                 ON race_results_history (race_date, track, race_number)
             """)
         conn.commit()
+    except CONN_ERRORS:
+        raise
     except Exception as e:
         print(f"[AutoResults] Index creation skipped: {e}", file=sys.stderr)
         conn.rollback()
@@ -327,6 +337,10 @@ def process_pending_races(target_date: Optional[str] = None) -> Dict:
 
     print(f"[AutoResults] Found {len(pending)} pending race(s) to process", file=sys.stderr)
 
+    # The fetch loop below is minutes of provider API time; a Neon socket
+    # held idle under it dies and poisons the write loop that follows.
+    conn.close()
+
     dates_needed = set(r['race_date'] for r in pending)
     results_cache: Dict[str, List[Dict]] = {}
 
@@ -336,6 +350,8 @@ def process_pending_races(target_date: Optional[str] = None) -> Dict:
         results_cache[race_date], reason = fetch_results_for_date_checked(race_date)
         if reason:
             fetch_errors[str(race_date)] = reason
+
+    conn = get_db_connection()
 
     total_collected = 0
     total_audit_updated = 0
@@ -374,6 +390,11 @@ def process_pending_races(target_date: Optional[str] = None) -> Dict:
             total_audit_updated += audit_updated
             print(f"[AutoResults] Collected: {track} R{race_number} ({race_date}) - {audit_updated} audit rows updated", file=sys.stderr)
 
+        except CONN_ERRORS:
+            # Infrastructure failure, not bad race data: abort loudly without
+            # burning retry_count — five dead-socket nights would otherwise
+            # permanently drop the race via the retry_count < 5 filter.
+            raise
         except Exception as e:
             conn.rollback()
             print(f"[AutoResults] Error processing {track} R{race_number}: {e}", file=sys.stderr)
