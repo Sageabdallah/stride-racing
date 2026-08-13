@@ -1,0 +1,22 @@
+{
+  "manifest_version": 1,
+  "release_id": "UNRESOLVED",
+  "created_at": "UNRESOLVED",
+  "source_commit": "UNRESOLVED",
+  "image_digest": "UNRESOLVED",
+  "training_data_build": {"status": "UNRESOLVED"},
+  "feature_schema": {"status": "UNRESOLVED"},
+  "artifacts": {
+    "catboost": {"status": "UNRESOLVED"},
+    "lightgbm": {"status": "UNRESOLVED"},
+    "xgboost": {"status": "UNRESOLVED"},
+    "ensemble": {"status": "UNRESOLVED"},
+    "calibrator": {"status": "UNRESOLVED"},
+    "decision_model": {"status": "NOT_APPLICABLE"}
+  },
+  "auxiliary_artifacts": [],
+  "wrapper": {"status": "UNRESOLVED"},
+  "risk_configuration": {"status": "UNRESOLVED"},
+  "decision_time_configuration": {"status": "UNRESOLVED"},
+  "settlement_configuration": {"status": "UNRESOLVED"}
+}

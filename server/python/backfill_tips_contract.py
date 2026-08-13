@@ -62,6 +62,26 @@ def _build_raw_model_leader(race: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def backfill_race_contract(race: Dict[str, Any]) -> Dict[str, Any]:
     updated = deepcopy(race)
+
+    # Reconciled Phase -1 files are authoritative.  Step-3 backfill exists
+    # for legacy files only and must not reconstruct a bet that the crowd or
+    # risk controls already refused.
+    if "refused_bet_pick" in updated:
+        refused = updated.get("refused_bet_pick")
+        if isinstance(refused, dict):
+            updated["bet_pick"] = None
+            updated["bet_status"] = "NO_BET"
+            updated["bet_status_reason"] = str(
+                updated.get("bet_status_reason")
+                or refused.get("selection_origin_reason")
+                or refused.get("refusal_reason")
+                or "Bet refused by a reconciled decision gate."
+            )
+        return updated
+    if updated.get("bet_status") == "NO_BET":
+        updated["bet_pick"] = None
+        return updated
+
     full_field = updated.get("full_field") or []
     top_picks = updated.get("top_picks") or []
     raw_model_leader = _build_raw_model_leader(updated)

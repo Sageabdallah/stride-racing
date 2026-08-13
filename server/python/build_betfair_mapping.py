@@ -20,6 +20,8 @@ from dateutil import parser as dt_parser
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+from identity_normalization import DDL_FUNCTIONS
+
 LOGGER = logging.getLogger("betfair_mapping")
 
 
@@ -338,39 +340,6 @@ CREATE INDEX IF NOT EXISTS idx_betfair_map_track_norm
 
 CREATE INDEX IF NOT EXISTS idx_betfair_map_market_type
     ON betfair_market_runner_map (market_type, country_code, event_type_id);
-"""
-
-
-DDL_FUNCTIONS = """
-CREATE OR REPLACE FUNCTION stride_norm_name(src text)
-RETURNS text
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT lower(regexp_replace(coalesce(src, ''), '[^a-z0-9]+', '', 'g'));
-$$;
-
-CREATE OR REPLACE FUNCTION stride_norm_track(src text)
-RETURNS text
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT CASE
-    WHEN src IS NULL OR btrim(src) = '' THEN ''
-    WHEN lower(src) IN ('royal randwick', 'randwick') THEN 'randwick'
-    WHEN lower(src) IN ('randwick-kensington', 'kensington') THEN 'kensington'
-    WHEN lower(src) IN ('rosehill gardens', 'rosehill') THEN 'rosehill'
-    WHEN lower(src) IN ('ascot', 'ascot wa') THEN 'ascotwa'
-    WHEN lower(src) LIKE '%moonee valley%' THEN 'mooneevalley'
-    WHEN lower(src) LIKE '%eagle farm%' THEN 'eaglefarm'
-    WHEN lower(src) LIKE '%morphettville%' THEN 'morphettville'
-    WHEN lower(src) LIKE '%caulfield%' THEN 'caulfield'
-    WHEN lower(src) LIKE '%flemington%' THEN 'flemington'
-    WHEN lower(src) LIKE '%shatin%' OR lower(src) LIKE '%sha tin%' THEN 'shatin'
-    WHEN lower(src) LIKE '%happy valley%' THEN 'happyvalley'
-    ELSE lower(regexp_replace(src, '[^a-z0-9]+', '', 'g'))
-  END;
-$$;
 """
 
 

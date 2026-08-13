@@ -43,12 +43,16 @@ class TestDrawdownBreaker:
 
     def test_suspension_publishes_no_bet_with_reason(self):
         race_tips = [{"track": "X", "bet_pick": {
-            "horse": "A", "should_bet": True, "staking": "1u"}}]
+            "horse": "A", "should_bet": True, "staking": "1u"},
+            "top_picks": [{"horse": "A", "should_bet": True, "staking": "1u"}]}]
         state = sc.apply_drawdown_breaker(race_tips, state="suspended")
-        pick = race_tips[0]["bet_pick"]
+        pick = race_tips[0]["refused_bet_pick"]
         assert state == "suspended"
+        assert race_tips[0]["bet_pick"] is None
+        assert race_tips[0]["bet_status"] == "NO_BET"
         assert pick["should_bet"] is False
         assert pick["refusal_reason"] == "drawdown_breaker"
+        assert race_tips[0]["top_picks"][0]["prediction_stages"]["final_decision"]["value"] == "NO_BET"
 
     def test_halved_never_increases(self):
         assert sc.halve_stake("2u") == "1u"
@@ -74,7 +78,7 @@ class TestExposureCaps:
         kept, demoted = sc.enforce_exposure_caps(
             races, max_per_day=6, max_per_track=99)
         assert (kept, demoted) == (6, 1)
-        cut = [r["bet_pick"] for r in races if not r["bet_pick"]["should_bet"]]
+        cut = [r["refused_bet_pick"] for r in races if r.get("refused_bet_pick")]
         assert len(cut) == 1 and cut[0]["horse"] == "H6"  # the lowest EV
         assert cut[0]["refusal_reason"] == "exposure_cap"
 
@@ -83,7 +87,7 @@ class TestExposureCaps:
         kept, demoted = sc.enforce_exposure_caps(
             races, max_per_day=99, max_per_track=2)
         assert (kept, demoted) == (2, 1)
-        cut = [r["bet_pick"] for r in races if not r["bet_pick"]["should_bet"]]
+        cut = [r["refused_bet_pick"] for r in races if r.get("refused_bet_pick")]
         assert cut[0]["horse"] == "H2"
 
 

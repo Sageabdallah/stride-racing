@@ -48,7 +48,11 @@ TRAINER_NAN_PRESERVE = [
 # this list gets fillna(0); everything in it keeps NaN end to end).
 # Winner-pattern priors (12P-8): NaN means "no prior sectional / cohort
 # match exists", which is signal, not zero.
-WINNER_PATTERN_NAN_PRESERVE = ["cohort_fast_close_prior", "pos400_win_prior"]
+WINNER_PATTERN_NAN_PRESERVE = [
+    "prior_pb_close_underreaction",  # disabled: researched definition uses own-race final SP
+    "cohort_fast_close_prior",
+    "pos400_win_prior",
+]
 
 NAN_PRESERVE_FEATURES = (PHASE2_FEATURES + TRAINER_NAN_PRESERVE
                          + WINNER_PATTERN_NAN_PRESERVE)  # lists throughout
