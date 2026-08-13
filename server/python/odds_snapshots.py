@@ -30,6 +30,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from identity_normalization import (
+    normalize_runner_key,
+    normalize_track_key,
+    source_race_key,
+)
+
 SNAPSHOT_KINDS = ("tip_time", "late_t5", "morning", "baseline")
 # Default tag for quotes that carry no source_api stamp of their own.
 # Historical rows written before 2026-08-02 carry "theracingapi"; from the
@@ -69,11 +75,11 @@ def validate_snapshot_kind(kind: str) -> str:
 
 def normalize_horse_name(name: Any) -> str:
     """Lowercase-alnum normalisation, matching stride_norm_name() in the DB."""
-    return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+    return normalize_runner_key(name)
 
 
 def normalize_track_name(name: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+    return normalize_track_key(name)
 
 
 def parse_decimal_odds(value: Any) -> Optional[float]:
@@ -123,8 +129,7 @@ def make_race_id(race_date: Any, track: Any, race_number: Any,
     """Stable race identity. The racecard carries no API race id, so key on
     the (date, track, race_number) triple the rest of the schema uses; the
     API meet_id is prepended when present for cross-source joins."""
-    rn = int(race_number)
-    base = f"{race_date}|{normalize_track_name(track)}|R{rn}"
+    base = source_race_key(race_date, track, race_number)
     return f"{meet_id}|{base}" if meet_id else base
 
 

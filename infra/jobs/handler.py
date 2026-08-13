@@ -101,6 +101,53 @@ def _stage_models() -> None:
         os.remove(probe)
     except OSError:
         return  # read-only fs = Lambda = model not needed here
+    manifest_key = os.environ.get("STRIDE_RELEASE_MANIFEST_KEY", "").strip()
+    manifest_required = os.environ.get(
+        "STRIDE_RELEASE_MANIFEST_REQUIRED", "false").strip().lower() in (
+            "1", "true", "yes", "on")
+    if manifest_key:
+        from pathlib import Path
+        from release_manifest import (
+            artifact_downloads,
+            load_manifest,
+            sha256_file,
+            validate_artifact_files,
+        )
+
+        manifest_path = Path(dest) / "release_manifest.json"
+        _s3().download_file(bucket, manifest_key, str(manifest_path))
+        manifest = load_manifest(manifest_path)
+        ensemble_path = str(manifest["artifacts"]["ensemble"]["path"])
+        if ensemble_path != REQUIRED_MODEL_ARTIFACTS[0]:
+            raise RuntimeError(
+                "release manifest ensemble path must be "
+                f"{REQUIRED_MODEL_ARTIFACTS[0]!r}, got {ensemble_path!r}; "
+                "ml_model.py loads the required artifact by that exact name"
+            )
+        for object_key, relative_path in artifact_downloads(manifest):
+            local_path = (Path(dest) / relative_path).resolve()
+            if Path(dest).resolve() not in local_path.parents:
+                raise RuntimeError(
+                    f"release manifest artifact escapes model directory: {relative_path}")
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            _s3().download_file(bucket, object_key, str(local_path))
+        validate_artifact_files(manifest, Path(dest))
+        missing = [f for f in REQUIRED_MODEL_ARTIFACTS
+                   if not os.path.exists(os.path.join(dest, f))]
+        if missing:
+            raise RuntimeError(
+                "validated release manifest did not stage required runtime "
+                "artifact(s): " + ", ".join(missing)
+            )
+        os.environ["STRIDE_RELEASE_ID"] = str(manifest["release_id"])
+        os.environ["STRIDE_RELEASE_MANIFEST_SHA256"] = sha256_file(manifest_path)
+        print(f"[models] staged validated release {manifest['release_id']} "
+              f"from s3://{bucket}/{manifest_key}")
+        return
+    if manifest_required:
+        raise RuntimeError(
+            "STRIDE_RELEASE_MANIFEST_REQUIRED is true but "
+            "STRIDE_RELEASE_MANIFEST_KEY is unset")
     n = 0
     for page in _s3().get_paginator("list_objects_v2").paginate(Bucket=bucket):
         for o in page.get("Contents", []):

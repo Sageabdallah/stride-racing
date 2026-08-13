@@ -6492,7 +6492,7 @@ def calculate_sophisticated_adjustment(features: dict) -> float:
     return max(0.60, min(1.40, final_adjustment))  # Tightened from [0.50, 2.00]
 
 
-def calculate_ml_probability_adjustment(features: dict) -> float:
+def calculate_ml_probability_adjustment(features: dict, include_stages: bool = False):
     """
     Calculate probability adjustment using trained ML ensemble model.
     Falls back to rule-based adjustments if model is not trained.
@@ -6503,13 +6503,17 @@ def calculate_ml_probability_adjustment(features: dict) -> float:
         try:
             model = get_model()
             if model.is_trained:
-                ml_adjustment = model.predict_adjustment(features)
+                if include_stages:
+                    ml_adjustment, stages = model.predict_adjustment_with_stages(features)
+                else:
+                    ml_adjustment = model.predict_adjustment(features)
                 log_debug(f"ML Model adjustment: {ml_adjustment:.3f}")
-                return ml_adjustment
+                return (ml_adjustment, stages) if include_stages else ml_adjustment
         except Exception as e:
             log_debug(f"ML model error, using rule-based: {e}")
     
-    return _calculate_rule_based_adjustment(features)
+    fallback = _calculate_rule_based_adjustment(features)
+    return (fallback, {"method": "rule_based"}) if include_stages else fallback
 
 
 def _calculate_rule_based_adjustment(features: dict) -> float:
@@ -7109,6 +7113,33 @@ def generate_form_analyst_insights(runner_data: dict, race_data: dict, enhanced_
     return insights
 
 
+def _attach_prediction_stages(
+    result, ml_stage_values, mc_result, base_win_prob,
+    ml_adjustment, combined_adjustment, win_prob,
+):
+    """Attach non-fatal audit stages to one otherwise-complete race result."""
+    from prediction_stages import record_stage
+
+    stages = {}
+    for stage_name, component_name in (
+        ('base_xgb', 'xgb'),
+        ('base_lightgbm', 'lightgbm'),
+        ('base_catboost', 'catboost'),
+        ('ensemble', 'ensemble'),
+    ):
+        record_stage(stages, stage_name, ml_stage_values.get(component_name))
+    record_stage(stages, 'mc_raw', mc_result.get(
+        'win_prob_sim_raw', mc_result.get('win_prob_sim', 0)))
+    record_stage(stages, 'mc_recalibrated', mc_result.get('win_prob_sim', 0))
+    record_stage(stages, 'sectional_blend', base_win_prob / 100.0)
+    record_stage(stages, 'ml_adjustment', ml_adjustment)
+    record_stage(stages, 'combined_adjustment', combined_adjustment)
+    record_stage(stages, 'wrapper_pre_calibration', win_prob / 100.0)
+    record_stage(stages, 'selection_score', result['selectionScore'])
+    result['predictionStages'] = stages
+    return result
+
+
 def run_simulation(race, runners, mc_sims=10000, seed=42):
     """Run Monte Carlo simulation on a single race."""
     try:
@@ -7389,7 +7420,8 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 except Exception as fp_err:
                     print(f"[FitnessPeak] Error for {horse_name}: {fp_err}", file=sys.stderr)
             
-            ml_adjustment = calculate_ml_probability_adjustment(enhanced_features)
+            ml_adjustment, _ml_stage_values = calculate_ml_probability_adjustment(
+                enhanced_features, include_stages=True)
             
             sophisticated_adj = calculate_sophisticated_adjustment(enhanced_features)
             
@@ -7640,6 +7672,15 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 'running_style_score': mc.get('pace_position', 1),
                 'ml_ranks': enhanced_features.get('ml_ranks', None),
             }
+            _attach_prediction_stages(
+                result,
+                _ml_stage_values,
+                mc,
+                base_win_prob,
+                ml_adjustment,
+                combined_adjustment,
+                win_prob,
+            )
             results.append(result)
 
             try:
@@ -7768,6 +7809,7 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
             'raceNumber': race.get('raceNumber', race.get('race_number', 0)),
             'distance': race.get('distance', 0),
             'mc_sims': mc_sims,
+            'seed': int(seed),
             'paceScenarioDistribution': _pace_scenario_dist if _pace_scenario_dist else None,
             'sectionalMcExactas': _sectional_exactas,
             'sectionalMcTrifectas': _sectional_trifectas,

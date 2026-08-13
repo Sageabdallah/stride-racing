@@ -15,6 +15,8 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from decision_contract import demote_active_bet
+
 STARTING_BANKROLL_UNITS = 100.0
 
 
@@ -117,12 +119,15 @@ def apply_drawdown_breaker(race_tips: List[Dict[str, Any]],
         if not isinstance(pick, dict) or not pick.get("should_bet"):
             continue
         if state == "suspended":
-            pick["should_bet"] = False
-            pick["refusal_reason"] = "drawdown_breaker"
-            pick["selection_origin"] = "drawdown_breaker"
-            pick["selection_origin_reason"] = (
+            explanation = (
                 "drawdown_breaker: realised drawdown past the suspend "
                 "threshold; betting suspended")
+            demote_active_bet(
+                race,
+                refusal_reason="drawdown_breaker",
+                selection_origin="drawdown_breaker",
+                explanation=explanation,
+            )
             print(f"  [RISK] {pick.get('horse', '?')}: suspended by "
                   "drawdown breaker", file=sys.stderr)
         elif state == "halved":
@@ -175,12 +180,15 @@ def enforce_exposure_caps(race_tips: List[Dict[str, Any]],
             kept += 1
             per_track[track] = per_track.get(track, 0) + 1
             continue
-        pick["should_bet"] = False
-        pick["refusal_reason"] = "exposure_cap"
-        pick["selection_origin"] = "exposure_cap"
-        pick["selection_origin_reason"] = (
+        explanation = (
             f"exposure_cap: day cap {max_per_day} / track cap "
             f"{max_per_track}, outranked on net EV")
+        demote_active_bet(
+            race,
+            refusal_reason="exposure_cap",
+            selection_origin="exposure_cap",
+            explanation=explanation,
+        )
         demoted += 1
         print(f"  [RISK] {pick.get('horse', '?')} ({track}): demoted by "
               "exposure cap", file=sys.stderr)
