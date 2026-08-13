@@ -521,10 +521,12 @@ class RacingMLModel:
                 if pred == actual_winner_idx:
                     self._model_performance[race_category][model_key]['correct'] += 1
 
-    def predict_proba(self, X: pd.DataFrame, distance_m: int = None) -> np.ndarray:
-        """Get ensemble probability predictions with dynamic weighting."""
+    def predict_components(self, X: pd.DataFrame, distance_m: int = None) -> Dict:
+        """Return base and ensemble probabilities without changing scoring."""
         if not self.is_trained:
-            return np.zeros(len(X))
+            zeros = np.zeros(len(X))
+            return {"xgb": zeros, "lightgbm": zeros, "catboost": zeros,
+                    "ensemble": zeros, "method": "untrained", "weights": None}
         
         if isinstance(X, pd.DataFrame):
             # Tree models don't need scaling; only apply if scaler was fitted
@@ -555,7 +557,9 @@ class RacingMLModel:
                         )
                     except Exception:
                         pass
-                return ensemble
+                return {"xgb": xgb_pred, "lightgbm": lgb_pred,
+                        "catboost": cat_pred, "ensemble": ensemble,
+                        "method": "stacking", "weights": None}
             except Exception:
                 pass
         
@@ -567,27 +571,44 @@ class RacingMLModel:
                 ensemble = self.double_calibrator.calibrate(
                     xgb_pred, lgb_pred, cat_pred, weights
                 )
-                return ensemble
+                return {"xgb": xgb_pred, "lightgbm": lgb_pred,
+                        "catboost": cat_pred, "ensemble": ensemble,
+                        "method": "double_calibrator", "weights": weights}
             except Exception:
                 pass
         
         ensemble = (xgb_pred * weights['xgb'] + lgb_pred * weights['lgb'] + cat_pred * weights['cat'])
-        return ensemble
+        return {"xgb": xgb_pred, "lightgbm": lgb_pred,
+                "catboost": cat_pred, "ensemble": ensemble,
+                "method": "weighted_average", "weights": weights}
+
+    def predict_proba(self, X: pd.DataFrame, distance_m: int = None) -> np.ndarray:
+        """Get ensemble probability predictions with dynamic weighting."""
+        return self.predict_components(X, distance_m=distance_m)["ensemble"]
     
     def predict_adjustment(self, features: Dict) -> float:
         """Get ML-based probability adjustment for a single runner. Returns a multiplier (0.5 - 2.0) to adjust base probability."""
+        return self.predict_adjustment_with_stages(features)[0]
+
+    def predict_adjustment_with_stages(self, features: Dict):
+        """Return the legacy multiplier plus auditable base-model quantities."""
         if not self.is_trained:
-            return 1.0
-        
+            return 1.0, {"method": "untrained"}
+
         df = pd.DataFrame([features])
         X = self.prepare_features(df)
-        
-        ml_prob = self.predict_proba(X)[0]
-        
+        components = self.predict_components(X)
+        ml_prob = components["ensemble"][0]
         adjustment = 0.5 + (ml_prob * 1.5)
         adjustment = max(0.7, min(1.5, adjustment))
-        
-        return adjustment
+        audit = {
+            "xgb": float(components["xgb"][0]),
+            "lightgbm": float(components["lightgbm"][0]),
+            "catboost": float(components["catboost"][0]),
+            "ensemble": float(ml_prob),
+            "method": components["method"],
+        }
+        return adjustment, audit
     
     def explain_prediction(self, features: Dict) -> Dict[str, float]:
         """Use feature importance to explain prediction. Returns top contributing factors."""

@@ -915,6 +915,12 @@ def calibrate_and_score(horses, overround, race_class=""):
             final_score = 0.50 * mc_score_norm + 0.50 * base_score
 
         h["selectionScore"] = round(final_score, 2)
+        from prediction_stages import record_stage
+        _stages = dict(h.get("predictionStages") or {})
+        record_stage(_stages, "wrapper_model_blend", h["rawModelProb"] / 100.0)
+        record_stage(_stages, "market_context_probability", h["winPercentage"] / 100.0)
+        record_stage(_stages, "selection_score", h["selectionScore"])
+        h["predictionStages"] = _stages
 
     # Gradient flat MC penalty (2A) — based on confidence gap, not binary
     if mc_is_flat:
@@ -1631,7 +1637,7 @@ def persist_selection_ledger(race_tips, date_str):
         if isinstance(bet_pick, dict) and bet_pick.get("should_bet"):
             rows.append(build_ledger_row(bet_pick, race_key, refused=False))
             continue
-        leader = race.get("raw_model_leader")
+        leader = race.get("refused_bet_pick") or race.get("raw_model_leader")
         if not isinstance(leader, dict) or not leader.get("horse"):
             continue
         refused_pick = dict(leader)
@@ -1710,14 +1716,18 @@ def store_selections_in_db(race_tips, date_str):
         distance = race.get("distance", "")
         going = race.get("going", "")
 
+        # ``bet_status`` is the race-level source of truth after crowd/risk
+        # reconciliation.  In particular, never resurrect a vetoed bet from
+        # the pre-gate ``primary_pick`` compatibility alias.
         stored_picks = []
-        explicit_bet_pick = race.get("bet_pick")
-        if isinstance(explicit_bet_pick, dict) and explicit_bet_pick.get("should_bet"):
-            stored_picks = [explicit_bet_pick]
-        else:
-            fallback_primary = race.get("primary_pick")
-            if isinstance(fallback_primary, dict) and fallback_primary.get("should_bet"):
-                stored_picks = [fallback_primary]
+        if race.get("bet_status") != "NO_BET":
+            explicit_bet_pick = race.get("bet_pick")
+            if isinstance(explicit_bet_pick, dict) and explicit_bet_pick.get("should_bet"):
+                stored_picks = [explicit_bet_pick]
+            else:
+                fallback_primary = race.get("primary_pick")
+                if isinstance(fallback_primary, dict) and fallback_primary.get("should_bet"):
+                    stored_picks = [fallback_primary]
 
         for pick in stored_picks:
             edge = pick.get("edge_pct", 0)
@@ -2123,6 +2133,7 @@ def build_export_pick(horse, rank=None):
     if not horse:
         return None
 
+    from prediction_stages import finalise_stages
     return {
         "rank": rank,
         "horse": horse.get("horse", "Unknown"),
@@ -2140,6 +2151,7 @@ def build_export_pick(horse, rank=None):
         "edge_pct": round(horse.get("modelEdge", 0), 1),
         "confidence": horse.get("confidence", "low"),
         "selection_score": round(horse.get("selectionScore", 0), 1),
+        "prediction_stages": finalise_stages(horse),
         "staking": horse.get("staking", "0u"),
         "key_factors": horse.get("key_factors", []),
         "value_rating": horse.get("valueRating", "Fair"),
@@ -3055,6 +3067,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
             sorted_horses = sorted(horses, key=lambda x: x.get("selectionScore", 0), reverse=True)
 
             full_field = []
+            from prediction_stages import finalise_stages
             for h in sorted_horses:
                 is_tip = h.get("horse", "").lower().strip() in tipped_names
                 entry = {
@@ -3074,6 +3087,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     "raw_model_pct": round(h.get("rawModelProb", 0), 1),
                     "edge_pct": round(h.get("modelEdge", 0), 1),
                     "selection_score": h.get("selectionScore", 0),
+                    "prediction_stages": finalise_stages(h),
                     "form": h.get("form", ""),
                     "running_style": h.get("runningStyle", "unknown"),
                     "weighted_form_score": round(h.get("weighted_form_score", 0), 1),
@@ -3118,6 +3132,8 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 else derive_no_bet_reason(raw_model_leader, coverage_pick)
             )
 
+            _crowd_gate_evaluated = False
+
             model_leader_horse = raw_model_leader.get("horse") if raw_model_leader else None
             for pick in picks:
                 if pick.get("selection_origin"):
@@ -3157,6 +3173,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 pick["model_leader_horse"] = model_leader_horse
 
             if _convergence_enabled and _confirm_with_model and _crowd_bet_decision and _normalize_track:
+                _crowd_gate_evaluated = True
                 _race_key = f"{_normalize_track(track)}_R{race_num}"
 
                 _crowd_scores = {}
@@ -3282,6 +3299,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                         print(f"    [CROWD] CONFIRMED: {_rh} — crowd ({_r_cs:.0f}) + model ({_r_stride:.0f})", file=sys.stderr)
 
             elif _convergence_enabled and not _confirm_with_model:
+                _crowd_gate_evaluated = True
                 for pick in picks:
                     pick["should_bet"] = False
                     pick["convergence_tier"] = "MODEL_ONLY"
@@ -3309,6 +3327,20 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                             _ff_entry["commercial_mentions"] = _ff_cons.get("commercial_mentions", 0)
                             _ff_entry["total_mentions"] = _ff_cons.get("total_mentions", 0)
 
+            from decision_contract import reconcile_crowd_bet
+            bet_pick, refused_bet_pick, bet_status, bet_status_reason = reconcile_crowd_bet(
+                bet_pick,
+                picks,
+                gate_evaluated=_crowd_gate_evaluated,
+            )
+            _final_candidate = bet_pick or refused_bet_pick
+            if isinstance(_final_candidate, dict):
+                from identity_normalization import normalize_runner_key
+                _final_key = normalize_runner_key(_final_candidate.get("horse"))
+                for _ff_entry in full_field:
+                    if normalize_runner_key(_ff_entry.get("horse")) == _final_key:
+                        _ff_entry["prediction_stages"] = _final_candidate.get("prediction_stages", {})
+
             _predictability = compute_race_predictability(runners, race_class, distance_m, going)
 
             all_race_tips.append({
@@ -3331,9 +3363,11 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 "top_picks": picks,
                 "raw_model_leader": raw_model_leader,
                 "bet_pick": bet_pick,
+                "refused_bet_pick": refused_bet_pick,
                 "coverage_pick": coverage_pick,
                 "bet_status": bet_status,
                 "bet_status_reason": bet_status_reason,
+                "mc_seed": int(mc_result.get("seed", mc_input["seed"])),
                 "primary_pick": primary_pick,
                 "full_field": full_field,
             })
@@ -3394,6 +3428,16 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                   f"price source is broken; every stake on this card "
                   f"deserves suspicion", file=sys.stderr)
 
+    # Final risk decisions happen before any aggregate, export contract, DB
+    # write or ledger row is derived from the races.
+    try:
+        from staking_controls import apply_drawdown_breaker, enforce_exposure_caps
+        apply_drawdown_breaker(all_race_tips)
+        enforce_exposure_caps(all_race_tips)
+    except Exception as _risk_err:
+        print(f"  [RISK] staking controls unavailable (non-fatal): {_risk_err}",
+              file=sys.stderr)
+
     all_picks = collect_day_picks(all_race_tips)
 
     day_summary = build_summary(
@@ -3415,6 +3459,8 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
         "bankers": select_bankers(all_picks),
         "summary": day_summary,
     }
+    from release_manifest import release_context_from_env
+    output["release"] = release_context_from_env()
 
     output["selection_contract"] = build_selection_contract(all_race_tips)
 
@@ -3441,13 +3487,6 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
 
     # roi-roadmap 01: ledger capture is measurement-only and must never block
     # the pipeline; it no-ops unless STRIDE_LEDGER_WRITE=true.
-    try:
-        from staking_controls import apply_drawdown_breaker, enforce_exposure_caps
-        apply_drawdown_breaker(all_race_tips)
-        enforce_exposure_caps(all_race_tips)
-    except Exception as _risk_err:
-        print(f"  [RISK] staking controls unavailable (non-fatal): {_risk_err}",
-              file=sys.stderr)
     persist_selection_ledger(all_race_tips, date_str)
 
     if store_in_db:

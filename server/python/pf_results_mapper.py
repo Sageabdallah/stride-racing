@@ -39,6 +39,8 @@ helpers) and never touches the network.
 import json
 import re
 
+from identity_normalization import normalize_runner_key
+
 METRO_TRACKS = [
     "flemington", "caulfield", "moonee valley", "sandown",
     "randwick", "royal randwick", "rosehill", "warwick farm", "canterbury",
@@ -69,8 +71,7 @@ CREATE TABLE IF NOT EXISTS pf_raw_payloads (
 def norm_name(name):
     """Horse-name key for the ID bridge: lowercase, no country suffix like
     '(NZ)', letters+digits only."""
-    s = re.sub(r"\([A-Z]{2,3}\)\s*$", "", str(name or "").strip())
-    return re.sub(r"[^a-z0-9]+", "", s.lower())
+    return normalize_runner_key(name)
 
 
 # --------------------------------------------------------- track canonical

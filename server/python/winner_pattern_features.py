@@ -6,9 +6,10 @@ priors and emits the recommended features so the model can actually exploit them
 
 Four features are implemented (flagship + roadmap priority 1-4):
 
-  1. prior_pb_close_underreaction  (flagship, S-001)
-       Prior start was a personal-best last-200m close, prior finish 3rd-5th, and
-       today's price sits in the 6.0-12.0 overlay band. Binary flag.
+  1. prior_pb_close_underreaction  (flagship, S-001; DISABLED)
+       The researched definition used the runner's own-race final SP to select an
+       odds band.  It remains neutral until a decision-time price source and
+       explicit approval make the feature safe for pre-race use.
   2. cohort_fast_close_prior       (sectional A-family)
        How far the horse's best prior last-200m beats the cohort's fast-close bar
        (25th-percentile of last_200m_time for track x distance x going x class).
@@ -69,7 +70,11 @@ FEATURE_NAMES = [
 ]
 
 # Features whose absence is informative — tree models should see NaN, not a filled 0.
-NAN_PRESERVE = ["cohort_fast_close_prior", "pos400_win_prior"]
+NAN_PRESERVE = [
+    "prior_pb_close_underreaction",
+    "cohort_fast_close_prior",
+    "pos400_win_prior",
+]
 
 WET_GOING_GROUPS = {"Soft", "Soft 6-7", "Heavy", "Heavy 8-10"}
 
@@ -322,20 +327,17 @@ def compute_features(history_df: pd.DataFrame, priors: WinnerPatternPriors) -> p
         lambda s: s.expanding().mean().shift(1)
     )
 
-    today_odds = pd.to_numeric(frame.get("sp_odds"), errors="coerce")
-    prev_pos = pd.to_numeric(frame["_prev_position"], errors="coerce")
-    prev_pb_close = (
-        frame["_prev_last200"].notna()
-        & frame["_prior_best_before_prev"].notna()
-        & (frame["_prev_last200"] <= frame["_prior_best_before_prev"] + _EPS)
+    # F1 is deliberately dormant.  Its researched odds-band definition used
+    # same-race final SP, which is prohibited as a pre-race feature by global
+    # rule 13.  Preserve NaN so the trainer/serving contract cannot silently
+    # turn this into an armed zero-valued feature.
+    print(
+        "[WINNER_PATTERN_DISABLED] prior_pb_close_underreaction is neutral: "
+        "its odds band depends on the runner's own-race final sp_odds "
+        "(global rule 13); explicit approval is required before activation.",
+        file=sys.stderr,
     )
-
-    # F1 — flagship prior-PB-close market underreaction flag.
-    f1 = (
-        prev_pb_close
-        & prev_pos.between(_PB_PRIOR_FINISH_LO, _PB_PRIOR_FINISH_HI, inclusive="both")
-        & today_odds.between(_PB_ODDS_LO, _PB_ODDS_HI, inclusive="both")
-    ).astype(float)
+    f1 = pd.Series(np.nan, index=frame.index, dtype=float)
 
     # F2 — cohort fast-close prior: prior best close vs the cohort's 25th-pctile bar.
     def _fast_close(row: pd.Series) -> float:

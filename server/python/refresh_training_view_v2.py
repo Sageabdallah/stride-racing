@@ -10,40 +10,7 @@ from textwrap import dedent
 from dotenv import load_dotenv
 import psycopg2
 
-
-DDL_FUNCTIONS = dedent(
-    """
-    CREATE OR REPLACE FUNCTION stride_norm_name(src text)
-    RETURNS text
-    LANGUAGE sql
-    IMMUTABLE
-    AS $$
-      SELECT lower(regexp_replace(coalesce(src, ''), '[^a-z0-9]+', '', 'g'));
-    $$;
-
-    CREATE OR REPLACE FUNCTION stride_norm_track(src text)
-    RETURNS text
-    LANGUAGE sql
-    IMMUTABLE
-    AS $$
-      SELECT CASE
-        WHEN src IS NULL OR btrim(src) = '' THEN ''
-        WHEN lower(src) IN ('royal randwick', 'randwick') THEN 'randwick'
-        WHEN lower(src) IN ('randwick-kensington', 'kensington') THEN 'kensington'
-        WHEN lower(src) IN ('rosehill gardens', 'rosehill') THEN 'rosehill'
-        WHEN lower(src) IN ('ascot', 'ascot wa') THEN 'ascotwa'
-        WHEN lower(src) LIKE '%moonee valley%' THEN 'mooneevalley'
-        WHEN lower(src) LIKE '%eagle farm%' THEN 'eaglefarm'
-        WHEN lower(src) LIKE '%morphettville%' THEN 'morphettville'
-        WHEN lower(src) LIKE '%caulfield%' THEN 'caulfield'
-        WHEN lower(src) LIKE '%flemington%' THEN 'flemington'
-        WHEN lower(src) LIKE '%shatin%' OR lower(src) LIKE '%sha tin%' THEN 'shatin'
-        WHEN lower(src) LIKE '%happy valley%' THEN 'happyvalley'
-        ELSE lower(regexp_replace(src, '[^a-z0-9]+', '', 'g'))
-      END;
-    $$;
-    """
-).strip()
+from identity_normalization import DDL_FUNCTIONS
 
 
 DDL_SUPPORT_INDEXES = dedent(
@@ -67,6 +34,15 @@ DDL_SUPPORT_INDEXES = dedent(
     CREATE INDEX IF NOT EXISTS idx_prediction_audit_norm_keys
         ON prediction_audit (race_number, stride_norm_track(track), stride_norm_name(horse_name))
         WHERE race_date IS NOT NULL AND race_number IS NOT NULL AND horse_name IS NOT NULL AND predicted_win_prob IS NOT NULL;
+
+    -- CREATE OR REPLACE FUNCTION does not rebuild expression-index keys.
+    -- Reindex every consumer after changing normalisation semantics or the
+    -- planner can return rows keyed by the previous, defective function.
+    REINDEX INDEX idx_sectional_times_norm_horse_date;
+    REINDEX INDEX idx_race_results_history_norm_keys;
+    REINDEX INDEX idx_selections_norm_keys;
+    REINDEX INDEX idx_training_data_norm_keys;
+    REINDEX INDEX idx_prediction_audit_norm_keys;
     """
 ).strip()
 
@@ -211,7 +187,10 @@ DDL_TRAINING_VIEW = dedent(
             s.race_date,
             stride_norm_track(s.track) AS track_norm,
             s.race_number,
-            s.horse_name_norm,
+            -- Re-normalise the source name at read time so rows captured
+            -- before the shared contract (including country suffixes) join
+            -- with current result identity.
+            stride_norm_name(s.horse_name) AS horse_name_norm,
             percentile_cont(0.5) WITHIN GROUP (ORDER BY s.decimal_odds)::double precision AS tip_time_odds,
             (ARRAY_AGG(s.seconds_to_jump ORDER BY s.captured_at ASC))[1] AS seconds_to_jump
         FROM runner_odds_snapshots s
