@@ -389,8 +389,22 @@ def scenario_adjustments(styles, leader_rate, pace_regime):
     return adj
 
 
-def stability_from_positions(std_pos, ci_width):
-    """Map position volatility and CI width to a 0-100 stability score."""
+def stability_from_positions(std_pos, ci_width, field_size=None):
+    """Map position volatility and CI width to a 0-100 stability score.
+
+    #124 defect 4: std_pos scales with field size — a uniform-random
+    finisher has std sqrt((n^2-1)/12), 2.29 in an 8-field but 4.03 in a
+    14-field — so the fixed 0.6/40 constants zeroed stability for entire
+    big fields, and stability >= 45 gates mc_is_playable and staking.
+    Behind STRIDE_MC_FIX_STABILITY_FIELDSIZE (default OFF), std_pos is
+    rescaled to its 8-horse equivalent (the neutral point of the existing
+    constants: the factor is exactly 1.0 at n=8) so the same relative
+    volatility scores the same in any field size. Flag off, or no
+    field_size supplied, the shipped formula is untouched.
+    """
+    if (field_size and field_size > 1
+            and _flag_enabled("STRIDE_MC_FIX_STABILITY_FIELDSIZE")):
+        std_pos = std_pos * math.sqrt(63.0 / (field_size ** 2 - 1))
     return float(max(0, min(100, 100 - (std_pos - 0.6) * 40 - ci_width * 320)))
 
 
@@ -1902,7 +1916,7 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
     for i, base in enumerate(analysis):
         lower, upper = wilson_interval((finish_positions[:, i] == 1).sum(), mc_sims, alpha=MC_SIM_LIMITS['ci_alpha'])
         ci_width = upper - lower
-        stability = stability_from_positions(std_pos[i], ci_width)
+        stability = stability_from_positions(std_pos[i], ci_width, field_size=n)
         scen_stability = max(0.0, min(100.0, 100 - scenario_ranges[i] * 350))
         stability_score = 0.7 * stability + 0.3 * scen_stability
         

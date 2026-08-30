@@ -146,3 +146,54 @@ class TestDefect3ScenarioRanges:
         # regimes, so a genuine spread must survive the fix.
         res = _simulate(styles=['leader'] * 6, pace_mode='basic')
         assert any(r['scenario_sensitivity'] > 0.0 for r in res)
+
+
+class TestDefect4StabilityFieldSize:
+    """#124 defect 4: stability_from_positions punishes field size itself."""
+
+    UNIFORM_STD_8 = np.sqrt((8 ** 2 - 1) / 12.0)     # 2.2913
+    UNIFORM_STD_14 = np.sqrt((14 ** 2 - 1) / 12.0)   # 4.0311
+
+    def test_flag_off_big_fields_zero_out(self, monkeypatch):
+        monkeypatch.delenv('STRIDE_MC_FIX_STABILITY_FIELDSIZE', raising=False)
+        # A maximally unpredictable runner in each field size, same ci.
+        s8 = racing_system.stability_from_positions(self.UNIFORM_STD_8, 0.05)
+        s14 = racing_system.stability_from_positions(self.UNIFORM_STD_14, 0.05)
+        # The shipped defect: identical (relative) chaos scores ~16 in an
+        # 8-field but 0 in a 14-field purely because the field is bigger.
+        assert s8 > 0
+        assert s14 == 0.0
+
+    def test_flag_off_ignores_field_size_entirely(self, monkeypatch):
+        monkeypatch.delenv('STRIDE_MC_FIX_STABILITY_FIELDSIZE', raising=False)
+        legacy = racing_system.stability_from_positions(3.0, 0.1)
+        assert racing_system.stability_from_positions(3.0, 0.1, field_size=14) == legacy
+        assert racing_system.stability_from_positions(3.0, 0.1, field_size=6) == legacy
+
+    def test_flag_on_same_relative_volatility_scores_the_same(self, monkeypatch):
+        monkeypatch.setenv('STRIDE_MC_FIX_STABILITY_FIELDSIZE', 'true')
+        s8 = racing_system.stability_from_positions(
+            self.UNIFORM_STD_8, 0.05, field_size=8)
+        s14 = racing_system.stability_from_positions(
+            self.UNIFORM_STD_14, 0.05, field_size=14)
+        assert s14 == pytest.approx(s8, abs=1e-9)
+
+    def test_flag_on_is_identity_at_the_8_horse_anchor(self, monkeypatch):
+        monkeypatch.delenv('STRIDE_MC_FIX_STABILITY_FIELDSIZE', raising=False)
+        legacy = racing_system.stability_from_positions(1.8, 0.07)
+        monkeypatch.setenv('STRIDE_MC_FIX_STABILITY_FIELDSIZE', 'true')
+        anchored = racing_system.stability_from_positions(1.8, 0.07, field_size=8)
+        assert anchored == pytest.approx(legacy)
+
+    def test_flag_on_a_14_field_can_pass_the_playability_gate(self, monkeypatch):
+        monkeypatch.delenv('STRIDE_MC_FIX_STABILITY_FIELDSIZE', raising=False)
+        off = _simulate(n=14, probs=[35] + [5] * 13)
+        monkeypatch.setenv('STRIDE_MC_FIX_STABILITY_FIELDSIZE', 'true')
+        on = _simulate(n=14, probs=[35] + [5] * 13)
+        for r_off, r_on in zip(off, on):
+            assert r_on['stability_score'] >= r_off['stability_score']
+        # mc_is_playable / staking gate at stability >= 45: the defect kept
+        # whole 10+ fields under it; the fix must let a solid favourite back
+        # over the line.
+        assert max(r['stability_score'] for r in off) < 45
+        assert on[0]['stability_score'] >= 45
