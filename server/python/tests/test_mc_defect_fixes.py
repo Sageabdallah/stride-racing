@@ -74,8 +74,16 @@ class TestDefect5DeadFields:
         assert mc_api._style_ordinal('never-seen-style') == 1
 
     def test_display_kelly_delegates_to_engine_formula(self):
+        # Half-Kelly, deliberately matching mc_compute_staking's default
+        # fractional_kelly mode so the two endpoints publish comparable
+        # kellyStake numbers (audit follow-up on the #124 defect-5 fix).
         assert mc_api._display_kelly(0.3, 5.0) == pytest.approx(
-            racing_system.kelly_stake(0.3, 5.0))
+            racing_system.kelly_stake(0.3, 5.0, fraction=0.5))
+        assert mc_api._display_kelly(0.2, 8.0) == pytest.approx(
+            racing_system.mc_compute_staking(
+                {'win_prob_sim': 0.2, 'market_odds': 8.0,
+                 'stability_score': 60.0, 'ev': 0.2},
+                'fractional_kelly', 10, 1000, 10, 10)['kelly_pct'] / 100.0)
 
     def test_display_kelly_zero_on_unusable_inputs(self):
         assert mc_api._display_kelly(0.0, 5.0) == 0.0
@@ -319,3 +327,17 @@ class TestDefect2DirichletConcentration:
         evidence = np.array([40.0, 0.0])
         legacy = racing_system._dirichlet_concentration(evidence, False)
         assert np.array_equal(legacy, np.maximum(6.0, 12.0 + 1.3 * evidence))
+
+    def test_flag_on_thin_regimes_do_not_resurrect_the_phantom(self, monkeypatch):
+        # Half leaders puts pressure at ~0.5, so fast/melt are drawn only on
+        # >2.4-sigma noise — a handful of sims whose per-runner "win rates"
+        # are 0 or 1 by construction. Counting those as sampled would bring
+        # the phantom range straight back; the min-draws floor excludes them.
+        styles = ['leader', 'leader', 'leader',
+                  'midfield', 'midfield', 'midfield']
+        monkeypatch.setenv('STRIDE_MC_FIX_SCENARIO_RANGES', 'true')
+        on = _simulate(probs=[60, 8, 8, 8, 8, 8], styles=styles)
+        assert all(r['scenario_sensitivity'] == 0.0 for r in on)
+        monkeypatch.delenv('STRIDE_MC_FIX_SCENARIO_RANGES')
+        off = _simulate(probs=[60, 8, 8, 8, 8, 8], styles=styles)
+        assert off[0]['scenario_sensitivity'] > 0.3
