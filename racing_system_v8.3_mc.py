@@ -1775,6 +1775,24 @@ class RacingModel:
 
 
 
+def _dirichlet_concentration(evidence, fix_enabled):
+    """Concentration for the evidence-driven Dirichlet perturbation.
+
+    #124 defect 2: the shipped per-horse concentration makes the Dirichlet
+    mean p_i * conc_i renormalised — win probabilities reweighted by career
+    start count (median 7.3pp field distortion; a different top pick from
+    the model's own ranking in ~9.5% of races). Evidence should set how
+    TIGHT the noise is, not shift its centre: with the fix enabled the field
+    shares one scalar concentration — the mean of the per-horse values,
+    preserving the overall dispersion level — so E[sampled] stays
+    proportional to base_probs. (The max(6.0, ...) in the legacy branch
+    never binds: 12 + 1.3 * evidence >= 12 always.)
+    """
+    if fix_enabled:
+        return float(np.mean(12.0 + 1.3 * evidence))
+    return np.maximum(6.0, 12.0 + 1.3 * evidence)
+
+
 def get_leader_rate_estimate(model, race):
     """Best-effort leader-rate estimate with course profile fallback."""
     course_lower = race.course.lower()
@@ -1828,7 +1846,8 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
         hist = model.horse_history.get(model._get_horse_key(runner), {}) if runner else {}
         evidence.append(len(hist.get('runs', [])))
     evidence = np.array(evidence, dtype=float)
-    conc = np.maximum(6.0, 12.0 + 1.3 * evidence)
+    dirichlet_conc_fix = _flag_enabled("STRIDE_MC_FIX_DIRICHLET_CONC")
+    conc = _dirichlet_concentration(evidence, dirichlet_conc_fix)
 
     # Going-aware Dirichlet concentration: wet/heavy widens uncertainty (lower conc = more dispersed)
     going_lower = getattr(race, 'going', '').lower() if hasattr(race, 'going') else ''
@@ -1874,7 +1893,13 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
         
         # Optional additional Dirichlet noise for "dirichlet" model
         if mc_model == 'dirichlet':
-            sampled_probs = rng.dirichlet(np.maximum(0.25, sampled_probs * (10 + evidence)))
+            if dirichlet_conc_fix:
+                # Same defect-2 shape as the main concentration above:
+                # per-horse (10 + evidence) recentres, a scalar only widens.
+                sampled_probs = rng.dirichlet(
+                    np.maximum(0.25, sampled_probs * (10.0 + float(evidence.mean()))))
+            else:
+                sampled_probs = rng.dirichlet(np.maximum(0.25, sampled_probs * (10 + evidence)))
         
         logits = np.log(np.maximum(sampled_probs, 1e-9))
         logits += scenario_adjustments(styles, leader_rate_s, pace_regime)
