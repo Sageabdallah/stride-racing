@@ -58,3 +58,15 @@ def test_gates_still_fail_loud_when_nothing_landed_at_all():
         assert "SystemExit(1)" in script, (
             f"{name}: an empty trailing window must still exit 1 — that case "
             f"is the silent no-op class this gate exists to catch.")
+
+
+def test_ported_gates_warn_when_the_window_itself_goes_stale():
+    """The benign-overlap pass must not hide the daily collector AND the
+    backfill both dying: rows only age out of the window, so the ported
+    gates check the newest window row on every zero-delta pass. (QLD carries
+    its own per-meeting coverage report; these two have no track universe to
+    check against, so freshness is the source-agnostic equivalent.)"""
+    for name in (GATE_NAMES[0], GATE_NAMES[2]):
+        script = _gate_script(name)
+        assert "MAX(race_date)" in script and "::warning::" in script, (
+            f"{name}: zero-delta pass lost its staleness advisory")
