@@ -1,0 +1,21 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "entry": ["client/src/main.tsx", "server/index.ts", "script/build.ts"],
+  "project": [
+    "client/src/**/*.{ts,tsx}",
+    "server/**/*.ts",
+    "shared/**/*.ts",
+    "script/**/*.ts",
+    "vite.config.ts"
+  ],
+  "ignore": [
+    "attached_assets/**",
+    "backtest_results/**",
+    "catboost_info/**",
+    "data/**",
+    "dist/**",
+    "historical_data/**",
+    "racecards/**",
+    "server/python/**"
+  ]
+}

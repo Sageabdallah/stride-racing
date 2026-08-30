@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="WizBet mark">
+  <defs>
+    <linearGradient id="wizbet-gold" x1="10" y1="8" x2="54" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f8dda1"/>
+      <stop offset="0.45" stop-color="#d9a443"/>
+      <stop offset="1" stop-color="#8d5a16"/>
+    </linearGradient>
+    <linearGradient id="wizbet-frame" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f6e4bd" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#b97a28" stop-opacity="0.8"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="#0b0d11"/>
+  <rect x="6.5" y="6.5" width="51" height="51" rx="13.5" fill="none" stroke="url(#wizbet-frame)" stroke-width="1.5"/>
+  <path d="M16 18 23 45 32 25.5 41 45 48 18" fill="none" stroke="url(#wizbet-gold)" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
+  <path d="M18 18h28" fill="none" stroke="url(#wizbet-frame)" stroke-linecap="round" stroke-width="2" opacity="0.7"/>
+</svg>

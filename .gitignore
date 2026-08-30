@@ -9,19 +9,11 @@
 # ─── Local config (templated — copy the .example file) ───
 server/python/tipster_panel.json
 
-# ─── Not part of this repo (frontend / Node / TS server) ───
-client/
+# ─── Frontend / Node build artifacts (the app itself lives in this repo) ───
 node_modules/
 dist/
 build/
-package*.json
-tsconfig.json
-*.config.ts
-*.config.js
-components.json
-knip.json
 .nvmrc
-drizzle.config.ts
 .claude/
 .config/
 .local/
