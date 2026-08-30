@@ -29,7 +29,7 @@ import {
 } from "./strideConceptualChat";
 import { STRIDE_LOCAL_SYNTHESIS_PROMPT, STRIDE_PROMPT_VERSION, getTrackProfile } from "./stridePrompts";
 import type { StrideIntent } from "./strideChatRetrieval";
-import { fetchLiveRaceCard, hasRacingApiCreds } from "./racingApiClient";
+import { fetchLiveRaceCard, hasPuntingFormKey } from "./pfProvider";
 import { CLAUDE_MODEL } from "./claudeConfig";
 
 const anthropic = new Anthropic({
@@ -627,7 +627,6 @@ async function buildSearchPlan(input: ChatCompletionRequest, localTurn?: StrideC
     const response = await anthropic.messages.create({
       model: CLAUDE_MODEL,
       max_tokens: 900,
-      temperature: 0,
       system: "You plan search queries for a chat assistant. Return valid JSON only.",
       messages: [{ role: "user", content: prompt }],
     });
@@ -1881,7 +1880,6 @@ export async function synthesizeLocalWithClaude(turn: StrideChatTurn): Promise<L
       const response = await anthropic.messages.create({
         model: CLAUDE_MODEL,
         max_tokens: 2000,
-        temperature: 0.2,
         system: STRIDE_LOCAL_SYNTHESIS_PROMPT,
         messages: [{ role: "user", content: prompt }],
       });
@@ -2235,7 +2233,6 @@ async function synthesizeWithClaude(params: {
     const response = await anthropic.messages.create({
       model: CLAUDE_MODEL,
       max_tokens: 1200,
-      temperature: 0.2,
       system:
         "You are STRIDE, the definitive Australian horse racing AI. You answer every racing question with the confidence and depth of a 25-year professional form analyst and punter.\n\nFUTURE RACE PROTOCOL (CRITICAL — READ FIRST):\nWhen a user asks about a race that is days away and day-of tips are not yet published:\n1. The [LIVE RACE CARD] section (if present) contains the ACTUAL declared runners, barriers, jockeys, trainers, and early odds — this is your primary source. Treat it as authoritative.\n2. Use [WEB RESULTS] and [FETCHED PAGE EXCERPTS] to find form, sectionals, market moves, and expert commentary for runners in that field.\n3. Apply [TRACK PROFILE] to determine which barrier, running style, and distance suits the track.\n4. You MUST commit to a specific selection. Name a horse, give the barrier and jockey, then explain in 3-4 sentences: recent form trend, distance/track suitability, barrier advantage, and market position.\n5. Start your answer with the selection: 'My best bet for Race X at [Track] on [Date]: [HORSE NAME] (Barrier Y, Jockey Z).'\n6. NEVER say 'I couldn't find published tips.' NEVER hedge with 'check back closer to race day.' If a declared field exists, that field is your raw material — reason from it like an expert.\n7. If the [LIVE RACE CARD] is empty but web results mention horse names for that meeting, use those names.\n8. If no horses can be identified at all, provide the best-guess market leader based on what you know about the track/distance, and say so.\n\nReturn valid JSON only.",
       messages: [{ role: "user", content: prompt }],
@@ -2450,7 +2447,7 @@ export async function orchestrateChatTurn(input: ChatCompletionRequest): Promise
 
   // Fetch live race card BEFORE synthesis — needed for field discovery when no tip candidates
   let liveRaceCard: string | null = null;
-  if (hasRacingApiCreds && effectiveInput.raceContext?.track && effectiveInput.raceContext?.date) {
+  if (hasPuntingFormKey && effectiveInput.raceContext?.track && effectiveInput.raceContext?.date) {
     liveRaceCard = await fetchLiveRaceCard(effectiveInput.raceContext.track, effectiveInput.raceContext.date);
   }
 

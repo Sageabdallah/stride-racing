@@ -15,6 +15,7 @@ import { fileURLToPath } from "url";
 import { db } from "./db";
 import { resolvePythonBin, resolvePythonScriptDir, parsePythonJson } from "./pythonBin";
 import { CLAUDE_MODEL } from "./claudeConfig";
+import { fetchPfMeets, fetchPfRacecardMeets, fetchPfResults, fetchPfSpeedmaps, hasPuntingFormKey } from "./pfProvider";
 import { desc, sql, eq } from "drizzle-orm";
 import { generateRaceOverview, generateRunnerAnalysis } from "./runnerAnalysis";
 import { loadAllForwardTestSnapshots, loadForwardTestSnapshot } from "./forwardTestSnapshot";
@@ -37,11 +38,6 @@ import {
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// The Racing API configuration
-const RACING_API_BASE_URL = "https://api.theracingapi.com";
-const RACING_API_USERNAME = process.env.RACING_API_USERNAME;
-const RACING_API_PASSWORD = process.env.RACING_API_PASSWORD;
 
 // Helper function to run Python Monte Carlo simulation
 function runPythonMonteCarlo(input: any): Promise<any> {
@@ -82,35 +78,6 @@ function runPythonMonteCarlo(input: any): Promise<any> {
     python.stdin.write(JSON.stringify(input));
     python.stdin.end();
   });
-}
-
-// Helper function to fetch from The Racing API
-// Uses HTTP Basic Auth with username as API key and empty password
-async function fetchRacingAPI(endpoint: string): Promise<any> {
-  if (!RACING_API_USERNAME) {
-    throw new Error("Racing API credentials not configured");
-  }
-
-  // The Racing API uses username:password format (password can be empty or the actual password)
-  const password = RACING_API_PASSWORD || '';
-  const credentials = Buffer.from(`${RACING_API_USERNAME}:${password}`).toString('base64');
-  
-  const response = await fetch(`${RACING_API_BASE_URL}${endpoint}`, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Basic ${credentials}`,
-      'Accept': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    },
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error(`Racing API error response: ${errorText}`);
-    throw new Error(`Racing API error: ${response.status} ${response.statusText}`);
-  }
-
-  return response.json();
 }
 
 // Anthropic client for Stride AI. Model comes from claudeConfig; the
@@ -1358,15 +1325,15 @@ Keep it under 80 words. Write like a racing journalist.`;
       let allMeets: any[] = [];
       let dataSource = 'local';
       
-      // Try to fetch from live Racing API first
+      // Try to fetch live meetings from Punting Form first (the pipeline's provider)
       try {
-        if (RACING_API_USERNAME && RACING_API_PASSWORD) {
-          console.log('Attempting to fetch upcoming races from Racing API...');
-          const liveData = await fetchRacingAPI('/v1/racecards?region=aus');
-          
-          if (liveData && Array.isArray(liveData.racecards)) {
+        if (hasPuntingFormKey) {
+          console.log('Attempting to fetch upcoming races from Punting Form...');
+          const liveMeets = await fetchPfRacecardMeets(todayStr);
+
+          if (Array.isArray(liveMeets) && liveMeets.length > 0) {
             dataSource = 'live';
-            for (const meet of liveData.racecards) {
+            for (const meet of liveMeets) {
               const racesWithRunners = (meet.races || []).filter((r: any) => 
                 r.runners && r.runners.length > 0 && !r.runners.every((run: any) => run.scratched)
               );
@@ -1409,7 +1376,7 @@ Keep it under 80 words. Write like a racing journalist.`;
           }
         }
       } catch (apiError: any) {
-        console.log('Racing API not available, falling back to local data:', apiError.message);
+        console.log('Punting Form not available, falling back to local data:', apiError.message);
       }
       
       // If no live data, fall back to local files - but only FUTURE races
@@ -1859,50 +1826,38 @@ Keep it under 80 words. Write like a racing journalist.`;
       let allMeets: any[] = [];
       let dataSource = 'none';
       
-      // First, try to fetch FRESH data from The Racing API
+      // First, try to fetch FRESH data from Punting Form (the pipeline's provider)
       try {
-        console.log(`Fetching fresh races from Racing API for ${todayStr}...`);
-        const meetsData = await fetchRacingAPI(`/v1/australia/meets?date=${todayStr}`);
-        const meetsList = meetsData?.meets || meetsData || [];
-        
-        if (Array.isArray(meetsList) && meetsList.length > 0) {
-          dataSource = 'racing_api';
-          
-          for (const meet of meetsList) {
-            const meetId = meet.meet_id || meet.id;
-            if (!meetId) continue;
-            
-            try {
-              // Use correct endpoint: /v1/australia/meets/{meet_id}/races
-              const racecard = await fetchRacingAPI(`/v1/australia/meets/${meetId}/races`);
-              const races = racecard?.races || racecard || [];
-              
-              // Only include races that haven't started yet
-              const upcomingRaces = races.filter((r: any) => {
-                if (r.race_status === 'Results' || r.race_status === 'Completed') return false;
-                if (r.off_time) {
-                  const raceTime = new Date(r.off_time).getTime();
-                  return raceTime > nowTimestamp;
-                }
-                return true; // Include if no off_time (assume upcoming)
-              });
-              
-              if (upcomingRaces.length > 0) {
-                allMeets.push({
-                  date: todayStr,
-                  course: meet.course || meet.track,
-                  meet_id: meetId,
-                  races: upcomingRaces
-                });
+        console.log(`Fetching fresh races from Punting Form for ${todayStr}...`);
+        const pfMeets = await fetchPfRacecardMeets(todayStr);
+
+        if (Array.isArray(pfMeets) && pfMeets.length > 0) {
+          dataSource = 'punting_form';
+
+          for (const meet of pfMeets) {
+            // Only include races that haven't started yet
+            const upcomingRaces = (meet.races || []).filter((r: any) => {
+              if (r.race_status === 'Results' || r.race_status === 'Completed') return false;
+              if (r.off_time) {
+                const raceTime = new Date(r.off_time).getTime();
+                return raceTime > nowTimestamp;
               }
-            } catch (err) {
-              console.log(`Failed to fetch racecard for ${meetId}`);
+              return true; // Include if no off_time (assume upcoming)
+            });
+
+            if (upcomingRaces.length > 0) {
+              allMeets.push({
+                date: todayStr,
+                course: meet.course || meet.track,
+                meet_id: meet.meet_id,
+                races: upcomingRaces
+              });
             }
           }
-          console.log(`Racing API: Found ${allMeets.length} meets with upcoming races`);
+          console.log(`Punting Form: Found ${allMeets.length} meets with upcoming races`);
         }
       } catch (apiErr: any) {
-        console.log(`Racing API not available: ${apiErr.message}`);
+        console.log(`Punting Form not available: ${apiErr.message}`);
       }
       
       // Fallback to local files if API fails - but only FUTURE races
@@ -2316,110 +2271,116 @@ Keep it under 80 words. Write like a racing journalist.`;
   });
 
   // ==========================================
-  // THE RACING API ENDPOINTS
+  // LIVE PROVIDER ENDPOINTS (Punting Form)
+  // The Racing API retired (ceased AU coverage 2026-07); these routes now
+  // serve the same shapes from Punting Form — the pipeline's provider.
   // ==========================================
 
-  // Get today's racecards
+  function todayIsoDate(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  // Racecards for a date (racecard-contract meets)
   app.get("/api/racing/racecards", async (req, res) => {
     try {
-      const { date, region } = req.query;
-      let endpoint = "/v1/racecards";
-      const params = new URLSearchParams();
-      
-      if (date) params.append("date", date as string);
-      if (region) params.append("region", region as string);
-      
-      if (params.toString()) {
-        endpoint += `?${params.toString()}`;
+      const date = typeof req.query.date === "string" && req.query.date ? req.query.date : todayIsoDate();
+      const meets = await fetchPfRacecardMeets(date);
+      if (!meets) {
+        return res.status(503).json({ error: "Punting Form unavailable — set PUNTINGFORM_API_KEY" });
       }
-      
-      const data = await fetchRacingAPI(endpoint);
-      res.json(data);
+      res.json({ date, racecards: meets });
     } catch (error: any) {
-      console.error("Racing API racecards error:", error);
+      console.error("Punting Form racecards error:", error);
       res.status(500).json({ error: error.message || "Failed to fetch racecards" });
     }
   });
 
-  // Get specific race details
-  app.get("/api/racing/race/:raceId", async (req, res) => {
-    try {
-      const { raceId } = req.params;
-      const data = await fetchRacingAPI(`/v1/races/${raceId}`);
-      res.json(data);
-    } catch (error: any) {
-      console.error("Racing API race error:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch race" });
-    }
+  // Per-race and per-horse id lookups were The Racing API's shapes; Punting
+  // Form's Starter tier carries form inside the meeting card instead.
+  app.get("/api/racing/race/:raceId", (_req, res) => {
+    res.status(410).json({
+      error: "Retired with The Racing API. Fetch /api/racing/racecards?date=YYYY-MM-DD — form arrives with the meeting card.",
+    });
   });
 
-  // Get horse details
-  app.get("/api/racing/horse/:horseId", async (req, res) => {
-    try {
-      const { horseId } = req.params;
-      const data = await fetchRacingAPI(`/v1/horses/${horseId}`);
-      res.json(data);
-    } catch (error: any) {
-      console.error("Racing API horse error:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch horse" });
-    }
+  app.get("/api/racing/horse/:horseId", (_req, res) => {
+    res.status(410).json({
+      error: "Retired with The Racing API. Horse form arrives with the meeting card (last 10 runs per runner).",
+    });
   });
 
-  // Get race results
+  // Results for a date, optionally filtered by course
   app.get("/api/racing/results", async (req, res) => {
     try {
-      const { date, region, course } = req.query;
-      let endpoint = "/v1/results";
-      const params = new URLSearchParams();
-      
-      if (date) params.append("date", date as string);
-      if (region) params.append("region", region as string);
-      if (course) params.append("course", course as string);
-      
-      if (params.toString()) {
-        endpoint += `?${params.toString()}`;
+      const date = typeof req.query.date === "string" && req.query.date ? req.query.date : todayIsoDate();
+      const results = await fetchPfResults(date);
+      if (!results) {
+        return res.status(503).json({ error: "Punting Form unavailable — set PUNTINGFORM_API_KEY" });
       }
-      
-      const data = await fetchRacingAPI(endpoint);
-      res.json(data);
+      const course = typeof req.query.course === "string" ? req.query.course.toLowerCase() : "";
+      const filtered = course
+        ? results.filter((r: any) => String(r.course ?? r.track ?? "").toLowerCase().includes(course))
+        : results;
+      res.json({ date, results: filtered });
     } catch (error: any) {
-      console.error("Racing API results error:", error);
+      console.error("Punting Form results error:", error);
       res.status(500).json({ error: error.message || "Failed to fetch results" });
     }
   });
 
-  // Get courses/tracks list
+  // Courses/meetings for a date
   app.get("/api/racing/courses", async (req, res) => {
     try {
-      const { region } = req.query;
-      let endpoint = "/v1/courses";
-      
-      if (region) {
-        endpoint += `?region=${region}`;
+      const date = typeof req.query.date === "string" && req.query.date ? req.query.date : todayIsoDate();
+      const meets = await fetchPfMeets(date);
+      if (!meets) {
+        return res.status(503).json({ error: "Punting Form unavailable — set PUNTINGFORM_API_KEY" });
       }
-      
-      const data = await fetchRacingAPI(endpoint);
-      res.json(data);
+      res.json({ date, courses: meets });
     } catch (error: any) {
-      console.error("Racing API courses error:", error);
+      console.error("Punting Form courses error:", error);
       res.status(500).json({ error: error.message || "Failed to fetch courses" });
     }
   });
 
-  // Test Racing API connection
-  app.get("/api/racing/test", async (req, res) => {
+  // Punting Form speedmap (settle / pace pressure / pfScore / neural price)
+  // for a meeting, or one race with raceNo. This is the provider-side view
+  // of how the race maps; the model's own map is /api/race-field/:date.
+  app.get("/api/pf/speedmaps", async (req, res) => {
     try {
-      const data = await fetchRacingAPI("/v1/courses?region=aus");
-      res.json({ 
-        status: "connected", 
-        message: "Successfully connected to The Racing API",
-        sample: data
+      const meetingId = String(req.query.meetingId ?? "").trim();
+      if (!meetingId) {
+        return res.status(400).json({ error: "meetingId is required (from /api/racing/courses)" });
+      }
+      const raceNo = Number(req.query.raceNo ?? 0) || 0;
+      const rows = await fetchPfSpeedmaps(meetingId, raceNo);
+      if (!rows) {
+        return res.status(503).json({ error: "Punting Form unavailable — set PUNTINGFORM_API_KEY" });
+      }
+      res.json({ meetingId, raceNo, speedmaps: rows });
+    } catch (error: any) {
+      console.error("Punting Form speedmaps error:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch speedmaps" });
+    }
+  });
+
+  // Live provider connectivity check
+  app.get("/api/racing/test", async (_req, res) => {
+    try {
+      const meets = await fetchPfMeets(todayIsoDate());
+      if (!meets) {
+        return res.status(503).json({ status: "error", message: "Punting Form unavailable — set PUNTINGFORM_API_KEY" });
+      }
+      res.json({
+        status: "connected",
+        message: "Successfully connected to Punting Form",
+        meetings: meets.length,
       });
     } catch (error: any) {
-      console.error("Racing API test error:", error);
-      res.status(500).json({ 
-        status: "error", 
-        message: error.message || "Failed to connect to Racing API" 
+      console.error("Punting Form test error:", error);
+      res.status(500).json({
+        status: "error",
+        message: error.message || "Failed to connect to Punting Form",
       });
     }
   });

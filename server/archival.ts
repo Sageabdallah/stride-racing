@@ -1,58 +1,31 @@
 import { db } from "./db";
 import { selections, trainingData, races, type InsertTrainingData } from "@shared/schema";
 import { eq, lt, and, isNull } from "drizzle-orm";
+import { fetchPfResults } from "./pfProvider";
 
-const RACING_API_BASE = 'https://api.theracingapi.com';
-const RACING_API_USERNAME = process.env.RACING_API_USERNAME;
-const RACING_API_PASSWORD = process.env.RACING_API_PASSWORD || '';
+// Results come from Punting Form — the pipeline's provider — matched to a
+// race by date + normalised track + race number. One fetch per date, cached.
+const pfResultsByDate = new Map<string, any[] | null>();
 
-function getRacingAPIHeaders(): HeadersInit {
-  const apiKey = process.env.THE_RACING_API_KEY;
-  if (apiKey) {
-    return {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    };
-  }
-
-  if (RACING_API_USERNAME) {
-    const credentials = Buffer.from(`${RACING_API_USERNAME}:${RACING_API_PASSWORD}`).toString('base64');
-    return {
-      'Authorization': `Basic ${credentials}`,
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    };
-  }
-
-  throw new Error('Racing API credentials not configured');
-}
-
-async function fetchRacingAPI(endpoint: string): Promise<any> {
-  const response = await fetch(`${RACING_API_BASE}${endpoint}`, {
-    headers: getRacingAPIHeaders(),
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Racing API error: ${response.status}`);
-  }
-  
-  return response.json();
+function normalizeTrackKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 async function fetchRaceResults(track: string, raceDate: string, raceNumber: number): Promise<any> {
   try {
-    const endpoint = `/v1/australia/results?date=${raceDate}&course=${encodeURIComponent(track)}`;
-    const data = await fetchRacingAPI(endpoint);
-    
-    const results = data?.results || data || [];
-    if (Array.isArray(results)) {
-      return results.find((r: any) => 
-        r.race_number === raceNumber || 
-        r.raceNumber === raceNumber
-      );
+    let blocks = pfResultsByDate.get(raceDate);
+    if (blocks === undefined) {
+      blocks = await fetchPfResults(raceDate);
+      pfResultsByDate.set(raceDate, blocks);
     }
-    return null;
+    if (!Array.isArray(blocks)) return null;
+
+    const wanted = normalizeTrackKey(track);
+    return blocks.find((r: any) => {
+      if (Number(r.race_number ?? r.raceNumber) !== Number(raceNumber)) return false;
+      const course = normalizeTrackKey(String(r.course ?? r.track ?? ''));
+      return course === wanted || course.includes(wanted) || wanted.includes(course);
+    }) ?? null;
   } catch (error) {
     console.log(`Could not fetch results for ${track} R${raceNumber} on ${raceDate}`);
     return null;

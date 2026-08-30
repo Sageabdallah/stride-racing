@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { db } from "./db";
 import { resolvePythonBin, resolvePythonScriptDir, parsePythonJson } from "./pythonBin";
+import { fetchPfRacecardMeets } from "./pfProvider";
 import { races, selections, pipelineRuns } from "@shared/schema";
 import { eq, and, gte, desc, sql } from "drizzle-orm";
 
@@ -82,39 +83,11 @@ async function lookupFrankingByNames(horseNames: string[]): Promise<Record<strin
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const RACING_API_BASE_URL = "https://api.theracingapi.com";
-const RACING_API_USERNAME = process.env.RACING_API_USERNAME;
-const RACING_API_PASSWORD = process.env.RACING_API_PASSWORD;
-
 const BASE_ITERATIONS = 5000;
 function getIterations(fieldSize: number): number {
   if (fieldSize <= 10) return BASE_ITERATIONS;
   if (fieldSize <= 14) return 3000;
   return 2000;
-}
-
-async function fetchRacingAPI(endpoint: string): Promise<any> {
-  if (!RACING_API_USERNAME) {
-    throw new Error("Racing API credentials not configured");
-  }
-
-  const password = RACING_API_PASSWORD || '';
-  const credentials = Buffer.from(`${RACING_API_USERNAME}:${password}`).toString('base64');
-  
-  const response = await fetch(`${RACING_API_BASE_URL}${endpoint}`, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Basic ${credentials}`,
-      'Accept': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Racing API error: ${response.status} ${response.statusText}`);
-  }
-
-  return response.json();
 }
 
 function runPythonMonteCarlo(input: any): Promise<any> {
@@ -205,49 +178,37 @@ export class RacePipeline {
       let allMeets: any[] = [];
 
       try {
-        console.log(`[Pipeline] Fetching races from Racing API for ${todayStr}...`);
-        const meetsData = await fetchRacingAPI(`/v1/australia/meets?date=${todayStr}`);
-        const meetsList = meetsData?.meets || meetsData || [];
-
-        if (Array.isArray(meetsList) && meetsList.length > 0) {
-          console.log(`[Pipeline] Found ${meetsList.length} meets from API: ${meetsList.map((m: any) => m.course || m.track || 'Unknown').join(', ')}`);
-          for (const meet of meetsList) {
-            const meetId = meet.meet_id || meet.id;
+        console.log(`[Pipeline] Fetching races from Punting Form for ${todayStr}...`);
+        const pfMeets = await fetchPfRacecardMeets(todayStr);
+        if (Array.isArray(pfMeets) && pfMeets.length > 0) {
+          console.log(`[Pipeline] Found ${pfMeets.length} meets from Punting Form: ${pfMeets.map((m: any) => m.course || m.track || 'Unknown').join(', ')}`);
+          for (const meet of pfMeets) {
             const meetCourse = meet.course || meet.track || 'Unknown';
-            if (!meetId) continue;
 
-            try {
-              // Use correct endpoint: /v1/australia/meets/{meet_id}/races
-              const racecard = await fetchRacingAPI(`/v1/australia/meets/${meetId}/races`);
-              const racesList = racecard?.races || racecard || [];
-
-              const upcomingRaces = racesList.filter((r: any) => {
-                if (r.race_status === 'Results' || r.race_status === 'Completed') return false;
-                if (r.off_time) {
-                  const raceTime = new Date(r.off_time).getTime();
-                  return raceTime > nowTimestamp;
-                }
-                return true;
-              });
-
-              if (upcomingRaces.length > 0) {
-                allMeets.push({
-                  date: todayStr,
-                  course: meet.course || meet.track,
-                  meet_id: meetId,
-                  races: upcomingRaces,
-                });
-                console.log(`[Pipeline] Successfully fetched ${meetCourse}: ${upcomingRaces.length} upcoming races`);
-              } else {
-                console.log(`[Pipeline] ${meetCourse}: No upcoming races (all completed or past)`);
+            const upcomingRaces = (meet.races || []).filter((r: any) => {
+              if (r.race_status === 'Results' || r.race_status === 'Completed') return false;
+              if (r.off_time) {
+                const raceTime = new Date(r.off_time).getTime();
+                return raceTime > nowTimestamp;
               }
-            } catch (err: any) {
-              console.log(`[Pipeline] Failed to fetch racecard for ${meetCourse} (${meetId}): ${err.message || err}`);
+              return true;
+            });
+
+            if (upcomingRaces.length > 0) {
+              allMeets.push({
+                date: todayStr,
+                course: meetCourse,
+                meet_id: meet.meet_id,
+                races: upcomingRaces,
+              });
+              console.log(`[Pipeline] Successfully fetched ${meetCourse}: ${upcomingRaces.length} upcoming races`);
+            } else {
+              console.log(`[Pipeline] ${meetCourse}: No upcoming races (all completed or past)`);
             }
           }
         }
       } catch (apiErr: any) {
-        console.log(`[Pipeline] Racing API not available: ${apiErr.message}`);
+        console.log(`[Pipeline] Punting Form not available: ${apiErr.message}`);
       }
 
       if (allMeets.length === 0) {
