@@ -111,15 +111,41 @@ jobs:
               r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
               (days,),
           )
-          print(f"nsw_pidata rows in trailing {days}-day window: {cur.fetchone()[0]}")
-          if post <= pre:
-              print("::error::This run inserted ZERO new nsw_pidata rows. A scheduled "
-                    "window normally contains fresh race days, so zero usually means "
-                    "the collector silently failed (source blocked, schema drift, fetch "
-                    "failure). Benign zeros: a same-day idempotent re-dispatch, or no "
-                    "meetings at all on this window's new days — check "
-                    "the collect log before dismissing.")
+          window = cur.fetchone()[0]
+          print(f"nsw_pidata rows in trailing {days}-day window: {window}")
+          # Same gate shape as the qld job (see 9f0ade3, issue #125): NSW rows
+          # also land daily via stride_results_collector._collect_nsw, so this
+          # weekly backfill legitimately inserts zero when the daily path got
+          # there first. Ask whether data landed, not who landed it.
+          if post <= pre and window == 0:
+              print("::error::Zero new nsw_pidata rows AND the trailing window "
+                    "is empty — nothing is landing from this backfill OR the "
+                    "daily results collector. Check the collect log: source "
+                    "blocked, schema drift, or fetch failure.")
               raise SystemExit(1)
+          if post <= pre:
+              print("Delta zero but the window is populated: the daily results "
+                    "collector already landed these rows. Benign overlap, not "
+                    "an outage.")
+              # The overlap pass must not hide BOTH paths dying at once: rows
+              # only age out of the window, so a stale newest-date means the
+              # daily collector AND this backfill have both stopped landing.
+              cur.execute(
+                  r"SELECT MAX(race_date) FROM sectional_times "
+                  r"WHERE source='nsw_pidata' "
+                  r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+                  r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
+                  (days,),
+              )
+              newest = cur.fetchone()[0]
+              cur.execute("SELECT to_char(CURRENT_DATE - 1, 'YYYY-MM-DD')")
+              yesterday = cur.fetchone()[0]
+              if newest is None or newest < yesterday:
+                  print(f"::warning::Newest nsw_pidata row in the window is "
+                        f"{newest}, older than {yesterday}. One quiet day is "
+                        f"normal; repeated, it means the daily collector and "
+                        f"this backfill have BOTH stopped landing rows and "
+                        f"the benign-overlap pass above is masking it.")
           EOF
       - name: Summary
         if: always()
@@ -306,12 +332,41 @@ jobs:
               r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
               (days,),
           )
-          print(f"racing_com rows in trailing {days}-day window: {cur.fetchone()[0]}")
-          if post <= pre:
-              print("::error::This run inserted ZERO new racing_com rows — bad key, source "
-                    "blocked, or silent fetch failure (a same-day idempotent re-dispatch can "
-                    "also show zero — check the collect log before dismissing).")
+          window = cur.fetchone()[0]
+          print(f"racing_com rows in trailing {days}-day window: {window}")
+          # Same gate shape as the qld job (see 9f0ade3, issue #125): racing.com
+          # rows also land daily via auto_results_collector, so this weekly
+          # backfill legitimately inserts zero when the daily path got there
+          # first. Ask whether data landed, not who landed it.
+          if post <= pre and window == 0:
+              print("::error::Zero new racing_com rows AND the trailing window "
+                    "is empty — nothing is landing from this backfill OR the "
+                    "daily results collector. Check the collect log: bad key, "
+                    "source blocked, or silent fetch failure.")
               raise SystemExit(1)
+          if post <= pre:
+              print("Delta zero but the window is populated: the daily results "
+                    "collector already landed these rows. Benign overlap, not "
+                    "an outage.")
+              # The overlap pass must not hide BOTH paths dying at once: rows
+              # only age out of the window, so a stale newest-date means the
+              # daily collector AND this backfill have both stopped landing.
+              cur.execute(
+                  r"SELECT MAX(race_date) FROM sectional_times "
+                  r"WHERE source='racing_com' "
+                  r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+                  r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
+                  (days,),
+              )
+              newest = cur.fetchone()[0]
+              cur.execute("SELECT to_char(CURRENT_DATE - 1, 'YYYY-MM-DD')")
+              yesterday = cur.fetchone()[0]
+              if newest is None or newest < yesterday:
+                  print(f"::warning::Newest racing_com row in the window is "
+                        f"{newest}, older than {yesterday}. One quiet day is "
+                        f"normal; repeated, it means the daily collector and "
+                        f"this backfill have BOTH stopped landing rows and "
+                        f"the benign-overlap pass above is masking it.")
           EOF
       - name: Summary
         if: always()
