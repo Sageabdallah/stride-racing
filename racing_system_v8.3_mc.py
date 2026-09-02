@@ -1848,6 +1848,7 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
     evidence = np.array(evidence, dtype=float)
     dirichlet_conc_fix = _flag_enabled("STRIDE_MC_FIX_DIRICHLET_CONC")
     conc = _dirichlet_concentration(evidence, dirichlet_conc_fix)
+    evidence_mean = float(evidence.mean())
 
     # Going-aware Dirichlet concentration: wet/heavy widens uncertainty (lower conc = more dispersed)
     going_lower = getattr(race, 'going', '').lower() if hasattr(race, 'going') else ''
@@ -1897,7 +1898,7 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
                 # Same defect-2 shape as the main concentration above:
                 # per-horse (10 + evidence) recentres, a scalar only widens.
                 sampled_probs = rng.dirichlet(
-                    np.maximum(0.25, sampled_probs * (10.0 + float(evidence.mean()))))
+                    np.maximum(0.25, sampled_probs * (10.0 + evidence_mean)))
             else:
                 sampled_probs = rng.dirichlet(np.maximum(0.25, sampled_probs * (10 + evidence)))
         
@@ -1915,11 +1916,11 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
     std_pos = finish_positions.std(axis=0)
     
     scenario_win = np.zeros((len(pace_labels), n))
-    sampled_regimes = np.zeros(len(pace_labels), dtype=bool)
+    regime_draws = np.zeros(len(pace_labels), dtype=np.int64)
     for idx, label in enumerate(pace_labels):
         mask = scenario_ids == idx
         if mask.any():
-            sampled_regimes[idx] = True
+            regime_draws[idx] = int(mask.sum())
             scenario_win[idx] = (finish_positions[mask] == 1).mean(axis=0)
     if _flag_enabled("STRIDE_MC_FIX_SCENARIO_RANGES"):
         # #124 defect 3: a regime this race's pace logic never samples
@@ -1928,7 +1929,12 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
         # carried a phantom range equal to its own maximum and scenario
         # stability hard-zeroed — which gates mc_is_playable. Spread over
         # regimes actually simulated only; a single sampled regime means
-        # no observed scenario variation, not maximal.
+        # no observed scenario variation, not maximal. "Sampled" requires
+        # enough draws to estimate a rate: a regime hit a handful of times
+        # in 20k sims has per-runner win rates of 0 or 1 by construction,
+        # which resurrects the same phantom range through the back door.
+        min_draws = max(30, mc_sims // 100)
+        sampled_regimes = regime_draws >= min_draws
         _sampled_win = scenario_win[sampled_regimes]
         if sampled_regimes.sum() >= 2:
             scenario_ranges = _sampled_win.max(axis=0) - _sampled_win.min(axis=0)

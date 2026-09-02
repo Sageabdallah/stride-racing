@@ -18,6 +18,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 CALIBRATION_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'calibration_model.json')
 
+
+def _flag_enabled(name):
+    """Env-flag convention: default OFF unless explicitly true/1/yes."""
+    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
+
 class MCRecalibrator:
     """
     Probability recalibration using isotonic regression.
@@ -35,6 +40,10 @@ class MCRecalibrator:
         self.n_samples = 0
         self.n_races = 0
         self.fit_date = None
+        # True when load() found an artifact but refused it as non-monotone
+        # (#124 defect 6) — distinct from "no artifact", so callers do not
+        # respond to a corrupt file by auto-refitting or refetching.
+        self.refused_nonmonotone = False
     
     def fit_from_database(self, min_field_size=6, min_runners_with_sectionals=3, max_races=300):
         """Fit calibration model from historical race results vs MC predictions."""
@@ -266,10 +275,7 @@ class MCRecalibrator:
             iso_y = np.asarray(self.iso_y, dtype=float)
             descending = int(np.sum(np.diff(iso_y) < 0))
             if descending:
-                allow = os.environ.get(
-                    "STRIDE_MC_ALLOW_NONMONOTONE_CALIBRATOR", "false"
-                ).strip().lower() in ("true", "1", "yes")
-                if allow:
+                if _flag_enabled("STRIDE_MC_ALLOW_NONMONOTONE_CALIBRATOR"):
                     print(f"  WARNING: calibration model at {path} has "
                           f"{descending} descending knot(s); applying anyway "
                           f"(STRIDE_MC_ALLOW_NONMONOTONE_CALIBRATOR).")
@@ -283,6 +289,7 @@ class MCRecalibrator:
                     self.fitted = False
                     self.iso_x = None
                     self.iso_y = None
+                    self.refused_nonmonotone = True
                     return False
         return True
     
@@ -313,7 +320,18 @@ def get_calibrator():
     cal = MCRecalibrator()
     if cal.load():
         return cal
-    
+
+    if cal.refused_nonmonotone:
+        # An artifact exists but was refused (#124 defect 6). Auto-refitting
+        # here would launch a DB pull plus hundreds of simulated races at
+        # what callers treat as load time, and would overwrite the evidence.
+        # Serve uncalibrated (unfitted transform is the identity); refitting
+        # stays a deliberate action: python mc_recalibration.py
+        print("Calibration model present but refused as non-monotone; "
+              "serving uncalibrated. Refit deliberately with: "
+              "python mc_recalibration.py")
+        return cal
+
     print("No calibration model found. Fitting from database...")
     cal.fit_from_database(max_races=200)
     return cal
