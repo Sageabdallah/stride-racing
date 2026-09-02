@@ -253,3 +253,69 @@ class TestDefect1EnergySign:
         # log(1.0) == 0 and * 1.0 are both identity: with no depletion the
         # two formulations must agree exactly.
         assert np.allclose(on, off)
+
+
+class _ExperiencedModel:
+    """Two identical-probability horses; H0 has 40 career runs, H1 none."""
+
+    def __init__(self):
+        self.horse_history = {'R0': {'runs': [1] * 40}, 'R1': {'runs': []}}
+
+    def _get_horse_key(self, runner):
+        return str(runner)
+
+
+def _simulate_evidence_pair(sims=6000, seed=13, **mc_kw):
+    analysis = [
+        {'horse': 'H0', 'model_prob': 50.0, 'style': 'midfield', 'runner_obj': 'R0'},
+        {'horse': 'H1', 'model_prob': 50.0, 'style': 'midfield', 'runner_obj': 'R1'},
+    ]
+    return racing_system.simulate_race_monte_carlo(
+        _StubRace(), analysis, _ExperiencedModel(), mc_sims=sims, seed=seed,
+        **mc_kw)
+
+
+class TestDefect2DirichletConcentration:
+    """#124 defect 2: per-horse Dirichlet concentration converges to
+    p_i * (12 + 1.3 * runs_i) renormalised, not to p_i."""
+
+    def test_flag_off_experience_reweights_equal_probabilities(self, monkeypatch):
+        monkeypatch.delenv('STRIDE_MC_FIX_DIRICHLET_CONC', raising=False)
+        res = _simulate_evidence_pair()
+        # Two 50% horses; conc 64 vs 12 recentres the mean to 64/76 = 84%.
+        # The shipped defect, pinned: the experienced horse wins far more.
+        assert res[0]['win_prob_sim'] - res[1]['win_prob_sim'] > 0.15
+
+    def test_flag_on_equal_probabilities_stay_equal(self, monkeypatch):
+        monkeypatch.setenv('STRIDE_MC_FIX_DIRICHLET_CONC', 'true')
+        res = _simulate_evidence_pair()
+        assert abs(res[0]['win_prob_sim'] - res[1]['win_prob_sim']) < 0.05
+
+    def test_flag_on_dirichlet_model_path_fixed_too(self, monkeypatch):
+        monkeypatch.delenv('STRIDE_MC_FIX_DIRICHLET_CONC', raising=False)
+        off = _simulate_evidence_pair(mc_model='dirichlet')
+        assert off[0]['win_prob_sim'] - off[1]['win_prob_sim'] > 0.15
+        monkeypatch.setenv('STRIDE_MC_FIX_DIRICHLET_CONC', 'true')
+        on = _simulate_evidence_pair(mc_model='dirichlet')
+        assert abs(on[0]['win_prob_sim'] - on[1]['win_prob_sim']) < 0.05
+
+    def test_flag_on_evidence_still_sets_tightness_as_a_scalar(self):
+        # Evidence keeps its real job — setting how tight the noise is —
+        # but as one scalar per field so it cannot recentre the mean.
+        # (Aggregate win rates are provably invariant to concentration for
+        # a fixed p, so this is pinned at the concentration itself.)
+        experienced = racing_system._dirichlet_concentration(
+            np.array([40.0, 40.0]), True)
+        fresh = racing_system._dirichlet_concentration(np.zeros(2), True)
+        mixed = racing_system._dirichlet_concentration(
+            np.array([40.0, 0.0]), True)
+        assert isinstance(experienced, float)
+        assert experienced == pytest.approx(64.0)
+        assert fresh == pytest.approx(12.0)
+        assert mixed == pytest.approx(38.0)
+        assert experienced > mixed > fresh
+
+    def test_flag_off_concentration_keeps_the_legacy_shape(self):
+        evidence = np.array([40.0, 0.0])
+        legacy = racing_system._dirichlet_concentration(evidence, False)
+        assert np.array_equal(legacy, np.maximum(6.0, 12.0 + 1.3 * evidence))
