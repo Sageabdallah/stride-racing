@@ -101,8 +101,18 @@ def _direct_context(date_str: str):
 
 
 def _races_from_rows(rows) -> Dict[Tuple[str, int], Dict[str, Any]]:
+    """Rows are (track, race_number, horse, price, captured_at) with two
+    optional trailing depth fields, lay_price and matched_volume. Depth is
+    optional so the DB fallback and older callers keep their 5-tuples; it
+    exists so betfair_odds_snapshots can record the lay side and market
+    liquidity beside back_price (#123: both columns were NULL in every row
+    ever written, which is why judging the 2026-08-05 phantom prices after
+    the fact took hours instead of minutes)."""
     races: Dict[Tuple[str, int], Dict[str, Any]] = {}
-    for track, race_number, horse, price, captured_at in rows:
+    for row in rows:
+        track, race_number, horse, price, captured_at = row[:5]
+        lay_price = row[5] if len(row) > 5 else None
+        matched_volume = row[6] if len(row) > 6 else None
         if not track or race_number is None or not horse or not price:
             continue
         key = (betfair_markets.norm_track(track), int(race_number))
@@ -113,8 +123,13 @@ def _races_from_rows(rows) -> Dict[Tuple[str, int], Dict[str, Any]]:
         existing = race["runners"].get(hkey)
         if existing is None or (captured_at and existing.get("captured_at")
                                 and captured_at > existing["captured_at"]):
-            race["runners"][hkey] = {"horse": horse, "price": float(price),
-                                     "captured_at": captured_at}
+            race["runners"][hkey] = {
+                "horse": horse, "price": float(price),
+                "captured_at": captured_at,
+                "lay_price": float(lay_price) if lay_price else None,
+                "matched_volume": (float(matched_volume)
+                                   if matched_volume is not None else None),
+            }
     return races
 
 
@@ -138,8 +153,15 @@ def fetch_direct(date_str: str) -> Dict[str, Any]:
         print(f"[BETFAIR_PRICES] {len(_unformed)} unformed-book quote(s): "
               + "; ".join(s["reason"] for s in _unformed[:10]),
               file=sys.stderr)
+    # Market-level totalMatched is the liquidity figure that exists: the
+    # runner-level field is 0.00 in every EX_BEST_OFFERS depth row ever
+    # stored (#123), so it must not be the one carried forward.
+    market_totals = {str(b.get("marketId")): b.get("totalMatched")
+                     for b in books}
     tuples = [(r["track"], r["race_number"], r["horse_name"],
-               r["decimal_odds"], r["captured_at"]) for r in rows]
+               r["decimal_odds"], r["captured_at"], r.get("lay_price"),
+               market_totals.get(str(r.get("market_id"))))
+              for r in rows]
     return {"source": source, "fetched_at": captured_at,
             "races": _races_from_rows(tuples)}
 
@@ -154,7 +176,8 @@ def fetch_from_db(date_str: str) -> Dict[str, Any]:
         cur.execute(
             """
             SELECT DISTINCT ON (race_id, runner_id)
-                   track, race_number, horse_name, decimal_odds, captured_at
+                   track, race_number, horse_name, decimal_odds, captured_at,
+                   lay_price
             FROM runner_odds_snapshots
             WHERE race_date = %s
             ORDER BY race_id, runner_id, captured_at DESC
@@ -164,6 +187,9 @@ def fetch_from_db(date_str: str) -> Dict[str, Any]:
         cur.close()
     finally:
         conn.close()
+    # No matched_volume from this path: runner_odds_snapshots.total_matched
+    # is the runner-level figure, 0.00 on every row (#123); a NULL is more
+    # honest than a zero that reads as "nothing traded".
     return {"source": "betfair_snapshot_db",
             "fetched_at": datetime.now(timezone.utc),
             "races": _races_from_rows(rows)}

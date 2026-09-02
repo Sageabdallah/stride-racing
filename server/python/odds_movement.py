@@ -68,27 +68,39 @@ def _is_target_track(course: str) -> bool:
     return target_tracks.matches(course, TARGET_TRACKS)
 
 
-def fetch_fresh_odds(date_str: str) -> dict[str, dict[str, float]]:
+def fetch_fresh_odds(date_str: str, with_depth: bool = False):
     """Current Betfair prices for every runner on date. Same contract the
     Racing API version served: {"{track_key}_R{N}": {"horse_name": odds}}.
     Fed by betfair_prices: direct Exchange when credentials work, otherwise
-    the freshest runner_odds_snapshots rows the AU runner captured."""
+    the freshest runner_odds_snapshots rows the AU runner captured.
+
+    with_depth=True also returns {race_key: {horse: (lay_price,
+    matched_volume)}} keyed identically, so capture_snapshot can store the
+    lay side and market liquidity next to back_price without a second
+    fetch (#123). Either may be None when the source did not carry it."""
     import betfair_prices
     price_map = betfair_prices.fetch_price_map(date_str)
     odds_map: dict[str, dict[str, float]] = {}
+    depth_map: dict[str, dict[str, tuple]] = {}
     for (_key, race_number), race in price_map["races"].items():
         course = race["track"] or ""
         if not _is_target_track(course):
             continue
         race_key = f"{normalize_track(course)}_R{int(race_number)}"
-        race_odds = {q["horse"]: round(float(q["price"]), 2)
-                     for q in race["runners"].values() if q.get("price")}
+        race_odds: dict[str, float] = {}
+        race_depth: dict[str, tuple] = {}
+        for q in race["runners"].values():
+            if not q.get("price"):
+                continue
+            race_odds[q["horse"]] = round(float(q["price"]), 2)
+            race_depth[q["horse"]] = (q.get("lay_price"), q.get("matched_volume"))
         if race_odds:
             odds_map[race_key] = race_odds
+            depth_map[race_key] = race_depth
     if not odds_map:
         print(f"[ODDS] No Betfair prices for {date_str} from any source",
               file=sys.stderr)
-    return odds_map
+    return (odds_map, depth_map) if with_depth else odds_map
 
 
 def read_racecard_odds(date_str: str) -> dict[str, dict[str, float]]:
@@ -143,10 +155,11 @@ def capture_snapshot(date_str: str, snapshot_type: str, dry_run: bool = False) -
     """Capture current odds for all runners and store as a snapshot. Returns the odds map."""
     print(f"[ODDS] Capturing {snapshot_type} snapshot for {date_str}", file=sys.stderr)
 
-    odds_map = fetch_fresh_odds(date_str)
+    odds_map, depth_map = fetch_fresh_odds(date_str, with_depth=True)
     if not odds_map:
         print("[ODDS] Fresh API returned no data, falling back to cached racecard", file=sys.stderr)
         odds_map = read_racecard_odds(date_str)
+        depth_map = {}   # racecard prices carry no exchange depth
 
     if not odds_map:
         print(f"[ODDS] No odds data available for {date_str}", file=sys.stderr)
@@ -172,18 +185,22 @@ def capture_snapshot(date_str: str, snapshot_type: str, dry_run: bool = False) -
                 track_key, race_num_str = parts
                 race_num = int(race_num_str)
 
+                race_depth = depth_map.get(race_key, {})
                 for horse, odds_val in runners.items():
+                    lay_price, matched_volume = race_depth.get(horse, (None, None))
                     cur.execute(
                         """INSERT INTO betfair_odds_snapshots
                            (race_date, track, race_number, horse_name, horse_name_norm,
-                            snapshot_type, back_price)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            snapshot_type, back_price, lay_price, matched_volume)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                            ON CONFLICT (race_date, track, race_number, horse_name_norm, snapshot_type)
                            DO UPDATE SET
                             back_price = EXCLUDED.back_price,
+                            lay_price = EXCLUDED.lay_price,
+                            matched_volume = EXCLUDED.matched_volume,
                             snapshot_time = NOW()""",
                         (date_str, track_key, race_num, horse, normalize_name(horse),
-                         snapshot_type, odds_val),
+                         snapshot_type, odds_val, lay_price, matched_volume),
                     )
         print(f"[ODDS] Stored {total_runners} snapshots ({snapshot_type})", file=sys.stderr)
     except Exception as e:
