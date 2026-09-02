@@ -127,6 +127,25 @@ jobs:
               print("Delta zero but the window is populated: the daily results "
                     "collector already landed these rows. Benign overlap, not "
                     "an outage.")
+              # The overlap pass must not hide BOTH paths dying at once: rows
+              # only age out of the window, so a stale newest-date means the
+              # daily collector AND this backfill have both stopped landing.
+              cur.execute(
+                  r"SELECT MAX(race_date) FROM sectional_times "
+                  r"WHERE source='nsw_pidata' "
+                  r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+                  r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
+                  (days,),
+              )
+              newest = cur.fetchone()[0]
+              cur.execute("SELECT to_char(CURRENT_DATE - 1, 'YYYY-MM-DD')")
+              yesterday = cur.fetchone()[0]
+              if newest is None or newest < yesterday:
+                  print(f"::warning::Newest nsw_pidata row in the window is "
+                        f"{newest}, older than {yesterday}. One quiet day is "
+                        f"normal; repeated, it means the daily collector and "
+                        f"this backfill have BOTH stopped landing rows and "
+                        f"the benign-overlap pass above is masking it.")
           EOF
       - name: Summary
         if: always()
@@ -329,6 +348,25 @@ jobs:
               print("Delta zero but the window is populated: the daily results "
                     "collector already landed these rows. Benign overlap, not "
                     "an outage.")
+              # The overlap pass must not hide BOTH paths dying at once: rows
+              # only age out of the window, so a stale newest-date means the
+              # daily collector AND this backfill have both stopped landing.
+              cur.execute(
+                  r"SELECT MAX(race_date) FROM sectional_times "
+                  r"WHERE source='racing_com' "
+                  r"AND race_date BETWEEN to_char(CURRENT_DATE - %s, 'YYYY-MM-DD') "
+                  r"AND to_char(CURRENT_DATE, 'YYYY-MM-DD')",
+                  (days,),
+              )
+              newest = cur.fetchone()[0]
+              cur.execute("SELECT to_char(CURRENT_DATE - 1, 'YYYY-MM-DD')")
+              yesterday = cur.fetchone()[0]
+              if newest is None or newest < yesterday:
+                  print(f"::warning::Newest racing_com row in the window is "
+                        f"{newest}, older than {yesterday}. One quiet day is "
+                        f"normal; repeated, it means the daily collector and "
+                        f"this backfill have BOTH stopped landing rows and "
+                        f"the benign-overlap pass above is masking it.")
           EOF
       - name: Summary
         if: always()
