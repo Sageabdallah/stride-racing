@@ -197,3 +197,59 @@ class TestDefect4StabilityFieldSize:
         # over the line.
         assert max(r['stability_score'] for r in off) < 45
         assert on[0]['stability_score'] >= 45
+
+
+class TestDefect1EnergySign:
+    """#124 defect 1: (mu + noise + style) * energy with mu = log(p) < 0
+    shrinks the deficit as energy depletes — burning energy RAISED scores.
+
+    Style advantages are zeroed via monkeypatch so leader vs backmarker
+    differ only through energy depletion; under a hot pace leaders burn
+    hardest, so the sign of mean(leader) - mean(backmarker) isolates the
+    direction of the energy term.
+    """
+
+    @staticmethod
+    def _phase_scores(monkeypatch, flag):
+        import realistic_simulate as rsim
+        if flag:
+            monkeypatch.setenv('STRIDE_MC_FIX_ENERGY_SIGN', 'true')
+        else:
+            monkeypatch.delenv('STRIDE_MC_FIX_ENERGY_SIGN', raising=False)
+        monkeypatch.setattr(rsim, 'PHASE_STYLE_MATRIX', {
+            k: {s: 0.0 for s in v} for k, v in rsim.PHASE_STYLE_MATRIX.items()})
+        n = 2
+        mu = np.log(np.array([0.25, 0.25]))
+        sigmas = np.array([0.01, 0.01])
+        scores = rsim.simulate_multi_phase(
+            mu, sigmas, ['leader', 'backmarker'], 1200, 4000, n,
+            np.random.default_rng(11), pace_scenario='hot')
+        return scores.mean(axis=0)
+
+    def test_flag_off_burning_energy_still_raises_the_score(self, monkeypatch):
+        leader, backmarker = self._phase_scores(monkeypatch, flag=False)
+        # The shipped defect, pinned: under a hot pace the leader burns more
+        # energy yet scores HIGHER than the identical-ability backmarker.
+        assert leader > backmarker
+
+    def test_flag_on_burning_energy_costs_performance(self, monkeypatch):
+        leader, backmarker = self._phase_scores(monkeypatch, flag=True)
+        assert leader < backmarker
+
+    def test_flag_on_full_energy_is_a_no_op(self, monkeypatch):
+        import realistic_simulate as rsim
+        monkeypatch.setenv('STRIDE_MC_FIX_ENERGY_SIGN', 'true')
+        monkeypatch.setattr(rsim, 'ENERGY_DEPLETION', {
+            k: [0.0, 0.0, 0.0, 0.0] for k in rsim.ENERGY_DEPLETION})
+        mu = np.log(np.array([0.3, 0.3]))
+        sigmas = np.array([0.0, 0.0])
+        on = rsim.simulate_multi_phase(
+            mu, sigmas, ['leader', 'backmarker'], 1200, 50, 2,
+            np.random.default_rng(3))
+        monkeypatch.delenv('STRIDE_MC_FIX_ENERGY_SIGN')
+        off = rsim.simulate_multi_phase(
+            mu, sigmas, ['leader', 'backmarker'], 1200, 50, 2,
+            np.random.default_rng(3))
+        # log(1.0) == 0 and * 1.0 are both identity: with no depletion the
+        # two formulations must agree exactly.
+        assert np.allclose(on, off)
