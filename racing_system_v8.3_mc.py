@@ -8,6 +8,7 @@ variation with stability metrics, and an expanded MC tip menu (--mc_tips6).
 """
 
 import json
+import os
 import re
 import math
 import argparse
@@ -28,6 +29,18 @@ except ImportError:
 
 
 BASELINE_WIN_RATE = 0.097
+
+
+def _flag_enabled(name):
+    """Env-flag convention: default OFF unless explicitly true/1/yes.
+
+    The STRIDE_MC_FIX_* flags gate the #124 engine-defect fixes (audit
+    2026-08-07). Every one of them changes published probabilities or the
+    gates on them, so each ships OFF and is flipped one at a time, validated
+    with common-random-numbers A/B against settled results — see #124's
+    sequencing. Flag off, behaviour is the shipped engine's, bug for bug.
+    """
+    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
 PRIOR_STRENGTH = 20
 PRIOR_STRENGTH_SMALL = 30
 
@@ -1863,11 +1876,27 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
     std_pos = finish_positions.std(axis=0)
     
     scenario_win = np.zeros((len(pace_labels), n))
+    sampled_regimes = np.zeros(len(pace_labels), dtype=bool)
     for idx, label in enumerate(pace_labels):
         mask = scenario_ids == idx
         if mask.any():
+            sampled_regimes[idx] = True
             scenario_win[idx] = (finish_positions[mask] == 1).mean(axis=0)
-    scenario_ranges = scenario_win.max(axis=0) - scenario_win.min(axis=0)
+    if _flag_enabled("STRIDE_MC_FIX_SCENARIO_RANGES"):
+        # #124 defect 3: a regime this race's pace logic never samples
+        # (pace_mode='basic' typically reaches 1-2 of the 4) left its zero
+        # row in the spread, so any runner above ~28.6% win probability
+        # carried a phantom range equal to its own maximum and scenario
+        # stability hard-zeroed — which gates mc_is_playable. Spread over
+        # regimes actually simulated only; a single sampled regime means
+        # no observed scenario variation, not maximal.
+        _sampled_win = scenario_win[sampled_regimes]
+        if sampled_regimes.sum() >= 2:
+            scenario_ranges = _sampled_win.max(axis=0) - _sampled_win.min(axis=0)
+        else:
+            scenario_ranges = np.zeros(n)
+    else:
+        scenario_ranges = scenario_win.max(axis=0) - scenario_win.min(axis=0)
     
     results = []
     for i, base in enumerate(analysis):
