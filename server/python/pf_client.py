@@ -8,6 +8,13 @@ Auth is the apiKey query parameter. Dates are ISO (yyyy-MM-dd). Every JSON
 response arrives in an envelope: {statusCode, status, error, errors, payLoad}.
 The client raises PFError on envelope errors so callers cannot silently
 mistake an error body for data (lesson from selection_diagnostics).
+
+Failures name their cause. A rejected key or a lapsed subscription comes
+back as HTTP 403 with Punting Form's own explanation in the body; on
+2026-09-03 that body was thrown away and three retries later the pipeline
+reported only "HTTP Error 403: Forbidden", which took a separate probe to
+diagnose. Now the body's error text is carried in the exception, 401/403
+raise PFAuthError at once, and only 429, 5xx and network faults are retried.
 """
 import json
 import os
@@ -24,6 +31,30 @@ class PFError(RuntimeError):
     pass
 
 
+class PFAuthError(PFError):
+    """Punting Form rejected the key (HTTP 401/403). Not transient: the key
+    is wrong, revoked, or the subscription has lapsed. Retrying cannot help,
+    and the message is the diagnosis."""
+
+
+# Statuses worth a second attempt. Every other 4xx is a fact about the
+# request or the account and comes back identical on retry.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _error_text(err):
+    """Punting Form's own explanation from the JSON envelope of a failed
+    response, or the bare HTTP reason when the body is not their envelope."""
+    text = None
+    try:
+        body = json.loads(err.read().decode("utf-8", "replace"))
+        if isinstance(body, dict):
+            text = body.get("error")
+    except Exception:
+        text = None
+    return f"HTTP {err.code}: {text or err.reason}"
+
+
 def _api_key():
     key = (os.environ.get("PUNTINGFORM_API_KEY") or "").strip()
     if not key:
@@ -32,8 +63,13 @@ def _api_key():
 
 
 def get(path, params=None, retries=3, timeout=60):
-    """GET {BASE}{path} and return the payLoad. Retries transient failures
-    with backoff; polite 0.4s pacing between calls (rate limits unpublished)."""
+    """GET {BASE}{path} and return the payLoad.
+
+    Retries 429, 5xx and network faults with backoff; polite 0.4s pacing
+    between calls (rate limits unpublished). Any other HTTP error is raised
+    at once with the provider's own error text: 401/403 as PFAuthError,
+    the rest (including the HTTP 400 that marks the subscription's sliding
+    wall) as PFError. Envelope errors on a 200 are raised at once too."""
     q = dict(params or {})
     q["apiKey"] = _api_key()
     url = f"{BASE}{path}?{urllib.parse.urlencode(q)}"
@@ -47,9 +83,17 @@ def get(path, params=None, retries=3, timeout=60):
                 raise PFError(f"{path}: {body.get('statusCode')} {body.get('error')}")
             time.sleep(0.4)
             return body.get("payLoad")
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as e:
+        except urllib.error.HTTPError as e:
+            detail = _error_text(e)
+            if e.code in (401, 403):
+                raise PFAuthError(f"{path}: {detail} (key rejected or subscription "
+                                  f"lapsed; retrying cannot help)") from None
+            if e.code not in RETRY_STATUSES:
+                raise PFError(f"{path}: {detail}") from None
+            last_err = detail
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             last_err = e
-            time.sleep(2 * (attempt + 1))
+        time.sleep(2 * (attempt + 1))
     raise PFError(f"{path}: failed after {retries} attempts: {last_err}")
 
 
