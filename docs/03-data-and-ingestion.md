@@ -50,6 +50,18 @@ can see either. Data older than about 31 days is not served on this plan
 (`pf_window.py` measures the wall at runtime), so a missed day must be healed
 within that window or it is gone.
 
+**Margin convention.** `race_results_history.margin_lengths` holds two
+conventions. Rows from the old importers (to 2026-07-13) store NULL for the
+winner; rows from `pf_results_mapper` (2026-06-30 onward) store the winning
+margin, as Punting Form sends it. The column is left as written, and every
+reader goes through `result_margins.beaten_margin`, which returns lengths
+behind the winner and None for the winner. Read raw, a three-length win in a
+Punting Form row scores as a three-length defeat: the franking Elo sees a
+dead heat between winner and runner-up, the prep-cycle trend counts the win
+as lost ground, and the form score's win-margin bonus fires for post-June
+2026 wins only. The winning margin is still recoverable as the runner-up's
+beaten margin, which is how `mc_api` reads it.
+
 Modules belonging to the dead-API era and no longer on any live path:
 `import_historical_to_db.py`, `import_race_results.py`, `import_track_json(_fast).py`,
 `download_training_data.py`. They are retained per the repo's never-delete-a-superseded-

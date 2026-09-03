@@ -16,6 +16,8 @@ import numpy as np
 import psycopg2
 from psycopg2.extras import execute_values, Json
 
+from result_margins import beaten_margin, opponent_beaten_margin
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -379,7 +381,8 @@ def compute_global_elo(iterations=20, force_recompute=False):
             "race_id": r[1],
             "race_date": str(r[2])[:10] if r[2] else "2020-01-01",
             "position": _safe_int(r[3]),
-            "margin_lengths": _safe_float(r[4]),
+            # Beaten margin, None for the winner: see result_margins.
+            "margin_lengths": _safe_float(beaten_margin(r[3], r[4])),
             "distance_m": _safe_int(r[5], 1400),
             "class_level": _safe_int(r[6], 1),
             "going": r[7],
@@ -506,8 +509,9 @@ def compute_direct_franking(horse_id, lookback_races=10, forward_window_days=90,
             if not opp_id:
                 continue
 
-            opp_margin = _safe_float(opp.get("margin"), 0.0)
-            margin_diff = abs(opp_margin - _safe_float(horse_margin, 0.0))
+            opp_margin = _safe_float(opponent_beaten_margin(opp), 0.0)
+            margin_diff = abs(opp_margin
+                              - _safe_float(beaten_margin(horse_pos, horse_margin), 0.0))
 
             if margin_diff <= 3.0:
                 margin_weight = 1.5
@@ -533,7 +537,7 @@ def compute_direct_franking(horse_id, lookback_races=10, forward_window_days=90,
                 sub_pos = _safe_int(sub_pos, 99)
                 sub_class = _safe_int(sub_class, 1)
                 sub_field = _safe_int(sub_field, 10)
-                sub_margin = _safe_float(sub_margin, 0.0)
+                sub_margin = _safe_float(beaten_margin(sub_pos, sub_margin), 0.0)
 
                 class_factor = sub_class / 10.0
 
@@ -870,7 +874,7 @@ def compute_all_franking_scores(target_horse_ids=None):
         h_id, h_name, r_id, r_date, pos, margin, cl, opp_json, dist, going_val, fs, wt, rc_text = row
         r_date_str = str(r_date)[:10] if r_date else "2020-01-01"
         pos_int = _safe_int(pos)
-        margin_f = _safe_float(margin)
+        margin_f = _safe_float(beaten_margin(pos_int, margin))
         cl_int = _safe_int(cl, 1)
         fs_int = _safe_int(fs, 10)
         dist_int = _safe_int(dist, 1400)
@@ -962,7 +966,7 @@ def compute_all_franking_scores(target_horse_ids=None):
                     if not opp_id:
                         continue
 
-                    opp_margin_raw = _safe_float(opp.get("margin"), 0.0)
+                    opp_margin_raw = _safe_float(opponent_beaten_margin(opp), 0.0)
                     margin_diff = abs(opp_margin_raw - h_margin)
                     if margin_diff <= 3.0:
                         margin_weight = 1.5

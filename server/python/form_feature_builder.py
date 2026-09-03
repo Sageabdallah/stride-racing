@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Optional
 
+from result_margins import beaten_margins_frame
+
 
 def _race_anchor(race_date_str: Optional[str]) -> pd.Timestamp:
     """Anchor for recency features: the subject race date when known, else the
@@ -59,6 +61,11 @@ def compute_single_horse_features(
     Returns dict mapping FEATURE_COLUMNS names to values.
     """
     features = {}
+
+    # Winners carry their winning margin in rows written by Punting Form and
+    # NULL in older rows. Every margin rule below was written for NULL, so
+    # normalise first or the same win scores differently by era.
+    prior_runs = beaten_margins_frame(prior_runs)
 
     if prior_runs.empty:
         features["days_since_run"] = 999
@@ -941,7 +948,7 @@ def batch_compute_form_features(training_df: pd.DataFrame, conn) -> pd.DataFrame
     history_rows = cur.fetchall()
     cur.close()
 
-    history_df = pd.DataFrame(history_rows)
+    history_df = beaten_margins_frame(pd.DataFrame(history_rows))
     if history_df.empty:
         print("  WARNING: race_results_history is empty!")
         return pd.DataFrame(index=training_df.index)
@@ -1206,7 +1213,7 @@ def compute_race_form_features(
     history_rows = cur.fetchall()
     cur.close()
 
-    history_df = pd.DataFrame(history_rows) if history_rows else pd.DataFrame()
+    history_df = beaten_margins_frame(pd.DataFrame(history_rows)) if history_rows else pd.DataFrame()
     if not history_df.empty:
         history_df["race_date"] = pd.to_datetime(history_df["race_date"], errors="coerce")
         history_df["horse_key"] = history_df["horse_name"].str.lower().str.strip()
