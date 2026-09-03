@@ -23,13 +23,17 @@ name: ECS failure watch
 
 on:
   schedule:
-    # every half hour, off the :00/:30 marks; 40-minute look-back overlaps
-    # the cadence so a failure cannot fall between two sweeps
+    # every half hour, off the :00/:30 marks. The look-back below reaches
+    # back to the previous completed sweep (floored at since_minutes), so a
+    # failure cannot fall between two sweeps even when GitHub fires this
+    # hours late — since 2026-08-26 the scheduler has delivered 3-7 of the
+    # 48 daily firings (#145), and a fixed 40-minute window left the 05:31
+    # consensus slot uncovered on most evenings.
     - cron: "12,42 * * * *"
   workflow_dispatch:
     inputs:
       since_minutes:
-        description: "Look-back window in minutes"
+        description: "Minimum look-back window in minutes (widened automatically to the previous completed sweep)"
         required: false
         default: "40"
 
@@ -65,6 +69,23 @@ jobs:
         run: |
           set -euo pipefail
           SINCE_EPOCH=$(date -u -d "-${SINCE_MIN} minutes" +%s)
+          # A fixed window only covers the cluster when the cadence holds.
+          # Reach back to the start of the previous completed sweep instead,
+          # with a five-minute overlap; the title-keyed dedup below makes a
+          # re-seen task a no-op, so widening costs nothing but API calls.
+          # Any failure here leaves the fixed window in place.
+          PREV=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                   --workflow ecs-failure-watch.yml --status completed \
+                   --limit 1 --json createdAt --jq '.[0].createdAt // empty' \
+                   2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            PREV_EPOCH=$(date -u -d "$PREV" +%s 2>/dev/null || echo 0)
+            if [ "$PREV_EPOCH" -gt 0 ] && [ "$PREV_EPOCH" -lt "$SINCE_EPOCH" ]; then
+              SINCE_EPOCH=$((PREV_EPOCH - 300))
+              echo "Previous completed sweep started $PREV; look-back widened to cover the gap since then."
+            fi
+          fi
+          echo "Sweeping tasks stopped since $(date -u -d "@$SINCE_EPOCH" +%FT%TZ)."
           FILED=0
 
           ARNS=$(aws ecs list-tasks --cluster "$CLUSTER" --desired-status STOPPED \
