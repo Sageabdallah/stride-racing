@@ -403,6 +403,9 @@ def build_rows(day, bridge, unknown_keys):
                         parse_class_level(race_class),
                         going,
                         normalize_finish_position(r.get("position"), field_size),
+                        # Stored as sent: the WINNING margin for the winner, where
+                        # the old importers stored NULL. Readers normalise through
+                        # result_margins.beaten_margin; do not special-case it here.
                         safe_float(r.get("margin")),
                         safe_float(r.get("weight")),
                         r.get("jockey"),

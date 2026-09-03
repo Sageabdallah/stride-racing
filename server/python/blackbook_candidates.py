@@ -14,6 +14,8 @@ from collections import defaultdict
 from datetime import datetime, date
 from pathlib import Path
 
+from result_margins import beaten_margin
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 RACECARDS_DIR = PROJECT_ROOT / "racecards"
@@ -189,7 +191,7 @@ def build_output(rows, next_runs):
             "track": row["track"],
             "race_number": row["race_number"],
             "position": row["position"],
-            "margin_lengths": float(row["margin_lengths"]) if row.get("margin_lengths") else None,
+            "margin_lengths": beaten_margin(row.get("position"), row.get("margin_lengths")),
             "distance_m": row.get("distance_m"),
             "race_class": row.get("race_class"),
             "going": row.get("going"),

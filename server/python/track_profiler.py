@@ -152,14 +152,19 @@ def build_profiles(conn, as_of: Optional[str] = None) -> Dict[str, Any]:
         track_name = parts[0] if len(parts) == 2 else td_key
         dist_m = int(parts[1]) if len(parts) == 2 else 0
 
-        # Front-running proxy: winners from barrier <= 6 with margin <= 2L
+        # Front-running proxy: winners from barrier <= 6. The margin clause
+        # this once carried never fired: the rows this profile was built on
+        # store NULL for a winner's margin, and Punting Form rows now store
+        # the winning margin, which would exclude every win by more than
+        # 2L from July 2026 only. Barrier alone keeps every era on one rule;
+        # the runner-up's margin is the convention-free "won by" if the
+        # clause is ever wanted back (see result_margins).
         winners = [r for r in runners if r["position"] == 1]
         n_races = len(winners)
         if n_races > 0:
             front_winners = sum(
                 1 for w in winners
                 if w.get("barrier") and int(w["barrier"]) <= 6
-                and (w.get("margin_lengths") is None or abs(float(w.get("margin_lengths", 0) or 0)) <= 2)
             )
             pace_bias = round(front_winners / n_races, 4)
         else:

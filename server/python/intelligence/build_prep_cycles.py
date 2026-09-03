@@ -14,6 +14,13 @@ if __package__ in (None, ""):
 else:
     from .common import build_output_path, build_parser, fetch_all_dicts, get_connection, horse_key, load_target_runners, parse_iso_date, safe_float, safe_int, write_json
 
+import sys as _sys
+
+_PY_ROOT = str(Path(__file__).resolve().parents[1])
+if _PY_ROOT not in _sys.path:
+    _sys.path.append(_PY_ROOT)
+from result_margins import beaten_margin  # noqa: E402
+
 
 SPELL_THRESHOLD_DAYS = 60
 
@@ -128,7 +135,9 @@ def build_payload(target_date: str, track_filter: str | None, statement_timeout_
             projected_run_number = len(current_prep) + 1 if current_prep else 1
             completed_runs_this_prep = len(current_prep)
             active_prep_positions = [safe_int(run.get("position")) or 0 for run in current_prep][-5:]
-            active_prep_margins = [safe_float(run.get("margin_lengths")) or 0.0 for run in current_prep][-5:]
+            # Beaten margins, 0 for a win: a winning margin must not read as lost ground.
+            active_prep_margins = [safe_float(beaten_margin(run.get("position"), run.get("margin_lengths"))) or 0.0
+                                   for run in current_prep][-5:]
             active_prep_start = prep_start_date.isoformat() if prep_start_date else None
             active_prep_weights = [safe_float(run.get("weight_kg")) or 0.0 for run in current_prep if safe_float(run.get("weight_kg"))]
             # Compute days between runs in current prep
