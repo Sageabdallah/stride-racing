@@ -1,15 +1,28 @@
-# Punting Form API probe — Phase A of PUNTINGFORM_MIGRATION.md. Read-only:
-# prints Punting Form's own API reference into the run log and exercises
-# candidate endpoint shapes with the PUNTINGFORM_API_KEY secret. Punting Form
-# has no Betfair-style geo-wall, so this runs on GitHub-hosted runners.
+# Punting Form API probe. Read-only. Punting Form has no Betfair-style
+# geo-wall, so everything here runs on GitHub-hosted runners.
 #
-# Push trigger is scoped to the migration branch + probe files only (GitHub
-# cannot dispatch a workflow that exists solely on a non-default branch);
-# once on main, the Run workflow button takes over.
+# Two jobs, one per trigger:
+#
+#   key-check (schedule, 03:15 AEST daily): one meetingslist call for today
+#   with the repository's PUNTINGFORM_API_KEY. Exists because the
+#   subscription lapsed overnight on 2026-09-03 and the first alarm was the
+#   04:00 racecard task dying on Fargate. This fires before the chain and,
+#   through auto-triage, files an issue naming the provider's reason. It
+#   cannot stop the outage; it moves the diagnosis to before the chain runs.
+#   GitHub's scheduler can deliver crons late (#145), so treat this as the
+#   second alarm, not the only one.
+#
+#   probe (workflow_dispatch): the original Phase A probe. Prints Punting
+#   Form's own API reference into the run log and exercises every candidate
+#   endpoint shape with the real key.
+#
+# Cron is UTC. 17:15 UTC = 03:15 AEST; revisit in October when AEDT starts.
 
 name: puntingform-probe
 
 on:
+  schedule:
+    - cron: "15 17 * * *"
   workflow_dispatch:
     inputs:
       meeting_ids:
@@ -25,7 +38,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  key-check:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Does today's key still open the meetings list?
+        env:
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
+        run: |
+          cd server/python
+          python3 - <<'EOF'
+          import datetime, sys
+          import pf_client
+          today = (datetime.datetime.now(datetime.timezone.utc)
+                   + datetime.timedelta(hours=10)).date().isoformat()
+          try:
+              meetings = pf_client.meetings_for_date(today)
+          except pf_client.PFAuthError as e:
+              print(f"::error::Punting Form rejected the key: {e}")
+              print("::error::Renew the subscription or rotate the key, then run "
+                    "deploy-infra (skip_image) so stride/prod picks it up.")
+              sys.exit(1)
+          except pf_client.PFError as e:
+              print(f"::error::Punting Form did not answer cleanly: {e}")
+              sys.exit(1)
+          print(f"key OK: {len(meetings)} meeting(s) listed for {today}")
+          EOF
+
   probe:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

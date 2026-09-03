@@ -36,6 +36,20 @@ Everything that fetched from it was moved to Punting Form behind `pf_client`:
 | `pf_window.py` | Subscription-window arithmetic (the pre-window wall) |
 | `pf_track_dedup.py`, `pf_fork_repair.py`, `pf_trust_checks.py` | Repair/audit tools for the horse-ID bridge and track aliases |
 
+**Subscription.** Punting Form Starter is a monthly plan bought 2026-07-31.
+Access lapsed overnight on 2026-09-03 (every call returned HTTP 403 "You do
+not have access to this API") and was renewed the same day. Two things follow
+from that. The key lives in the `PUNTINGFORM_API_KEY` repository secret and is
+copied into AWS Secrets Manager (`stride/prod`) by the `deploy-infra` workflow,
+so a new key has to go through that workflow before the Fargate jobs see it.
+And the `puntingform-probe` workflow now makes one meetings-list call at 03:15
+AEST daily and fails through auto-triage if the key is rejected, so the reason
+is on an issue before the 04:00 racecard task runs. Confirm the renewal date
+and whether auto-renew is on in the Punting Form account; nothing in the repo
+can see either. Data older than about 31 days is not served on this plan
+(`pf_window.py` measures the wall at runtime), so a missed day must be healed
+within that window or it is gone.
+
 Modules belonging to the dead-API era and no longer on any live path:
 `import_historical_to_db.py`, `import_race_results.py`, `import_track_json(_fast).py`,
 `download_training_data.py`. They are retained per the repo's never-delete-a-superseded-
