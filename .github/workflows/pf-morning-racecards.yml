@@ -22,12 +22,6 @@
 name: pf-morning-racecards
 
 on:
-  push:
-    branches: ["pf/scheduled-ingestion"]
-    paths:
-      - "server/python/download_racecards.py"
-      - "server/python/providers/**"
-      - ".github/workflows/pf-morning-racecards.yml"
   schedule:
     - cron: "30 19 * * *"  # 05:30 AEST (06:30 AEDT) daily — morning racecards
   workflow_dispatch:

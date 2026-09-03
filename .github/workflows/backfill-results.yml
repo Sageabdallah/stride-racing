@@ -1,6 +1,6 @@
 # Closes the collection gap the coverage report found (docs/12 §4c: every
 # table stops ~2026-04-18). Runs backfill_results.py, which reuses the
-# production ingestion path week by week: results via The Racing API, then
+# production ingestion path week by week: results via Punting Form, then
 # NSW / QLD / VIC-SA sectionals. Post-race facts into history tables only —
 # no leakage (see the module docstring); every writer is idempotent, so
 # re-dispatching a chunk is safe.
@@ -9,7 +9,7 @@
 # rate-limited API calls). Set refresh_view=true on the FINAL chunk so
 # training_view_v2 picks up the new months.
 #
-# Required secrets: DATABASE_URL, RACING_API_USERNAME, RACING_API_PASSWORD.
+# Required secrets: DATABASE_URL, PUNTINGFORM_API_KEY.
 # Optional secret:  RACING_COM_API_KEY (VIC/SA sectionals; skipped loudly
 # when absent — results, NSW and QLD are unaffected).
 
@@ -52,8 +52,7 @@ jobs:
       - name: Backfill results + sectionals
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          RACING_API_USERNAME: ${{ secrets.RACING_API_USERNAME }}
-          RACING_API_PASSWORD: ${{ secrets.RACING_API_PASSWORD }}
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
           RACING_COM_API_KEY: ${{ secrets.RACING_COM_API_KEY }}
         run: |
           set -euo pipefail
@@ -61,8 +60,8 @@ jobs:
             echo "::error::Repository secret DATABASE_URL is not set."
             exit 1
           fi
-          if [ -z "${RACING_API_USERNAME}" ] || [ -z "${RACING_API_PASSWORD}" ]; then
-            echo "::error::Repository secrets RACING_API_USERNAME and RACING_API_PASSWORD are required (The Racing API basic auth used by fetch_and_import_date.py)."
+          if [ -z "${PUNTINGFORM_API_KEY}" ]; then
+            echo "::error::Repository secret PUNTINGFORM_API_KEY is required (the Punting Form fetch layer used by fetch_and_import_date.py)."
             exit 1
           fi
           cd server/python

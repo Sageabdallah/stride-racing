@@ -10,11 +10,6 @@
 name: puntingform-probe
 
 on:
-  push:
-    branches: ["claude/betfair-keys-smoke-test-4yqny1"]
-    paths:
-      - "scripts/puntingform_probe.py"
-      - ".github/workflows/puntingform-probe.yml"
   workflow_dispatch:
     inputs:
       meeting_ids:

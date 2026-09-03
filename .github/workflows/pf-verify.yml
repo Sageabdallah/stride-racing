@@ -12,12 +12,6 @@
 name: pf-verify
 
 on:
-  push:
-    branches: ["pf/verify-backfill"]
-    paths:
-      - "server/python/pf_client.py"
-      - "server/python/pf_verify_backfill.py"
-      - ".github/workflows/pf-verify.yml"
   workflow_dispatch:
     inputs:
       start:

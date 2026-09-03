@@ -1,7 +1,7 @@
 # Data Sources & Ingestion
 
 Everything downstream — features, models, intelligence, tips — sits on data pulled
-from five external sources into a Neon (cloud) PostgreSQL database plus local JSON
+from six external sources into a Neon (cloud) PostgreSQL database plus local JSON
 files. This document maps the sources, the collectors, the importers, and the
 database schema.
 
@@ -13,12 +13,33 @@ Related docs: [Architecture](01-architecture.md) · [Daily pipeline](02-daily-pi
 
 | Source | Endpoint | Auth | What it provides | Collector |
 |---|---|---|---|---|
-| **The Racing API** | `https://api.theracingapi.com` (`/v1/australia/meets…`) | HTTP Basic (`RACING_API_USERNAME/PASSWORD`) | Racecards, results, odds, runner stats | `download_racecards`, `download_historical`, `download_training_data`, `fetch_and_import_date`, `auto_results_collector`, `backfill_barrier_trials` |
+| **Punting Form** (Starter) | `https://api.puntingform.com.au` | `PUNTINGFORM_API_KEY` | Racecards, results, runner form — the live replacement for The Racing API | `pf_client` (fetch layer), `pf_results_mapper`, `download_racecards`, `fetch_and_import_date`, `pf_backfill_results`, `download_historical`, `backfill_barrier_trials` |
+| **Betfair Exchange** | `https://api.betfair.com` (+ delayed key) | app key + cert login (`certs/`) | Market prices for odds snapshots and steam/drift | `betfair_markets`, `betfair_odds_snapshot`, `providers/betfair_auth` |
+| ~~The Racing API~~ | `https://api.theracingapi.com` | ~~HTTP Basic~~ | **DISCONTINUED** — ceased Australian coverage; credentials return 401 | — (see §1a) |
 | **Racing Queensland** | `racingqueensland.com.au/RacingFile.ashx?path=/Sectional/YYYYMMDD_Track_T.csv` | none | QLD sectional CSVs | `sectional_times_collector` |
 | **racing.com GraphQL** | `https://graphql.rmdprod.racing.com/` | `x-api-key` (`RACING_COM_API_KEY`) + referer header | VIC/SA sectionals (per-split times) | `racing_com_sectionals_collector` |
 | **Racing NSW pidata** | `pidata.racingnsw.com.au/RNSW/RacesLogsMetadata.json` + `.tol` files | none | NSW GPS sectionals (200 m intervals) | `nsw_sectional_collector` |
 | **Racing NSW XML** | `racing.racingnsw.com.au/FreeFields/…XML.aspx` | none | NSW results + a single 600 m sectional | `nsw_xml_collector` (alternative path) |
 | Weather | — | — | **stub only** — `weather_api.py` returns static fallback and has no callers | — |
+
+### 1a. The Racing API migration (2026-08)
+
+The Racing API ceased Australian coverage and its credentials now return 401.
+Everything that fetched from it was moved to Punting Form behind `pf_client`:
+
+| Module | Role |
+|---|---|
+| `pf_client.py` | HTTP fetch layer (meetings, results, meeting detail); raises `PFError` on any failure so a dead day cannot pass silently |
+| `pf_results_mapper.py` | Maps PF payloads to the 21-column `race_results_history` contract |
+| `pf_backfill_results.py` | Results backfill within the Starter window (~31 days) |
+| `pf_verify_backfill.py` | Post-backfill verification |
+| `pf_window.py` | Subscription-window arithmetic (the pre-window wall) |
+| `pf_track_dedup.py`, `pf_fork_repair.py`, `pf_trust_checks.py` | Repair/audit tools for the horse-ID bridge and track aliases |
+
+Modules belonging to the dead-API era and no longer on any live path:
+`import_historical_to_db.py`, `import_race_results.py`, `import_track_json(_fast).py`,
+`download_training_data.py`. They are retained per the repo's never-delete-a-superseded-
+generation rule (see `docs/analysis/SYSTEM_MAP.md`), not because they still run.
 
 The Playwright "sniffer" scripts (`racing_com_api_discovery.py`, `nsw_api_sniffer.py`,
 `nsw_deep_sniffer.py`) are the reverse-engineering tools that discovered the GraphQL
@@ -32,7 +53,8 @@ Sectional collection is routed **per state** by `learning_track_map.py` /
 
 ## 2. Forward flow — racecards
 
-`download_racecards.py` pulls upcoming meets for ~27 target metro tracks, tags
+`download_racecards.py` pulls upcoming meets for ~27 target metro tracks via the
+configured provider (`providers/puntingform.py`), tags
 barrier trials (`is_trial` heuristics), and writes
 `racecards/racecard_<date>.json`. This file is the input to the tips pipeline and
 the intelligence agents. Requests use a retry session (3 retries, backoff on
@@ -47,7 +69,7 @@ the intelligence agents. Requests use a retry session (3 retries, backoff on
   per runner: margins, odds, gear, breeding, sectionals, in-running positions) but
   only 8 tracks. Both write `historical_data/historical_training_data.json` —
   **they clobber each other**; pick one.
-- Importers: `import_historical_to_db.py` (→ `training_data` +
+- Importers (all dead-API era — see §1a; retained, not live): `import_historical_to_db.py` (→ `training_data` +
   `race_results_history`, append-mode), `import_track_json(_fast).py`
   (`historical_data/track_imports/*.json` → `training_data`),
   `import_race_results.py` (**TRUNCATE-and-reload** of `race_results_history` —
@@ -63,7 +85,7 @@ results_collector.py
   ├─ results_projection.ensure_race_schedule_from_prediction_audit
   │     (seeds race_schedule; result_due_at = off_time + 30 min)
   ├─ auto_results_collector.process_pending_races
-  │     (Racing API → prediction_audit: position, SP, won, profit_loss;
+  │     (Punting Form → prediction_audit: position, SP, won, profit_loss;
   │      retry_count < 5; matches horses by normalized name)
   ├─ results_projection.project_resulted_prediction_audit
   │     (prediction_audit → selection_results + training_data;
@@ -82,7 +104,11 @@ LOSS = −100; SCRATCHED = 0) → refresh franking for low-confidence horses (�
 settle shadow-P&L rows → summarize.
 
 **Weekly:** `weekly_sectional_collector.py` runs all three sectional collectors in
-sequence (10-minute subprocess timeouts) — the Sunday-night catch-up.
+sequence (10-minute subprocess timeouts) — the Sunday-night catch-up, driven by the
+TypeScript scheduler (`server/scheduler.ts`, untracked). The
+`sectional-schedules.yml` GitHub workflow covers the same three collectors on a
+Sun/Wed cron over a trailing 4-day window; the two paths overlap and both are
+idempotent.
 
 ---
 
