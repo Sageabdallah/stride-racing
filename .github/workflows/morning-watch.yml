@@ -206,6 +206,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Racecard never arrived — escalate to Claude
+        id: dead
         if: steps.q.outputs.status == 'empty' && steps.card.outputs.verdict == 'racecard_dead'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -235,13 +236,16 @@ jobs:
           - If the cause is not clear from the logs, comment with findings and open no PR.
           EOF
 
-          gh issue create \
+          URL=$(gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "Morning watch: no racecard and no consensus for ${TARGET_DATE}" \
             --label auto-triage \
-            --body-file body.md
+            --body-file body.md)
+          echo "filed $URL"
+          echo "issue=${URL##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Silent no-op — escalate to Claude
+        id: noop
         if: steps.q.outputs.status == 'empty' && steps.card.outputs.verdict == 'card'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -271,13 +275,16 @@ jobs:
           - If the cause is not clear from the logs, comment with findings and open no PR.
           EOF
 
-          gh issue create \
+          URL=$(gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "Morning watch: consensus_mentions empty for ${TARGET_DATE}" \
             --label auto-triage \
-            --body-file body.md
+            --body-file body.md)
+          echo "filed $URL"
+          echo "issue=${URL##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Zero rows and no verdict — escalate anyway
+        id: unclassified
         # The verdict step sets one of three values on every path, so reaching
         # here means it did not run to completion at all. A watcher that goes
         # quiet because its own classifier broke is the failure this file
@@ -313,13 +320,16 @@ jobs:
           - If the cause is not clear from the logs, comment with findings and open no PR.
           EOF
 
-          gh issue create \
+          URL=$(gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "Morning watch: unclassified zero for ${TARGET_DATE}" \
             --label auto-triage \
-            --body-file body.md
+            --body-file body.md)
+          echo "filed $URL"
+          echo "issue=${URL##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Watcher query broken — escalate to Claude
+        id: qbroken
         if: steps.q.outputs.status == 'query_broken'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -370,11 +380,13 @@ jobs:
             morning is the thing being reported, not an inconvenience to silence.
           EOF
 
-          gh issue create \
+          URL=$(gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
             --label auto-triage \
-            --body-file body.md
+            --body-file body.md)
+          echo "filed $URL"
+          echo "issue=${URL##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Watcher blind — notify, do not escalate
         if: steps.q.outputs.status == 'unreachable'
@@ -439,48 +451,38 @@ jobs:
           done < stale.txt
 
       - name: Wake the agent
-        # Fires on exactly the states the four escalation steps above file a
-        # @claude issue for, and on nothing else. Mirroring the condition rather
-        # than editing those four steps keeps the working escalation paths
-        # untouched; the cost is that this expression and theirs must stay in
-        # step, which is why it is written in the same vocabulary.
+        # Fires for the issue THIS run filed, and for nothing else. The four
+        # escalation steps above each hand their new issue number forward as a
+        # step output, so this step never has to guess which issue is new.
         #
-        #   empty + not quiet -> racecard_dead, card, or unclassified: escalated
-        #   query_broken      -> the watcher's own SQL: escalated
-        #   quiet             -> correct silence, no wake
-        #   unreachable       -> a network path an agent cannot fix, no wake
-        #   ok                -> nothing to do
+        # It used to guess. It asked GitHub for the newest open auto-triage
+        # issue and treated "created less than an hour ago" as proof that this
+        # run had filed it. On 2026-09-03 that proxy failed: auto-triage had
+        # filed #152 for the failed racecards run three hours earlier, the
+        # list came back with #152 in front of the #153 this run had filed one
+        # second before, and the step read the older issue's age as "already
+        # deduped" and did not dispatch. #153 carried an @claude tag that no
+        # agent ever read. The run knows what it filed; ask it, not the API.
+        #
+        # A branch that filed nothing (query-broken dedupes on a date-free
+        # title) leaves its output empty, so a fault that persists for a
+        # fortnight wakes the agent once, when its issue is filed, and not
+        # every night after. That is the guarantee the age check was a proxy
+        # for, made directly.
         #
         # The consensus and intelligence jobs this covers are Fargate tasks.
         # They emit no workflow_run event, so auto-triage.yml never sees them
         # and this is the only thing that can wake the agent for them.
         if: >-
-          steps.q.outputs.status == 'query_broken' ||
-          (steps.q.outputs.status == 'empty' && steps.card.outputs.verdict != 'quiet')
+          steps.dead.outputs.issue != '' ||
+          steps.noop.outputs.issue != '' ||
+          steps.unclassified.outputs.issue != '' ||
+          steps.qbroken.outputs.issue != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ steps.dead.outputs.issue || steps.noop.outputs.issue || steps.unclassified.outputs.issue || steps.qbroken.outputs.issue }}
         run: |
           set -euo pipefail
-          # Only wake the agent for an issue THIS run filed. The escalation steps
-          # above dedupe by title, so a fault that persists for a fortnight files
-          # one issue and then suppresses itself — but the wake condition is
-          # status-based and would keep firing, spending 20 turns a night against
-          # the OAuth quota, stacking comments on a suppressed thread where nobody
-          # is looking. Freshness is the cheap stand-in for "did we just file it":
-          # an issue older than an hour is one the dedupe already had.
-          read -r ISSUE CREATED < <(gh issue list --repo "$GITHUB_REPOSITORY" \
-            --state open --label auto-triage --limit 1 \
-            --json number,createdAt --jq '.[0] | "\(.number) \(.createdAt)"' || echo " ")
-          if [ -z "${ISSUE:-}" ]; then
-            echo "No open auto-triage issue to attach a diagnosis to. Not dispatching."
-            exit 0
-          fi
-          AGE=$(( $(date -u +%s) - $(date -u -d "$CREATED" +%s 2>/dev/null || echo 0) ))
-          if [ "$AGE" -gt 3600 ]; then
-            echo "Newest auto-triage issue #$ISSUE is ${AGE}s old — already deduped."
-            echo "The fault is known and reported. Not spending an agent run on it again."
-            exit 0
-          fi
           gh workflow run claude.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
@@ -488,7 +490,7 @@ jobs:
             -f failed_workflow="morning chain (racecard/intelligence/consensus, Fargate)" \
             -f run_id="" \
             -f issue_number="$ISSUE"
-          echo "dispatched claude.yml (issue #$ISSUE, filed ${AGE}s ago)"
+          echo "dispatched claude.yml for #$ISSUE, the issue this run filed"
 
       - name: Report
         run: |
