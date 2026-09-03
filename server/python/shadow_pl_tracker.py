@@ -22,6 +22,26 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 RACECARDS_DIR = PROJECT_ROOT / "racecards"
 
+# The #123 fence. The first cloud Betfair captures (2026-08-05) read a bot's
+# standing ~$209 offer at the bottom of an unformed overnight ladder as the
+# price, and the morning capture read the same order again. On the 2026-08-08
+# card that fabricated 48 of the 56 STRONG_DRIFT signals (a $1.15 baseline
+# against a $9.20 morning price is not a drift), the market pillar penalised
+# those runners on phantom evidence, and the three races staked with 232-312%
+# books settled -7.50u. The capture guard (#119) and the book-coherence judge
+# (#122) reached the image with deploy-infra #31/#32 on 2026-08-10 at
+# 11:19-11:31 AEST, so every card through that day had its BASELINE_NIGHT
+# taken by the old code.
+#
+# Decision on #123 (2026-08-10): fence, do not purge. The rows stay in
+# stride_tip_results, and betfair_odds_snapshots keeps its 89 phantom rows,
+# because they are the only stored evidence for the still-open lone-lay-order
+# versus virtualisation question. What the fence forbids is measuring with
+# them: no tier ROI and no shadow P/L may count a bet from these dates for or
+# against a strategy. `record` and `results` still write them; `report`
+# leaves them out and says so. Both ends inclusive, ISO dates.
+PHANTOM_PRICE_FENCE = ("2026-08-05", "2026-08-10")
+
 
 def _load_env():
     env_path = PROJECT_ROOT / ".env"
@@ -381,6 +401,21 @@ def cmd_report():
     ensure_schema(conn)
     cur = conn.cursor()
 
+    fence_lo, fence_hi = PHANTOM_PRICE_FENCE
+
+    # What the fence holds back, counted first so the report can say so even
+    # when nothing outside it is reportable yet. A fence nobody can see is a
+    # decision nobody can check.
+    cur.execute("""
+        SELECT COUNT(*) FILTER (WHERE result != 'PENDING' AND result != 'SCRATCHED') AS bets,
+               COALESCE(SUM(profit_loss) FILTER (WHERE result != 'PENDING' AND result != 'SCRATCHED'), 0) AS total_pl,
+               COUNT(*) FILTER (WHERE result = 'PENDING') AS pending
+        FROM stride_tip_results
+        WHERE convergence_tier IS NOT NULL
+          AND race_date BETWEEN %s AND %s
+    """, (fence_lo, fence_hi))
+    fenced_bets, fenced_pl, fenced_pending = cur.fetchone()
+
     cur.execute("""
         SELECT convergence_tier,
                COUNT(*) FILTER (WHERE result != 'PENDING' AND result != 'SCRATCHED') AS bets,
@@ -391,14 +426,20 @@ def cmd_report():
                COUNT(*) FILTER (WHERE result = 'PENDING') AS pending
         FROM stride_tip_results
         WHERE convergence_tier IS NOT NULL
+          AND race_date NOT BETWEEN %s AND %s
         GROUP BY convergence_tier
         ORDER BY bets DESC
-    """)
+    """, (fence_lo, fence_hi))
     rows = cur.fetchall()
 
     if not rows:
-        print("  [SHADOW] No tier data available yet. Run 'record' after pipeline runs.",
-              file=sys.stderr)
+        if fenced_bets or fenced_pending:
+            print(f"  [SHADOW] Every recorded row sits inside the #123 fence "
+                  f"({fence_lo} to {fence_hi}): {fenced_bets} settled, {fenced_pending} "
+                  "pending, none of it reportable.", file=sys.stderr)
+        else:
+            print("  [SHADOW] No tier data available yet. Run 'record' after pipeline runs.",
+                  file=sys.stderr)
         cur.close()
         conn.close()
         return
@@ -427,7 +468,8 @@ def cmd_report():
                MIN(race_date), MAX(race_date)
         FROM stride_tip_results
         WHERE convergence_tier IS NOT NULL
-    """)
+          AND race_date NOT BETWEEN %s AND %s
+    """, (fence_lo, fence_hi))
     total_bets, total_wins, total_pl, total_pending, min_date, max_date = cur.fetchone()
     total_roi = (float(total_pl) / total_bets * 100) if total_bets > 0 else 0
 
@@ -436,6 +478,9 @@ def cmd_report():
           f"{(total_wins/total_bets*100 if total_bets else 0):>5.1f}% "
           f"{total_roi:>+6.1f}%{' ':>18s}{total_pending:>8d}")
     print(f"\n  Date range: {min_date} to {max_date}")
+    print(f"  Fenced (#123): {fence_lo} to {fence_hi} left out of every figure above — "
+          f"{fenced_bets} settled bet(s) worth {float(fenced_pl):+.2f}u, "
+          f"{fenced_pending} pending. Phantom-price window; evidence, not measurement.")
     print()
 
     cur.close()
