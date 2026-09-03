@@ -31,6 +31,7 @@ on:
       - "sectional-schedules"     # Sun/Wed 21:00 AEST; three collectors with row gates
       - "schedule-audit"          # 04:20 AEST; fails only when the account has ZERO schedules
       - "evidence-audit"          # 04:25 AEST; fails when the evidence store is unreadable
+      - "puntingform-probe"       # 03:15 AEST key check; fails when Punting Form rejects the key
     types: [completed]
 
 permissions:
