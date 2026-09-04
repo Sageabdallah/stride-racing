@@ -258,13 +258,20 @@ def test_verify_jobs_can_pin_the_provider_and_wait_for_a_long_task():
 
 
 def _verify_jobs_run_block():
-    """The shell body of the 'Run each job and report' step, and its env map."""
-    import yaml
-    doc = yaml.safe_load(VERIFY_JOBS.read_text())
-    for step in doc["jobs"]["verify"]["steps"]:
-        if step.get("name", "").startswith("Run each job"):
-            return step["run"], step.get("env", {})
-    raise AssertionError("run step not found")
+    """The shell body of the 'Run each job and report' step, and its env names.
+
+    Sliced out of the raw text rather than parsed: PyYAML is not in the CI
+    dependency set, and a test that needs a new dependency to assert on a
+    workflow is a test that will be deleted the first time CI goes red.
+    """
+    text = VERIFY_JOBS.read_text()
+    start = text.index("- name: Run each job and report")
+    tail = text.find("\n      - name:", start + 10)
+    block = text[start:] if tail == -1 else text[start:tail]
+    env_at = block.index("\n        env:")
+    run_at = block.index("\n        run: |")
+    env_names = re.findall(r"^\s+([A-Z_][A-Z0-9_]*):", block[env_at:run_at], re.M)
+    return block[run_at:], env_names
 
 
 def test_dispatch_inputs_reach_the_shell_as_env_not_as_interpolated_text():
