@@ -119,6 +119,21 @@ def test_generate_joins_text_blocks_and_ignores_the_rest(sdk):
     assert llm.generate("x") == "THE FORM: won at Randwick."
 
 
+def test_an_empty_body_raises_so_the_caller_falls_back(sdk):
+    """GroqProvider gets this free: .strip() on a null body raises and becomes
+    an LLMProviderError, which llm_post_scorer catches to substitute the
+    shorter ai_analysis. Returning "" here instead reaches the SUCCESS path,
+    so nothing is logged and the pick is published blank under a fresh
+    ai_insight_generated_at — the exact 2026-09-02 row shape."""
+    llm = llm_provider.AnthropicProvider()
+    client = _FakeAnthropic.instances[-1]
+
+    for content in ([], [_Block("thinking", "only reasoning")], [_Block("text", "   ")]):
+        client.response = _Response(content)
+        with pytest.raises(llm_provider.LLMProviderError, match="no text"):
+            llm.generate("x")
+
+
 def test_refusals_and_api_errors_surface_as_provider_errors(sdk):
     llm = llm_provider.AnthropicProvider()
     client = _FakeAnthropic.instances[-1]

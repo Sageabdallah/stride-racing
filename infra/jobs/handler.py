@@ -349,10 +349,25 @@ def _sync_down(rel_dir: str) -> int:
 # Saturday fields are metro and big. At 90 races that is 290 + 90*243 =
 # ~22,100s. The old 10,800s bound covered ~43 races: it would have killed
 # every recent Saturday part-way through, on the day the system exists for.
+#
+# 21600 was then still 500s under its own worst case, and every figure above
+# was measured on runs where the LLM contributed nothing — 2026-09-02 spent
+# 1.1s in it across 30 races because every call was failing. A working provider
+# is not free: run_tips_pipeline makes SIX blocking calls per race, strictly
+# sequentially and with no pool or batching (analyse_race_field,
+# score_race_horses, three generate_rich_insight, generate_brief_assessments).
+# At ~20s each that is ~120s/race on top of MC — for the 55-race 2026-09-05
+# card, ~13,400s of scoring plus ~6,600s of LLM, or 92% of the old bound.
+#
+# The failure that bound buys is the worst available: the tips JSON is written
+# once, after the whole meet loop, so a subprocess killed at the cap produces
+# NO file at all — six hours of Fargate and nothing to show. Widened to 8.5h,
+# which still lands 08:05 + 8.5h = 16:35, far inside the 22:30 results gap the
+# note above says to check.
 JOB_TIMEOUTS = {
     "stride_build.py": 3400,
     "consensus_agent.py": 9000,
-    "run_tips_pipeline.py": 21600,
+    "run_tips_pipeline.py": 30600,
 }
 DEFAULT_TIMEOUT = 840  # Lambda-era bound; unchanged for the remaining jobs
 
@@ -920,9 +935,25 @@ def _tips_prepare() -> str:
     return _require_racecard("tips-proof")
 
 
+# Below this share of top picks carrying insight text, an LLM-enabled preview
+# is a failure rather than a thin result. The 2026-09-02 shape (0 of 90) is the
+# degenerate end of a continuum: a provider that starts rate-limiting at race 20
+# leaves most picks blank and still exits 0, and a gate that only fires at
+# exactly zero passes 40/330. Not 1.0 — a handful of per-pick errors is normal
+# and losing the artifact over three blank insights helps nobody.
+INSIGHT_COVERAGE_FLOOR = 0.80
+
+
 def _llm_expected() -> bool:
-    """run_tips_pipeline's own reading of LLM_ENABLED: unset means on."""
-    return os.environ.get("LLM_ENABLED", "true").strip().lower() in ("true", "1", "yes")
+    """run_tips_pipeline's own reading of LLM_ENABLED: unset means on.
+
+    Deliberately character-for-character run_tips_pipeline.py's expression,
+    .strip() included — which is to say, excluded. Adding one made the handler
+    strictly more permissive: LLM_ENABLED=" true " disabled the LLM in the
+    pipeline while the handler asserted insights were expected, failing a run
+    that did exactly what its environment said.
+    """
+    return os.environ.get("LLM_ENABLED", "true").lower() in ("true", "1", "yes")
 
 
 def _insight_coverage(path: str) -> tuple:
@@ -930,14 +961,14 @@ def _insight_coverage(path: str) -> tuple:
 
     Counts text, not timestamps: the 2026-09-02 file stamped
     ai_insight_generated_at on every pick while every ai_insight was "".
-    (0, 0) when the file cannot be read; the caller's existence check owns
-    that failure.
+
+    Raises on a file that cannot be read or parsed. Returning (0, 0) for it
+    made three different outcomes identical at the call site — corrupt file,
+    empty races list, and every race an error stub — and all three then passed
+    the caller's guard, which is the failure this job exists to catch.
     """
-    try:
-        with open(path) as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return 0, 0
+    with open(path) as fh:
+        data = json.load(fh)
     picks = [p for race in (data.get("races") or [])
              for p in (race.get("top_picks") or [])]
     with_text = sum(1 for p in picks if str(p.get("ai_insight") or "").strip())
@@ -995,13 +1026,30 @@ def job_tips_proof() -> dict:
     # morning-odds relays before it asserts: a failed check must not also
     # destroy the evidence of what the run produced.
     _sync_up("racecards", f"tips_{_today()}_cloudproof.json")
-    with_text, picks = _insight_coverage(tips)
-    if picks and with_text == 0 and _llm_expected():
+    try:
+        with_text, picks = _insight_coverage(tips)
+    except (OSError, ValueError) as e:
         raise RuntimeError(
-            f"tips-proof: LLM enabled but 0 of {picks} top picks carry insight "
-            f"text — the 2026-09-02 shape (every call failed, timestamps "
-            f"stamped, exit 0). The file was relayed first so it can be read; "
-            f"the run did not deliver what it was dispatched for.")
+            f"tips-proof: {tips} exists but could not be parsed ({e}). A "
+            f"corrupt artifact is a failed preview, not a preview with no "
+            f"insights. It was relayed first, so it can still be inspected.")
+    if not picks:
+        # run_tips_pipeline writes the file unconditionally and has no non-zero
+        # exit path: every race erroring produces top_picks [] and exit 0. The
+        # existence check above cannot see that, and this is the exact shape of
+        # the 2026-08-05 run that dropped all 31 races and reported success.
+        raise RuntimeError(
+            f"tips-proof: {tips} carries no top picks at all — the pipeline "
+            f"exited 0 having scored nothing. There is no preview here.")
+    if _llm_expected():
+        floor = max(1, int(picks * INSIGHT_COVERAGE_FLOOR))
+        if with_text < floor:
+            raise RuntimeError(
+                f"tips-proof: LLM enabled but only {with_text} of {picks} top "
+                f"picks carry insight text (floor {floor}). Either every call "
+                f"failed — the 2026-09-02 shape — or the provider degraded "
+                f"part-way and most picks are blank. The file was relayed "
+                f"first so it can be read.")
     return {"last_success_date": _today(), "insights": f"{with_text}/{picks}",
             "detail": out[-400:]}
 
