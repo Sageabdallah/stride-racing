@@ -1011,8 +1011,20 @@ def job_tips_proof() -> dict:
     os.environ["STRIDE_MC_AUDIT_WRITE"] = "false"
     if _tips_prepare() == "quiet":
         return {"last_success_date": _today(), "quiet_day": True}
-    out = _run_ok("run_tips_pipeline.py", _today(), "--skip-db-store",
-                  "--output-suffix", "cloudproof")
+    # run_tips_pipeline has always taken tracks positionally; this job simply
+    # never passed them, so the only available preview was the whole card.
+    # That matters because the run cannot be watched to completion — the OIDC
+    # session dies at an hour and a Saturday card is four to five — so the
+    # ability to ask for a two-hour subset instead is the difference between a
+    # preview that lands when someone needs it and one that lands at 1am.
+    # Comma-separated, because a container override is one string.
+    tracks = [t.strip() for t in
+              os.environ.get("STRIDE_TRACKS", "").split(",") if t.strip()]
+    if tracks:
+        print(f"[tips-proof] track filter: {', '.join(tracks)} "
+              f"(the rest of the card is not scored)")
+    out = _run_ok("run_tips_pipeline.py", _today(), *tracks,
+                  "--skip-db-store", "--output-suffix", "cloudproof")
     tips = f"{_root()}/racecards/tips_{_today()}_cloudproof.json"
     if not os.path.exists(tips):
         raise RuntimeError(
