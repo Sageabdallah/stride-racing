@@ -228,7 +228,8 @@ infra/                      AWS setup as shell scripts, the Dockerfile and
                             the job handler every task runs
 .github/workflows/          34 workflows: CI, deploy, ingestion, watchers,
                             audits, probes, training, backfills
-docs/                       The reference documents, deploy runbook, ROI
+docs/                       The reference documents, deploy runbook, the
+                            decision-learning plan, ROI
                             roadmap, validation records and research notes
 migrations/                 PostgreSQL schema
 examples/                   Sample race-day output and the backtest summary
@@ -241,10 +242,9 @@ server/python/tipster_panel.example.json
                             Tipster consensus panel (template)
 ```
 
-The numbered files at the root (`00_MASTER_INDEX.md` to
-`17_IMPLEMENTATION_STATUS.md`) are the plan for the decision-learning layer
-and its progress tracker. The other root documents are planning and status
-notes from the ROI programme. `CLAUDE.md` and
+The plan for the decision-learning layer and its progress tracker are the
+numbered files in
+[`docs/decision-learning/`](docs/decision-learning/README.md). `CLAUDE.md` and
 [`docs/roi-roadmap/AGENTS.md`](docs/roi-roadmap/AGENTS.md) are the working
 rules for the coding agents that help maintain the repo.
 

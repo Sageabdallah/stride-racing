@@ -21,6 +21,22 @@ source read of the ~150 Python modules (~72k lines) in this repo.
 | 11 | [Module reference](11-module-reference.md) | One-line purpose for every file, live-path files marked |
 | 12 | [Hit-rate research & roadmap](12-hit-rate-research.md) | External research, audit against it, the Phase-5/conditional-logit changes, and the prioritized improvement roadmap |
 
+## Other document sets
+
+| Folder | What it holds |
+|---|---|
+| [`decision-learning/`](decision-learning/README.md) | The plan for the decision layer: phases 0–10, global rules, execution protocol, the status register |
+| [`roi-roadmap/`](roi-roadmap/README.md) | The sequenced ROI/strike-rate task pack, its evidence base and progress tracker |
+| [`validation/`](validation/registry.md) | The forward-validation registry — pre-registered windows, and the record of one being invalidated |
+| [`analysis/`](analysis/SYSTEM_MAP.md) | The 2026-07 research pass: system map, academic findings, improvement report, implementation plan, results |
+| [`research/`](research/FEATURE_PROVENANCE.md) | Feature provenance and liveness, task-12 feature decisions, the winner-pattern proof run |
+| [`phase-minus-1/`](phase-minus-1/ARCHITECTURE_STABILISATION.md) | The architecture-stabilisation record that precedes Phase 0 |
+
+Deployment and operations: [`DEPLOY_RUNBOOK.md`](DEPLOY_RUNBOOK.md),
+[`../infra/README.md`](../infra/README.md),
+[`project_retrain_gate.md`](project_retrain_gate.md). What was removed from the
+repository and why: [`REPO_CLEANUP_AUDIT.md`](REPO_CLEANUP_AUDIT.md).
+
 ## Quick orientation
 
 If you read only one thing: **a race day flows** `download_racecards.py` →

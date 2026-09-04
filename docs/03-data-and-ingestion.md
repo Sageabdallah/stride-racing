@@ -228,8 +228,12 @@ The repo assumes these exist in Neon — there is no CREATE TABLE for them anywh
 
 - Two BM class-level cutoff schemes disagree between importers (88/70/58/50 vs
   85/72/64/58).
-- `fetch_and_import_date.py` and `import_barrier_trials_to_db.py` contain a
-  hardcoded Windows `.env` fallback path from the dev machine.
+- Five modules load `.env` themselves rather than through a shared helper
+  (`retrain_v2`, `fetch_and_import_date`, `backfill_phase2`, `backtest_v2_metro`,
+  `import_barrier_trials_to_db`). Each tries the repo root first, then
+  `$STRIDE_ENV_FILE`. Until 2026-09 that second path was a hardcoded Windows
+  checkout from the dev machine, so on every other machine the fallback was
+  dead and the error message named a directory nobody had.
 - `auto_results_collector --daemon` previously ignored `--check-interval` and
   hardcoded 5 minutes; it now honours a positive `--check-interval` and defaults
   to 5.

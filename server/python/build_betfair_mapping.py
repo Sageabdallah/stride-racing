@@ -37,8 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=str,
-        default=r"C:\Users\sagea\OneDrive\Desktop\BETFAIR\betfair_historical",
-        help="Root folder containing Betfair BASIC .bz2 files.",
+        default=os.environ.get("BETFAIR_HISTORICAL_DIR"),
+        help="Root folder containing Betfair BASIC .bz2 files (default: "
+             "$BETFAIR_HISTORICAL_DIR). Not needed with --refresh-view-only.",
     )
     parser.add_argument(
         "--db-url",
@@ -601,6 +602,12 @@ def main() -> int:
     if args.refresh_view_only:
         LOGGER.info("refresh-view-only mode complete.")
         return 0
+
+    if not args.data_dir:
+        LOGGER.error(
+            "No archive to read: pass --data-dir or set BETFAIR_HISTORICAL_DIR. "
+            "(--refresh-view-only rebuilds the view without the archive.)")
+        return 1
 
     data_dir = Path(args.data_dir).expanduser().resolve()
     if not data_dir.exists():

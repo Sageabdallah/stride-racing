@@ -8,6 +8,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Derived from this file, not from a checkout path: the two constants below
+# were absolute paths into one dev machine's Windows checkout, so the sibling
+# import and the .env load both failed on every other machine.
 PYTHON_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PYTHON_DIR)
 

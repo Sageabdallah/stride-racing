@@ -5,7 +5,11 @@ are demonstrably out of date and modules that nothing can reach. This file
 replaces the 2026-03-20 audit of the same name, which described a repository
 shape (`client/`, `server/*.ts`, `shared/`, `knip`) that no longer exists here.
 
-**48 files removed** (18 Markdown, 29 Python, 1 JSON), each verified below.
+**47 files removed** (17 Markdown, 29 Python, 1 JSON), each verified below.
+18 more were moved rather than deleted, and a hardcoded-path defect was fixed
+across seven modules — see §2. (The 2026-03 audit this file replaces was
+rewritten at the same path, so git records it as a modification, not a
+deletion.)
 
 ## Method
 
@@ -27,7 +31,7 @@ Two surfaces are outside this repository and could not be checked: the
 untracked Express/TypeScript server and the gitignored `.claude/skills/`
 runbooks, both of which invoke Python modules by filename. Where a document
 states that one of those surfaces calls a module, the module was kept — see
-§2.
+§3.
 
 ## 1. Removed
 
@@ -124,7 +128,40 @@ Dated research and audit documents (`docs/analysis/*`,
 `research/report.md`) still name some removed files; they describe the state
 at their own date and were left alone.
 
-## 2. Kept, and why
+## 2. Moved and fixed, not removed
+
+### The decision-learning plan left the repository root
+
+The 18 numbered files `00_MASTER_INDEX.md` … `17_IMPLEMENTATION_STATUS.md` now
+live in [`decision-learning/`](decision-learning/README.md), beside the V1
+guide they supersede, with a `README.md` index. Content unchanged; their
+cross-references were already sibling filenames, so they resolve correctly in
+the new location. The root is now `README.md`, `CLAUDE.md` and
+`PUNTINGFORM_MIGRATION.md`. `README.md`, `CLAUDE.md` (which called the pack
+"separately supplied" without saying where it was) and `docs/README.md` were
+updated to point at the folder.
+
+### One dev machine's paths, in seven modules
+
+`c:\Users\sagea\OneDrive\Desktop\…` was hardcoded in six modules as the
+fallback `.env` location and in a seventh as an argparse default. It resolved
+on no other machine — including the Mac it was meant for — so the fallback was
+dead everywhere and the "DATABASE_URL not found" message named a directory
+nobody had.
+
+| Module | Was | Now |
+|---|---|---|
+| `backfill_zscores.py` | Both the `sys.path` entry and `ENV_PATH` absolute into that checkout, with no derived path at all | derived from `__file__` |
+| `retrain_v2.py`, `fetch_and_import_date.py`, `backfill_phase2.py`, `backtest_v2_metro.py`, `import_barrier_trials_to_db.py` | repo-root `.env`, then the Windows path | repo-root `.env`, then `$STRIDE_ENV_FILE` if set |
+| `build_betfair_mapping.py` | `--data-dir` defaulted to that machine's `Desktop\BETFAIR\…` | defaults to `$BETFAIR_HISTORICAL_DIR`; absent, the run stops with a message instead of scanning an empty directory |
+
+Both variables are documented in `.env.example`. Verified: with a repo-root
+`.env` all five gate-on-`DATABASE_URL` modules load it and none exits; with no
+`.env` the error names the real path and the override; with `STRIDE_ENV_FILE`
+pointing elsewhere that file is used. This supersedes the unmerged branch
+`fix/backfill-zscores-portable-paths`, which fixed one of the seven.
+
+## 3. Kept, and why
 
 Unreachable from this repository, but removing them would be a guess rather
 than a cleanup.
@@ -143,7 +180,7 @@ Also kept, and worth a link from somewhere rather than deletion:
 `docs/roi-roadmap/10-exchange-spike.md` are unreferenced but current design
 records.
 
-## 3. Kept — looked dead, is not
+## 4. Kept — looked dead, is not
 
 - `focal_loss.py`, `stacking_meta_learner.py`, `target_encoding.py`: imported by `ml_model.py`.
 - `train_ml_enhanced.py`: imported by `mc_api.py`.
@@ -153,17 +190,18 @@ records.
 - `run_full_pipeline.py`, `learn_from_results_v2.py`, `blackbook_candidates.py`, `source_accuracy_tracker.py`: steps of the documented runbooks.
 - `backfill_{phase2,zscores,zscores_targeted,rrh_missing_dates,ledger_prices}.py`: repair sweeps listed in `docs/10` §6.
 
-## 4. Side findings
+## 5. Side findings
 
-Fixed in this pass: the duplicate `pf_fork_remap.json`, and `docs/README.md`'s
-claim that the repo has no test suite (it has 864 tests).
+Fixed in this pass: the duplicate `pf_fork_remap.json`, `docs/README.md`'s
+claim that the repo has no test suite (it has 864), and the hardcoded developer
+paths in §2.
 
 Left alone, for the owner:
 
-- `backfill_zscores.py` and `import_barrier_trials_to_db.py` hard-code a Windows dev-machine path (branch `fix/backfill-zscores-portable-paths` exists and is unmerged).
 - `docs/roi-roadmap/AGENTS.md` rule 10 still forbids wiring `market_efficiency.py`, which no longer exists. The prohibition is satisfied trivially; the contract text was not edited because changing a rule's wording is not cleanup.
+- The branch `fix/backfill-zscores-portable-paths` on `origin` is now redundant (§2) and can be deleted.
 
-## 5. Verification
+## 6. Verification
 
 | Check | Before | After |
 |---|---|---|
@@ -172,5 +210,6 @@ Left alone, for the owner:
 | 17 module self-tests from `ci.yml` | — | 17/17 pass |
 | Deleted names in workflows, `infra/`, Dockerfile, `handler.py` | — | none |
 | Relative Markdown links across the repo | — | none broken |
+| `.env` resolution in the seven repathed modules | Windows path, dead everywhere | repo root, then `$STRIDE_ENV_FILE`; exercised both ways |
 
 No test was skipped, weakened or deleted; no test file was removed.
