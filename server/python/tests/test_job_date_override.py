@@ -76,3 +76,29 @@ def test_verify_jobs_workflow_can_pass_the_date_through():
     assert re.search(r"^\s+date:\n\s+description:", text, re.M), "verify-jobs has no date input"
     assert 'STRIDE_DATE' in text and 'inputs.date' in text, \
         "the date input must reach the container as STRIDE_DATE"
+
+
+def _quiet_dispatch(handler, monkeypatch, puts):
+    monkeypatch.setenv("STRIDE_JOB", "tips-proof")
+    monkeypatch.setattr(handler, "_load_secrets", lambda: None)
+    monkeypatch.setattr(handler, "_stage_models", lambda: None)
+    monkeypatch.setattr(handler, "_stage_panel", lambda: None)
+    monkeypatch.setattr(handler, "_put_state", lambda job, **kw: puts.append((job, kw)))
+    monkeypatch.setitem(handler.JOBS, "tips-proof", lambda: {"last_success_date": handler._today()})
+
+
+def test_a_preview_run_keeps_its_own_run_state_row(handler, monkeypatch):
+    puts = []
+    _quiet_dispatch(handler, monkeypatch, puts)
+    monkeypatch.setenv("STRIDE_DATE", "2026-09-05")
+    handler.dispatch()
+    assert puts == [("tips-proof~preview", {"last_success_date": "2026-09-05"})], \
+        "a preview must never stamp the real job's row: missing-run-watch reads it as 'ran today'"
+
+
+def test_a_scheduled_run_still_writes_the_real_row(handler, monkeypatch):
+    puts = []
+    _quiet_dispatch(handler, monkeypatch, puts)
+    monkeypatch.delenv("STRIDE_DATE", raising=False)
+    handler.dispatch()
+    assert [j for j, _ in puts] == ["tips-proof"]

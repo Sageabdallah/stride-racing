@@ -1096,20 +1096,28 @@ def dispatch(event=None, context=None):
     job = os.environ.get("STRIDE_JOB", "").strip()
     if job not in JOBS:
         raise RuntimeError(f"unknown STRIDE_JOB {job!r}; known: {sorted(JOBS)}")
-    if os.environ.get("STRIDE_DATE", "").strip():
+    preview = bool(os.environ.get("STRIDE_DATE", "").strip())
+    # A run for a chosen date keeps its own run-state row. missing-run-watch
+    # falls back to `last_success_date == today` as proof a job ran, so a
+    # Friday preview of Saturday's card stamped on the real row would vouch
+    # for a Saturday task that never started. The preview row is still
+    # written, under its own name, so the digest and a reader can see it.
+    state_job = f"{job}~preview" if preview else job
+    if preview:
         # Said once, up front, so a log that shows Saturday's card being built
         # on a Friday afternoon explains itself.
         print(f"[dispatch] STRIDE_DATE override: running {job} for {_today()} "
-              f"(Sydney today is {datetime.now(SYD).strftime('%Y-%m-%d')})")
+              f"(Sydney today is {datetime.now(SYD).strftime('%Y-%m-%d')}); "
+              f"run-state row {state_job}")
     _load_secrets()
     _stage_models()
     _stage_panel()
     try:
         result = JOBS[job]()
-        _put_state(job, **result)
+        _put_state(state_job, **result)
         return {"job": job, "ok": True, **{k: str(v) for k, v in result.items()}}
     except Exception as e:
-        _put_state(job, last_error=f"{type(e).__name__}: {e}"[:400],
+        _put_state(state_job, last_error=f"{type(e).__name__}: {e}"[:400],
                    last_error_at=datetime.now(timezone.utc).isoformat())
         # One failure hook for BOTH runtimes: Lambda's DLQ/alarm path only
         # covers Lambdas; a failed Fargate task would otherwise die silent
