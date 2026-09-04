@@ -10,6 +10,12 @@
 #   morning-odds       'morning' snapshot rows written at night are a lie
 #   consensus-agent    real LLM spend + overwrites today's consensus file
 # Those four are verified by their own scheduled slots tomorrow.
+#
+# With `date` set the same jobs run for a chosen day instead (a Friday preview
+# of Saturday's card): the writes above then land on rows the real run for
+# that day upserts over a few hours later. `llm_provider` pins the LLM for one
+# dispatch, and `llm-proof` is the two-pick check to run before a preview whose
+# insights are the point.
 name: verify-jobs
 
 on:
@@ -21,6 +27,12 @@ on:
       date:
         description: "Optional race date (YYYY-MM-DD) the Fargate jobs run for, passed as STRIDE_DATE. Empty = today in Sydney. Lets the chain be run early for a chosen day (racecard-collect, intelligence-build, consensus-agent, tips-proof); never combine with tips-pipeline, which writes the ledger."
         default: ""
+      llm_provider:
+        description: "Optional LLM provider for THIS dispatch (groq | anthropic | ollama), set on the task as LLM_PROVIDER with LLM_ENABLED=true. The task environment wins over the stride/prod secret, so this changes one run and never the schedule. Empty = whatever the secret says."
+        default: ""
+      wait_minutes:
+        description: "Minutes to wait for each Fargate task before reading its exit code (1-300, default 20). consensus-agent and tips-proof on a Saturday card need 150-240. A task still running when the wait ends is reported FAILED here but keeps running."
+        default: "20"
 
 permissions:
   id-token: write
@@ -33,7 +45,8 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Bounded by wait_minutes (capped at 300) plus dispatch overhead, per job.
+    timeout-minutes: 360
     env:
       AWS_REGION: ap-southeast-2
       # Must match 05_lambda_jobs.sh exactly. calibrator-coverage moved to
@@ -49,6 +62,11 @@ jobs:
       - name: Run each job and report
         run: |
           PASS=""; FAIL=""
+          WAIT="${{ inputs.wait_minutes }}"
+          case "$WAIT" in ''|*[!0-9]*) WAIT=20 ;; esac
+          if [ "$WAIT" -lt 1 ]; then WAIT=1; fi
+          if [ "$WAIT" -gt 300 ]; then WAIT=300; fi
+          echo "waiting up to ${WAIT}m per Fargate task"
           for JOB in $(echo "${{ inputs.jobs }}" | tr ',' ' '); do
             echo "::group::$JOB"
             OK=0
@@ -69,15 +87,21 @@ jobs:
               # select themselves through the STRIDE_JOB override.
               case "$JOB" in
                 tips-proof)      TD=stride-tips-pipeline ;;
+                llm-proof)       TD=stride-tips-pipeline ;;
                 consensus-proof) TD=stride-consensus-agent ;;
                 panel-proof)     TD=stride-consensus-agent ;;
                 *)               TD="stride-$JOB" ;;
               esac
-              DATE_ENV=""
+              EXTRA_ENV=""
               if [ -n "${{ inputs.date }}" ]; then
-                DATE_ENV=",{\"name\":\"STRIDE_DATE\",\"value\":\"${{ inputs.date }}\"}"
+                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_DATE\",\"value\":\"${{ inputs.date }}\"}"
               fi
-              OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$DATE_ENV]}]}"
+              if [ -n "${{ inputs.llm_provider }}" ]; then
+                # Both variables: LLM_ENABLED=false in the secret would
+                # otherwise make the provider choice a no-op.
+                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"LLM_PROVIDER\",\"value\":\"${{ inputs.llm_provider }}\"},{\"name\":\"LLM_ENABLED\",\"value\":\"true\"}"
+              fi
+              OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$EXTRA_ENV]}]}"
               TASK=$(aws ecs run-task --cluster stride \
                 --task-definition "$TD" --launch-type FARGATE \
                 --overrides "$OVR" \
@@ -85,7 +109,7 @@ jobs:
                 --query 'tasks[0].taskArn' --output text) || OK=1
               LOG_JOB="${TD#stride-}"
               echo "task: $TASK"
-              for i in $(seq 1 60); do
+              for i in $(seq 1 $((WAIT * 3))); do
                 sleep 20
                 ST=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
                   --query 'tasks[0].lastStatus' --output text)
@@ -98,7 +122,7 @@ jobs:
               echo "exit=$EXIT reason=$REASON"
               [ "$EXIT" = "0" ] || OK=1
               # Last log lines: the actual failure text, not just a code.
-              aws logs tail "/ecs/stride-${LOG_JOB:-$JOB}" --since 20m \
+              aws logs tail "/ecs/stride-${LOG_JOB:-$JOB}" --since "$((WAIT + 5))m" \
                 --format short 2>/dev/null | tail -60 || true
             fi
             if [ "$OK" = "0" ]; then PASS="$PASS $JOB"; else FAIL="$FAIL $JOB"; fi

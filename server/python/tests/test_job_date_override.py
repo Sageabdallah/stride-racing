@@ -54,11 +54,21 @@ def test_a_non_date_override_is_refused_not_used_as_a_filename(handler, monkeypa
         handler._today()
 
 
-def test_tips_proof_runs_for_the_overridden_date_and_relays_its_output(handler, monkeypatch):
+def test_tips_proof_runs_for_the_overridden_date_and_relays_its_output(handler, monkeypatch, tmp_path):
     monkeypatch.setenv("STRIDE_DATE", "2026-09-05")
     calls = {"run": [], "sync": []}
-    monkeypatch.setattr(handler, "_tips_prepare", lambda: None)
-    monkeypatch.setattr(handler, "_run_ok", lambda *a, **k: calls["run"].append(a) or "ok")
+    out_dir = tmp_path / "racecards"
+    out_dir.mkdir()
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    monkeypatch.setattr(handler, "_tips_prepare", lambda: "card")
+
+    def run_ok(*a, **k):
+        calls["run"].append(a)
+        (out_dir / "tips_2026-09-05_cloudproof.json").write_text(
+            '{"races": [{"top_picks": [{"horse": "A", "ai_insight": "THE FORM: won."}]}]}')
+        return "ok"
+
+    monkeypatch.setattr(handler, "_run_ok", run_ok)
     monkeypatch.setattr(handler, "_sync_up", lambda *a, **k: calls["sync"].append(a) or 1)
 
     result = handler.job_tips_proof()

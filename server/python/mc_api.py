@@ -745,6 +745,32 @@ def log_feature_snapshots(snapshot_rows: list):
 # process; still non-blocking.
 _AUDIT_WARNED = {"done": False}
 _AUDIT_INDEX_ENSURED = {"done": False}
+_AUDIT_OFF_NOTED = {"done": False}
+
+
+def _mc_audit_write_enabled() -> bool:
+    """STRIDE_MC_AUDIT_WRITE — default ON; 0/false/no/off disables the three
+    side-effect writes the scorer makes per race: prediction_audit,
+    feature_snapshots and race_schedule.
+
+    They were unconditional, and two of the three are first-write-wins:
+    prediction_audit's upsert only back-fills race_date/off_time on conflict,
+    and feature_snapshots is ON CONFLICT DO NOTHING. Harmless while the real
+    run is always the first to score a date. A run that scores a date BEFORE
+    its real run — a Friday preview of Saturday's card — would make its
+    numbers that date's record, and training_view_v2 is built from
+    prediction_audit. run_tips_pipeline --skip-db-store never reached these
+    because they live here, not in the store step (2026-09-04).
+    """
+    return os.environ.get("STRIDE_MC_AUDIT_WRITE", "true").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _note_audit_write_off():
+    if not _AUDIT_OFF_NOTED["done"]:
+        _AUDIT_OFF_NOTED["done"] = True
+        print("[MC] STRIDE_MC_AUDIT_WRITE is off — prediction_audit, feature_snapshots "
+              "and race_schedule rows are not logged this run", file=sys.stderr)
 
 
 def _warn_audit_failure(reason: str):
@@ -7853,12 +7879,15 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 r.pop('_rawPlaceProb', None)
 
         try:
-            if _snapshot_rows:
-                log_feature_snapshots(_snapshot_rows)
-            if _audit_rows:
-                log_prediction_audit(_audit_rows)
-            if _race_track and _race_number:
-                log_race_schedule(_race_track, _race_number, _race_date, _off_time_str)
+            if not _mc_audit_write_enabled():
+                _note_audit_write_off()
+            else:
+                if _snapshot_rows:
+                    log_feature_snapshots(_snapshot_rows)
+                if _audit_rows:
+                    log_prediction_audit(_audit_rows)
+                if _race_track and _race_number:
+                    log_race_schedule(_race_track, _race_number, _race_date, _off_time_str)
         except Exception as log_err:
             log_debug(f"Batch logging error: {log_err}")
 

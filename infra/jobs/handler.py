@@ -910,9 +910,38 @@ def _prepare_racecard() -> str:
     return "card"
 
 
-def _tips_prepare() -> None:
+def _tips_prepare() -> str:
+    """Relay the inputs and return the card state, "card" or "quiet".
+
+    Raises on "missing", like every other card-dependent job: a proof that
+    scores nothing and exits 0 has proved nothing.
+    """
     _sync_down("server/python/intelligence")
-    _prepare_racecard()
+    return _require_racecard("tips-proof")
+
+
+def _llm_expected() -> bool:
+    """run_tips_pipeline's own reading of LLM_ENABLED: unset means on."""
+    return os.environ.get("LLM_ENABLED", "true").strip().lower() in ("true", "1", "yes")
+
+
+def _insight_coverage(path: str) -> tuple:
+    """(top picks with non-blank ai_insight, top picks) for a tips file.
+
+    Counts text, not timestamps: the 2026-09-02 file stamped
+    ai_insight_generated_at on every pick while every ai_insight was "".
+    (0, 0) when the file cannot be read; the caller's existence check owns
+    that failure.
+    """
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return 0, 0
+    picks = [p for race in (data.get("races") or [])
+             for p in (race.get("top_picks") or [])]
+    with_text = sum(1 for p in picks if str(p.get("ai_insight") or "").strip())
+    return with_text, len(picks)
 
 
 def job_tips_proof() -> dict:
@@ -926,19 +955,101 @@ def job_tips_proof() -> dict:
     DB writes skipped, the ledger forced off, shadow evidence forced off
     (so the registered delta distribution gains no duplicate races), and
     output to a suffixed file that no consumer reads.
+
+    Four switches, not two. The ledger and the shadow-evidence flag were the
+    writes this proof knew about. Walking the path for the 2026-09-05 preview
+    found two more that --skip-db-store never gated: odds_snapshots' tip_time
+    capture (STRIDE_ODDS_SNAPSHOT_WRITE, default on) and mc_api's
+    prediction_audit / feature_snapshots / race_schedule logging
+    (STRIDE_MC_AUDIT_WRITE, added for this). An evening proof never noticed:
+    it re-scored a date whose real rows already existed and lost every
+    first-write-wins conflict, so it left no mark. A preview runs BEFORE the
+    real run and would have won them, its Friday probabilities and Friday
+    prices becoming Saturday's record in the tables training_view_v2 and the
+    ledger price backfill read.
+
+    The insight count at the end is the check the 2026-09-02 run needed: 90
+    picks, every ai_insight empty, 1.1s of LLM time, exit 0. A proof that
+    finishes with the LLM enabled and no insight text has not proved the
+    thing it was dispatched for, so it relays the file (evidence first) and
+    then fails.
     """
     os.environ["STRIDE_LEDGER_WRITE"] = "false"
     os.environ["STRIDE_SERVE_LIVE_FEATURES_SHADOW"] = "false"
-    _tips_prepare()
+    os.environ["STRIDE_ODDS_SNAPSHOT_WRITE"] = "false"
+    os.environ["STRIDE_MC_AUDIT_WRITE"] = "false"
+    if _tips_prepare() == "quiet":
+        return {"last_success_date": _today(), "quiet_day": True}
     out = _run_ok("run_tips_pipeline.py", _today(), "--skip-db-store",
                   "--output-suffix", "cloudproof")
+    tips = f"{_root()}/racecards/tips_{_today()}_cloudproof.json"
+    if not os.path.exists(tips):
+        raise RuntimeError(
+            f"tips-proof: {tips} absent after a clean exit — the pipeline "
+            f"produced nothing, so there is nothing to preview or to prove.")
     # No consumer reads the suffixed file, but for a preview run of a chosen
     # date (STRIDE_DATE) it is the whole point, and the task's filesystem is
     # gone the moment it stops. Relayed under its own name, so it can never
     # be mistaken for the real tips_<date>.json the frontend and the Saturday
-    # wrap-up read.
+    # wrap-up read. Relayed BEFORE the insight check, for the reason
+    # morning-odds relays before it asserts: a failed check must not also
+    # destroy the evidence of what the run produced.
     _sync_up("racecards", f"tips_{_today()}_cloudproof.json")
-    return {"last_success_date": _today(), "detail": out[-400:]}
+    with_text, picks = _insight_coverage(tips)
+    if picks and with_text == 0 and _llm_expected():
+        raise RuntimeError(
+            f"tips-proof: LLM enabled but 0 of {picks} top picks carry insight "
+            f"text — the 2026-09-02 shape (every call failed, timestamps "
+            f"stamped, exit 0). The file was relayed first so it can be read; "
+            f"the run did not deliver what it was dispatched for.")
+    return {"last_success_date": _today(), "insights": f"{with_text}/{picks}",
+            "detail": out[-400:]}
+
+
+def job_llm_proof() -> dict:
+    """Does the LLM this task is configured with produce insight text?
+
+    Two synthetic picks through generate_rich_insight in the real runtime,
+    with the real secrets, on the provider LLM_PROVIDER names: the value on
+    the task if verify-jobs set one, otherwise the stride/prod secret's.
+    Never scheduled. Dispatched by hand before any run whose insights are the
+    point, and after a change to the LLM secrets, because the pipeline itself
+    cannot tell "insights off" from "insights broken": both leave ai_insight
+    empty and exit 0 (2026-09-02, 90 of 90 picks).
+
+    Exit 1 from the script is a finding, not a crash; the markers say which
+    step failed. It is accepted here and turned into the specific error.
+    """
+    out = _run_ok("llm_insight_proof.py", ok_codes=(0, 1))
+    provider = model = None
+    chars = []
+    verdict = ""
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("LLM_PROOF provider="):
+            fields = dict(f.split("=", 1) for f in line.split()[1:] if "=" in f)
+            provider = fields.get("provider")
+            model = fields.get("model")
+        elif line.startswith("LLM_PROOF pick="):
+            fields = dict(f.split("=", 1) for f in line.split()[1:] if "=" in f)
+            try:
+                chars.append(int(fields.get("chars", "0")))
+            except ValueError:
+                chars.append(0)
+        elif line.startswith("LLM_PROOF result="):
+            verdict = line
+    if provider is None:
+        raise RuntimeError(
+            "llm-proof: llm_insight_proof.py printed no LLM_PROOF provider "
+            "marker — it exited before constructing a provider; the tail above "
+            "carries the import or configuration error.")
+    if not verdict.startswith("LLM_PROOF result=PASS"):
+        raise RuntimeError(
+            f"llm-proof: {provider} ({model}) did not produce insight text — "
+            f"{verdict or 'no verdict line'}. A tips run on this configuration "
+            f"would publish blank ai_insight for every pick.")
+    return {"last_success_date": _today(), "provider": provider, "model": model,
+            "insight_chars": ",".join(str(c) for c in chars)}
 
 
 def job_consensus_proof() -> dict:
@@ -1085,6 +1196,7 @@ JOBS = {
     # STRIDE_JOB override. Never scheduled — dispatched by hand to verify
     # a path before it runs for real.
     "tips-proof": job_tips_proof,
+    "llm-proof": job_llm_proof,
     "consensus-proof": job_consensus_proof,
     "panel-proof": job_panel_proof,
     "nightly-etl": job_nightly_etl,
@@ -1109,6 +1221,13 @@ def dispatch(event=None, context=None):
         print(f"[dispatch] STRIDE_DATE override: running {job} for {_today()} "
               f"(Sydney today is {datetime.now(SYD).strftime('%Y-%m-%d')}); "
               f"run-state row {state_job}")
+    llm_override = os.environ.get("LLM_PROVIDER", "").strip()
+    if llm_override:
+        # _load_secrets uses setdefault, so a value already on the task wins
+        # over the stride/prod secret. Said up front so a log whose insights
+        # came from a different provider than the schedule's explains itself.
+        print(f"[dispatch] LLM_PROVIDER={llm_override} set on the task; the "
+              f"stride/prod value is not consulted for this run")
     _load_secrets()
     _stage_models()
     _stage_panel()

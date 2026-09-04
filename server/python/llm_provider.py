@@ -1,4 +1,9 @@
-"""Unified interface for open-source LLM inference via Ollama (local) or Groq (hosted)."""
+"""Unified interface for LLM inference: Ollama (local), Groq (hosted) or Anthropic (hosted).
+
+LLM_PROVIDER selects the backend; LLM_MODEL overrides each backend's default
+model id. Every provider exposes the same generate() so llm_form_analysis and
+llm_post_scorer never know which one they are talking to.
+"""
 
 import os
 import json
@@ -13,6 +18,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_OLLAMA_MODEL = "llama3.2:3b"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# The Claude provider mirrors consensus_agent.py's extraction call — the one
+# Anthropic path this system has run in production, on the ANTHROPIC_API_KEY
+# every task already receives. Thinking is explicitly disabled: these models
+# otherwise reason inside the max_tokens budget and can hand back a truncated
+# body. No sampling parameters are sent: a non-default temperature is rejected
+# on claude-sonnet-5 and later, so generate()'s temperature argument is accepted
+# for interface parity and ignored here.
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+ANTHROPIC_NO_THINKING = {"type": "disabled"}
+ANTHROPIC_TIMEOUT_SECONDS = 120
 
 # Rate limiting for Groq free tier (30 req/min)
 GROQ_MIN_DELAY_SECONDS = 2.1  # ~28 req/min to stay safe
@@ -148,6 +164,61 @@ class GroqProvider(LLMProvider):
 
 
 
+class AnthropicProvider(LLMProvider):
+    """Claude through the Anthropic SDK. See the module constants for why
+    thinking is off and no sampling parameters are passed."""
+
+    def __init__(self, model: Optional[str] = None):
+        super().__init__(model or os.environ.get("LLM_MODEL", DEFAULT_ANTHROPIC_MODEL))
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise LLMProviderError(
+                "ANTHROPIC_API_KEY not set. It is the same key the consensus agent uses."
+            )
+        try:
+            from anthropic import Anthropic
+        except ImportError:
+            raise LLMProviderError("anthropic package not installed. Run: pip install anthropic")
+        self._client = Anthropic(api_key=api_key)
+
+    def generate(
+        self,
+        prompt: str,
+        system: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+    ) -> str:
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "thinking": ANTHROPIC_NO_THINKING,
+            "messages": [{"role": "user", "content": prompt}],
+            "timeout": ANTHROPIC_TIMEOUT_SECONDS,
+        }
+        if system:
+            kwargs["system"] = system
+        try:
+            resp = self._client.messages.create(**kwargs)
+        except Exception as e:
+            raise LLMProviderError(f"Anthropic API error: {e}")
+
+        stop_reason = getattr(resp, "stop_reason", None)
+        if stop_reason == "refusal":
+            # HTTP 200 with no usable body. Raising keeps the caller's
+            # fallback path honest instead of handing it an empty string that
+            # reads like a short answer.
+            raise LLMProviderError(f"Anthropic refused the request (model {self.model})")
+        text = "".join(
+            getattr(block, "text", "") or ""
+            for block in (getattr(resp, "content", None) or [])
+            if getattr(block, "type", "") == "text"
+        )
+        if stop_reason == "max_tokens":
+            logger.warning(f"Anthropic response truncated (max_tokens={max_tokens})")
+        return text.strip()
+
+
+
 _provider_instance: Optional[LLMProvider] = None
 
 
@@ -163,9 +234,11 @@ def get_provider(force_new: bool = False) -> LLMProvider:
         _provider_instance = OllamaProvider()
     elif provider_name == "groq":
         _provider_instance = GroqProvider()
+    elif provider_name in ("anthropic", "claude"):
+        _provider_instance = AnthropicProvider()
     else:
         raise LLMProviderError(
-            f"Unknown LLM_PROVIDER '{provider_name}'. Use 'ollama' or 'groq'."
+            f"Unknown LLM_PROVIDER '{provider_name}'. Use 'ollama', 'groq' or 'anthropic'."
         )
 
     logger.info(f"LLM provider: {provider_name} ({_provider_instance.model})")
