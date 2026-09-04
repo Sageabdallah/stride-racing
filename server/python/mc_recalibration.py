@@ -18,6 +18,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 CALIBRATION_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'calibration_model.json')
 
+
+def _flag_enabled(name):
+    """Env-flag convention: default OFF unless explicitly true/1/yes."""
+    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
+
 class MCRecalibrator:
     """
     Probability recalibration using isotonic regression.
@@ -35,6 +40,10 @@ class MCRecalibrator:
         self.n_samples = 0
         self.n_races = 0
         self.fit_date = None
+        # True when load() found an artifact but refused it as non-monotone
+        # (#124 defect 6) — distinct from "no artifact", so callers do not
+        # respond to a corrupt file by auto-refitting or refetching.
+        self.refused_nonmonotone = False
     
     def fit_from_database(self, min_field_size=6, min_runners_with_sectionals=3, max_races=300):
         """Fit calibration model from historical race results vs MC predictions."""
@@ -147,38 +156,50 @@ class MCRecalibrator:
         
         bin_x = np.array(bin_x)
         bin_y = np.array(bin_y)
-        
+
         iso_y = self._pool_adjacent_violators(bin_y)
-        
+        if np.any(np.diff(iso_y) < 0):
+            # A descending isotonic fit is a contradiction in terms; refuse
+            # to persist one rather than ship another #124-defect-6 artifact.
+            raise ValueError("isotonic fit produced descending knots — "
+                             "_pool_adjacent_violators is broken")
+
         self.iso_x = bin_x.tolist()
         self.iso_y = iso_y.tolist()
         self.fitted = True
-    
+
     def _pool_adjacent_violators(self, y):
-        """Pool Adjacent Violators algorithm for isotonic regression."""
-        n = len(y)
-        result = y.copy().astype(float)
-        weights = np.ones(n)
-        
-        i = 0
-        while i < n - 1:
-            if result[i] > result[i + 1]:
-                merged = (result[i] * weights[i] + result[i + 1] * weights[i + 1]) / (weights[i] + weights[i + 1])
-                result[i] = merged
-                result[i + 1] = merged
-                weights[i] += weights[i + 1]
-                weights[i + 1] = weights[i]
-                
-                j = i - 1
-                while j >= 0 and result[j] > result[j + 1]:
-                    merged = (result[j] * weights[j] + result[j + 1] * weights[j + 1]) / (weights[j] + weights[j + 1])
-                    result[j] = merged
-                    result[j + 1] = merged
-                    weights[j] += weights[j + 1]
-                    weights[j + 1] = weights[j]
-                    j -= 1
-            i += 1
-        
+        """Pool Adjacent Violators — block-merging isotonic regression.
+
+        #124 defect 6: the previous implementation merged violating PAIRS
+        in place. Its weight bookkeeping wrote the combined weight into
+        both entries of each merged pair, and its backtracking rewrote only
+        the two entries at the violation, leaving earlier members of an
+        already-pooled run behind — so the "isotonic" output could still
+        descend. The artifact fitted with it carried 21 descending knots
+        out of 50, violating the one guarantee this class documents
+        (probability ordering is preserved). Classic block PAVA: pool a
+        violating neighbour pair into one weighted block and re-check
+        backwards, tracking how many inputs each block spans.
+        """
+        y = np.asarray(y, dtype=float)
+        values, weights, counts = [], [], []
+        for yi in y:
+            values.append(float(yi))
+            weights.append(1.0)
+            counts.append(1)
+            while len(values) > 1 and values[-2] > values[-1]:
+                merged = ((values[-2] * weights[-2] + values[-1] * weights[-1])
+                          / (weights[-2] + weights[-1]))
+                weights[-2] += weights[-1]
+                counts[-2] += counts[-1]
+                values[-2] = merged
+                del values[-1], weights[-1], counts[-1]
+        result = np.empty_like(y)
+        pos = 0
+        for value, count in zip(values, counts):
+            result[pos:pos + count] = value
+            pos += count
         return result
     
     def transform(self, probs):
@@ -240,6 +261,36 @@ class MCRecalibrator:
         self.n_samples = data.get('n_samples', 0)
         self.n_races = data.get('n_races', 0)
         self.fit_date = data.get('fit_date', 'unknown')
+
+        # #124 defect 6: the artifact fitted by the old pair-merging PAVA is
+        # non-monotone (21 of 50 knots descend), so applying it breaks the
+        # ordering guarantee this class documents and reorders runners
+        # relative to the engine's own probabilities. Such an artifact is
+        # refused, which downgrades cleanly to serving uncalibrated (the
+        # exact path the cloud already runs, where no artifact is staged).
+        # STRIDE_MC_ALLOW_NONMONOTONE_CALIBRATOR=true reproduces the old
+        # behaviour on purpose; the real remedy is a refit with the
+        # corrected PAVA (python mc_recalibration.py).
+        if self.fitted and self.iso_y is not None:
+            iso_y = np.asarray(self.iso_y, dtype=float)
+            descending = int(np.sum(np.diff(iso_y) < 0))
+            if descending:
+                if _flag_enabled("STRIDE_MC_ALLOW_NONMONOTONE_CALIBRATOR"):
+                    print(f"  WARNING: calibration model at {path} has "
+                          f"{descending} descending knot(s); applying anyway "
+                          f"(STRIDE_MC_ALLOW_NONMONOTONE_CALIBRATOR).")
+                else:
+                    print(f"  REFUSED: calibration model at {path} has "
+                          f"{descending} descending knot(s) — a non-monotone "
+                          f"calibrator reorders runners (#124 defect 6). "
+                          f"Refit with the corrected PAVA, or set "
+                          f"STRIDE_MC_ALLOW_NONMONOTONE_CALIBRATOR=true to "
+                          f"apply it anyway.")
+                    self.fitted = False
+                    self.iso_x = None
+                    self.iso_y = None
+                    self.refused_nonmonotone = True
+                    return False
         return True
     
     def _print_calibration_comparison(self, preds, actuals):
@@ -269,7 +320,18 @@ def get_calibrator():
     cal = MCRecalibrator()
     if cal.load():
         return cal
-    
+
+    if cal.refused_nonmonotone:
+        # An artifact exists but was refused (#124 defect 6). Auto-refitting
+        # here would launch a DB pull plus hundreds of simulated races at
+        # what callers treat as load time, and would overwrite the evidence.
+        # Serve uncalibrated (unfitted transform is the identity); refitting
+        # stays a deliberate action: python mc_recalibration.py
+        print("Calibration model present but refused as non-monotone; "
+              "serving uncalibrated. Refit deliberately with: "
+              "python mc_recalibration.py")
+        return cal
+
     print("No calibration model found. Fitting from database...")
     cal.fit_from_database(max_races=200)
     return cal

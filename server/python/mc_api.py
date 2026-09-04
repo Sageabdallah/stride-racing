@@ -467,6 +467,47 @@ spec = importlib.util.spec_from_file_location("racing_system", racing_system_pat
 racing_system = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(racing_system)
 
+
+def _flag_enabled(name):
+    """Env-flag convention: default OFF unless explicitly true/1/yes."""
+    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
+
+
+# Audit 2026-08-07, #124 defect 5: six keys read off the MC result dicts
+# ('stability', 'pace_regime', 'expected_position', 'kelly_stake',
+# 'pace_position', plus the three energy inputs handed to the sectional MC)
+# were never written by any producer, so stabilityScore published 0.0,
+# runningStyle 'unknown', kellyStake 0.0 and the fatigue/collapse/fitness
+# layer inside simulate_race_realistic ran on its defaults for every runner.
+# The remapped reads are gated so the change to published output is a
+# deliberate flip, validated per #124's sequencing, not a deploy side effect.
+MC_FIX_DEAD_FIELDS = "STRIDE_MC_FIX_DEAD_FIELDS"
+
+# banker_detector reads running_style_score ordinally: >=2 is leader-ish,
+# 0 is a backmarker, anything else mid-pack.
+_STYLE_ORDINALS = {'leader': 3, 'on_pace': 2, 'handy': 1, 'midfield': 1,
+                   'backmarker': 0}
+
+
+def _style_ordinal(style):
+    return _STYLE_ORDINALS.get(style, 1)
+
+
+def _display_kelly(win_prob, odds):
+    """Ungated fractional-Kelly display estimate from the served win
+    probability, at the same half-Kelly fraction mc_compute_staking uses in
+    its default fractional_kelly mode. Display only — staking decisions and
+    their stability/odds gates stay with mc_compute_staking, so a WATCH
+    runner still shows the stake a bet would take. 0.0 whenever the inputs
+    cannot support one."""
+    try:
+        if win_prob and odds and odds > 1:
+            return float(racing_system.kelly_stake(
+                float(win_prob), float(odds), fraction=0.5))
+    except Exception:
+        pass
+    return 0.0
+
 RacingModel = racing_system.RacingModel
 TipGenerator = racing_system.TipGenerator
 SupplementaryStats = racing_system.SupplementaryStats
@@ -7035,7 +7076,16 @@ def generate_form_analyst_insights(runner_data: dict, race_data: dict, enhanced_
         insights.append("Track conditions may not suit - has struggled on similar ground before")
     
     pace_advantage = enhanced_features.get('pace_advantage', 0)
-    running_style = mc_result.get('pace_regime', enhanced_features.get('running_style', ''))
+    if _flag_enabled(MC_FIX_DEAD_FIELDS):
+        # 'pace_regime' never exists on MC results (#124 defect 5), so the
+        # enhanced-features style was always the source here; keep it first
+        # (the engine's 'style' can be a bare 'midfield' default that would
+        # shadow a real speed-map style) and use the engine key only as the
+        # newly-live fallback.
+        running_style = (enhanced_features.get('running_style')
+                         or mc_result.get('style', ''))
+    else:
+        running_style = mc_result.get('pace_regime', enhanced_features.get('running_style', ''))
     pace_flags = enhanced_features.get('pace_flags', [])
     pace_scenario = enhanced_features.get('pace_scenario', '')
     is_lone_speed = enhanced_features.get('is_lone_speed', False)
@@ -7239,14 +7289,39 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                             _fallback_market_odds = _fair if _fair and _fair > 1 else None
                         except Exception:
                             _fallback_market_odds = None
+                    _fatigue, _collapse, _fitness = 1.0, 0, 1.0
+                    if (_flag_enabled(MC_FIX_DEAD_FIELDS)
+                            and TRACK_CONDITION_AVAILABLE and _pace_energy_model):
+                        # mc_r never carries these (#124 defect 5), so the
+                        # energy layer inside simulate_race_realistic ran on
+                        # its defaults for every runner. Computed here from
+                        # the same model, with the same 0-1 pressure argument
+                        # the enhanced-features path passes and the racecard's
+                        # days-since-run when it carries one (30-day neutral
+                        # otherwise — get_fitness_factor(30) is 1.0).
+                        try:
+                            # ENERGY_RATES keys are hyphenated ('on-pace');
+                            # running profiles emit engine vocabulary
+                            # ('on_pace'), which would silently fall back to
+                            # midfield rates without the translation.
+                            _style_key = rp.get(
+                                'running_style_class', 'midfield').replace('_', '-')
+                            _days_since = _runner_src.get('days_since_last_run') or 30
+                            _energy = _pace_energy_model.calculate_energy_curve(
+                                _style_key, _race_dist_m, 0.5, _days_since)
+                            _fatigue = _energy.get('fatigue_factor', 1.0)
+                            _collapse = _energy.get('collapse_probability', 0)
+                            _fitness = _pace_energy_model.get_fitness_factor(_days_since)
+                        except Exception:
+                            pass
                     _mc_runners.append({
                         'horse': h_name,
                         'form': a.get('form', ''),
                         'market_odds': _real_market_odds or _fallback_market_odds or 0.0,
                         'jockey': a.get('jockey', ''),
-                        'fatigue_factor': mc_r.get('fatigue_factor', 1.0),
-                        'collapse_probability': mc_r.get('collapse_probability', 0),
-                        'fitness_factor': mc_r.get('fitness_factor', 1.0),
+                        'fatigue_factor': mc_r.get('fatigue_factor', _fatigue),
+                        'collapse_probability': mc_r.get('collapse_probability', _collapse),
+                        'fitness_factor': mc_r.get('fitness_factor', _fitness),
                     })
 
                 _base_probs = np.array([mc_r.get('win_prob_sim', 0.05) for mc_r in mc_results])
@@ -7397,7 +7472,13 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                     track_name = race.get('track', race.get('course', ''))
                     barrier = int(base.get('barrier', 0) or 0)
                     distance = str(race.get('distance', '1400m'))
-                    running_style = mc.get('pace_regime', '')
+                    if _flag_enabled(MC_FIX_DEAD_FIELDS):
+                        # 'pace_regime' never exists on MC results (#124
+                        # defect 5): the track-bias scorer received '' for
+                        # every runner. 'style' is the engine's key.
+                        running_style = mc.get('style', '')
+                    else:
+                        running_style = mc.get('pace_regime', '')
                     jockey = base.get('jockey', '')
                     trainer = base.get('trainer', '')
                     
@@ -7530,7 +7611,24 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 conf_score += 0.05
             
             staking = get_staking_tier(conf_score, base.get('model_prob', 0))
-            
+
+            if _flag_enabled(MC_FIX_DEAD_FIELDS):
+                # The engine writes stability_score (already 0-100), style
+                # and expected_pos; the keys read before #124's defect-5 fix
+                # never existed, so these published 0.0 / 'unknown' on every
+                # runner. kelly_stake had no producer at all — computed here
+                # from the served win probability and the real market price.
+                _stability_out = round(mc.get('stability_score', 0), 1)
+                _style_out = mc.get('style', 'unknown')
+                _expected_pos_out = round(mc.get('expected_pos', 0), 2)
+                _kelly_out = round(
+                    _display_kelly(win_prob / 100.0, real_market_odds) * 100, 2)
+            else:
+                _stability_out = round(mc.get('stability', 0) * 100, 1)
+                _style_out = mc.get('pace_regime', 'unknown')
+                _expected_pos_out = round(mc.get('expected_position', 0), 2)
+                _kelly_out = round(mc.get('kelly_stake', 0) * 100, 2)
+
             result = {
                 'horse': horse_name,
                 'number': base.get('number', i + 1),
@@ -7551,15 +7649,15 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 'edge': round((win_prob - (100 / real_market_odds)) if real_market_odds else 0, 2),
                 'confidence': staking['label'],
                 'confidenceScore': round(conf_score, 2),
-                'stabilityScore': round(mc.get('stability', 0) * 100, 1),
-                'runningStyle': mc.get('pace_regime', 'unknown'),
+                'stabilityScore': _stability_out,
+                'runningStyle': _style_out,
                 'ciLower': round(ci_lower_pct, 2),
                 'ciUpper': round(ci_upper_pct, 2),
                 'sectionalMcCiLower': round(sectional_ci_lower, 2) if sectional_ci_lower is not None else None,
                 'sectionalMcCiUpper': round(sectional_ci_upper, 2) if sectional_ci_upper is not None else None,
-                'expectedPosition': round(mc.get('expected_position', 0), 2),
+                'expectedPosition': _expected_pos_out,
                 'valueRating': 'Excellent' if ev > 0.3 else 'Good' if ev > 0.1 else 'Fair' if ev > 0 else 'Poor',
-                'kellyStake': round(mc.get('kelly_stake', 0) * 100, 2),
+                'kellyStake': _kelly_out,
                 'fairOdds': round((100.0 / win_prob), 2) if win_prob > 0 else None,
                 'marketImpliedWinPct': round((100.0 / real_market_odds), 2) if real_market_odds else None,
                 'valueEdgePct': round((win_prob - (100 / real_market_odds)) if real_market_odds else 0, 2),
@@ -7669,7 +7767,9 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 'goingSuitability': enhanced_features.get('going_suitability', 0),
                 'distanceSR': enhanced_features.get('distance_sr', 0),
                 'courseSR': enhanced_features.get('course_sr', 0),
-                'running_style_score': mc.get('pace_position', 1),
+                'running_style_score': (_style_ordinal(mc.get('style'))
+                                        if _flag_enabled(MC_FIX_DEAD_FIELDS)
+                                        else mc.get('pace_position', 1)),
                 'ml_ranks': enhanced_features.get('ml_ranks', None),
             }
             _attach_prediction_stages(
@@ -7855,6 +7955,36 @@ def run_batch_simulation(races_data, mc_sims=10000):
         for track, tips in all_tips.items():
             formatted_tips[track] = []
             for tip in tips:
+                if _flag_enabled(MC_FIX_DEAD_FIELDS):
+                    # _create_mc_tip nests the engine values under 'mc' and
+                    # 'staking'; the flat keys read before #124's defect-5
+                    # fix never existed — including the headline numbers
+                    # (win/place/CI published 0, confidence read a 'label'
+                    # key where staking carries 'status'). staking.kelly_pct
+                    # is already a percentage (mc_compute_staking multiplies
+                    # by 100).
+                    _tip_mc = tip.get('mc', {})
+                    _tip_stability = _tip_mc.get('stability_score', 0)
+                    _tip_style = tip.get('style') or 'unknown'
+                    _tip_expected_pos = _tip_mc.get('expected_pos', 0)
+                    _tip_kelly = tip.get('staking', {}).get('kelly_pct', 0)
+                    _tip_win_pct = _tip_mc.get('win_prob_sim', 0) * 100
+                    _tip_place_pct = _tip_mc.get('top3_prob_sim', 0) * 100
+                    _tip_ci_lower = _tip_mc.get('ci_lower', 0) * 100
+                    _tip_ci_upper = _tip_mc.get('ci_upper', 0) * 100
+                    _tip_edge = tip.get('value_edge') or 0
+                    _tip_confidence = tip.get('staking', {}).get('status', 'BET')
+                else:
+                    _tip_stability = tip.get('stability', 0) * 100
+                    _tip_style = tip.get('pace_regime', 'unknown')
+                    _tip_expected_pos = tip.get('expected_position', 0)
+                    _tip_kelly = tip.get('kelly_stake', 0) * 100
+                    _tip_win_pct = tip.get('win_prob_sim_pct', 0)
+                    _tip_place_pct = tip.get('top3_prob_sim_pct', 0)
+                    _tip_ci_lower = tip.get('ci_lower', 0) * 100
+                    _tip_ci_upper = tip.get('ci_upper', 0) * 100
+                    _tip_edge = tip.get('edge', 0)
+                    _tip_confidence = tip.get('staking', {}).get('label', 'BET')
                 formatted_tip = {
                     'horse': tip.get('horse', ''),
                     'track': track,
@@ -7865,18 +7995,18 @@ def run_batch_simulation(races_data, mc_sims=10000):
                     'barrier': tip.get('barrier', ''),
                     'form': tip.get('form', ''),
                     'marketOdds': tip.get('market_odds', 0),
-                    'winPercentage': tip.get('win_prob_sim_pct', 0),
-                    'placePercentage': tip.get('top3_prob_sim_pct', 0),
+                    'winPercentage': _tip_win_pct,
+                    'placePercentage': _tip_place_pct,
                     'expectedValue': tip.get('ev', 0) * 100 if tip.get('ev') else 0,
-                    'edge': tip.get('edge', 0),
-                    'confidence': tip.get('staking', {}).get('label', 'BET'),
-                    'stabilityScore': tip.get('stability', 0) * 100,
-                    'runningStyle': tip.get('pace_regime', 'unknown'),
-                    'ciLower': tip.get('ci_lower', 0) * 100,
-                    'ciUpper': tip.get('ci_upper', 0) * 100,
-                    'expectedPosition': tip.get('expected_position', 0),
+                    'edge': _tip_edge,
+                    'confidence': _tip_confidence,
+                    'stabilityScore': _tip_stability,
+                    'runningStyle': _tip_style,
+                    'ciLower': _tip_ci_lower,
+                    'ciUpper': _tip_ci_upper,
+                    'expectedPosition': _tip_expected_pos,
                     'valueRating': 'Excellent' if (tip.get('ev') or 0) > 0.3 else 'Good' if (tip.get('ev') or 0) > 0.1 else 'Fair',
-                    'kellyStake': tip.get('kelly_stake', 0) * 100,
+                    'kellyStake': _tip_kelly,
                     'selectionScore': tip.get('selection_score', 0),
                 }
                 formatted_tips[track].append(formatted_tip)

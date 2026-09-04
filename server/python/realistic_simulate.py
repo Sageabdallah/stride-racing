@@ -1,8 +1,19 @@
 """Realistic Monte Carlo Race Simulation — mixture noise, multi-phase energy dynamics, and sectional profile-based pace scenario simulation."""
 
 import numpy as np
+import os
 from typing import Dict, List, Tuple, Optional, Any
 import math
+
+
+def _flag_enabled(name):
+    """Env-flag convention: default OFF unless explicitly true/1/yes.
+
+    STRIDE_MC_FIX_* flags gate the #124 engine-defect fixes (audit
+    2026-08-07); each changes published probabilities, so each ships OFF
+    and is flipped one at a time with A/B validation per #124's sequencing.
+    """
+    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
 
 try:
     from normalize import parse_form_string
@@ -394,6 +405,7 @@ def simulate_multi_phase(mu, sigmas, running_styles, distance_m, n_sims, n, rng,
 
     energy = np.ones((n_sims, n))
     total_performance = np.zeros((n_sims, n))
+    energy_sign_fix = _flag_enabled("STRIDE_MC_FIX_ENERGY_SIGN")
 
     for phase_idx, phase in enumerate(phases):
         phase_name = phase['name']
@@ -406,7 +418,19 @@ def simulate_multi_phase(mu, sigmas, running_styles, distance_m, n_sims, n, rng,
         for i in range(n):
             style_adv[i] = phase_styles.get(style_indices[i], 0.0)
 
-        phase_perf = (mu + phase_noise + style_adv) * energy
+        if energy_sign_fix:
+            # #124 defect 1: mu = log(p) < 0, so multiplying by energy < 1
+            # shrank the deficit and REWARDED energy burn — measured ~+7pp
+            # win probability onto leaders and -10pp off closers, 7-16x the
+            # style effects it corrupts, pointing the wrong way. Energy
+            # scales underlying ability p multiplicatively, which in this
+            # log domain is an additive log(energy) penalty — the idiom the
+            # fatigue and fitness factors in this file already use
+            # (mu += log(factor)). energy > 0 always: per-phase depletion
+            # is capped at 25%.
+            phase_perf = mu + phase_noise + style_adv + np.log(energy)
+        else:
+            phase_perf = (mu + phase_noise + style_adv) * energy
         total_performance += phase_perf * phase_weight
 
         for i in range(n):

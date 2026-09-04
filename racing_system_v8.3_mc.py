@@ -8,6 +8,7 @@ variation with stability metrics, and an expanded MC tip menu (--mc_tips6).
 """
 
 import json
+import os
 import re
 import math
 import argparse
@@ -28,6 +29,18 @@ except ImportError:
 
 
 BASELINE_WIN_RATE = 0.097
+
+
+def _flag_enabled(name):
+    """Env-flag convention: default OFF unless explicitly true/1/yes.
+
+    The STRIDE_MC_FIX_* flags gate the #124 engine-defect fixes (audit
+    2026-08-07). Every one of them changes published probabilities or the
+    gates on them, so each ships OFF and is flipped one at a time, validated
+    with common-random-numbers A/B against settled results — see #124's
+    sequencing. Flag off, behaviour is the shipped engine's, bug for bug.
+    """
+    return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
 PRIOR_STRENGTH = 20
 PRIOR_STRENGTH_SMALL = 30
 
@@ -376,8 +389,22 @@ def scenario_adjustments(styles, leader_rate, pace_regime):
     return adj
 
 
-def stability_from_positions(std_pos, ci_width):
-    """Map position volatility and CI width to a 0-100 stability score."""
+def stability_from_positions(std_pos, ci_width, field_size=None):
+    """Map position volatility and CI width to a 0-100 stability score.
+
+    #124 defect 4: std_pos scales with field size — a uniform-random
+    finisher has std sqrt((n^2-1)/12), 2.29 in an 8-field but 4.03 in a
+    14-field — so the fixed 0.6/40 constants zeroed stability for entire
+    big fields, and stability >= 45 gates mc_is_playable and staking.
+    Behind STRIDE_MC_FIX_STABILITY_FIELDSIZE (default OFF), std_pos is
+    rescaled to its 8-horse equivalent (the neutral point of the existing
+    constants: the factor is exactly 1.0 at n=8) so the same relative
+    volatility scores the same in any field size. Flag off, or no
+    field_size supplied, the shipped formula is untouched.
+    """
+    if (field_size and field_size > 1
+            and _flag_enabled("STRIDE_MC_FIX_STABILITY_FIELDSIZE")):
+        std_pos = std_pos * math.sqrt(63.0 / (field_size ** 2 - 1))
     return float(max(0, min(100, 100 - (std_pos - 0.6) * 40 - ci_width * 320)))
 
 
@@ -1748,6 +1775,24 @@ class RacingModel:
 
 
 
+def _dirichlet_concentration(evidence, fix_enabled):
+    """Concentration for the evidence-driven Dirichlet perturbation.
+
+    #124 defect 2: the shipped per-horse concentration makes the Dirichlet
+    mean p_i * conc_i renormalised — win probabilities reweighted by career
+    start count (median 7.3pp field distortion; a different top pick from
+    the model's own ranking in ~9.5% of races). Evidence should set how
+    TIGHT the noise is, not shift its centre: with the fix enabled the field
+    shares one scalar concentration — the mean of the per-horse values,
+    preserving the overall dispersion level — so E[sampled] stays
+    proportional to base_probs. (The max(6.0, ...) in the legacy branch
+    never binds: 12 + 1.3 * evidence >= 12 always.)
+    """
+    if fix_enabled:
+        return float(np.mean(12.0 + 1.3 * evidence))
+    return np.maximum(6.0, 12.0 + 1.3 * evidence)
+
+
 def get_leader_rate_estimate(model, race):
     """Best-effort leader-rate estimate with course profile fallback."""
     course_lower = race.course.lower()
@@ -1801,7 +1846,9 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
         hist = model.horse_history.get(model._get_horse_key(runner), {}) if runner else {}
         evidence.append(len(hist.get('runs', [])))
     evidence = np.array(evidence, dtype=float)
-    conc = np.maximum(6.0, 12.0 + 1.3 * evidence)
+    dirichlet_conc_fix = _flag_enabled("STRIDE_MC_FIX_DIRICHLET_CONC")
+    conc = _dirichlet_concentration(evidence, dirichlet_conc_fix)
+    evidence_mean = float(evidence.mean())
 
     # Going-aware Dirichlet concentration: wet/heavy widens uncertainty (lower conc = more dispersed)
     going_lower = getattr(race, 'going', '').lower() if hasattr(race, 'going') else ''
@@ -1847,7 +1894,13 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
         
         # Optional additional Dirichlet noise for "dirichlet" model
         if mc_model == 'dirichlet':
-            sampled_probs = rng.dirichlet(np.maximum(0.25, sampled_probs * (10 + evidence)))
+            if dirichlet_conc_fix:
+                # Same defect-2 shape as the main concentration above:
+                # per-horse (10 + evidence) recentres, a scalar only widens.
+                sampled_probs = rng.dirichlet(
+                    np.maximum(0.25, sampled_probs * (10.0 + evidence_mean)))
+            else:
+                sampled_probs = rng.dirichlet(np.maximum(0.25, sampled_probs * (10 + evidence)))
         
         logits = np.log(np.maximum(sampled_probs, 1e-9))
         logits += scenario_adjustments(styles, leader_rate_s, pace_regime)
@@ -1863,17 +1916,38 @@ def simulate_race_monte_carlo(race, analysis, model, mc_sims=20000, seed=42,
     std_pos = finish_positions.std(axis=0)
     
     scenario_win = np.zeros((len(pace_labels), n))
+    regime_draws = np.zeros(len(pace_labels), dtype=np.int64)
     for idx, label in enumerate(pace_labels):
         mask = scenario_ids == idx
         if mask.any():
+            regime_draws[idx] = int(mask.sum())
             scenario_win[idx] = (finish_positions[mask] == 1).mean(axis=0)
-    scenario_ranges = scenario_win.max(axis=0) - scenario_win.min(axis=0)
+    if _flag_enabled("STRIDE_MC_FIX_SCENARIO_RANGES"):
+        # #124 defect 3: a regime this race's pace logic never samples
+        # (pace_mode='basic' typically reaches 1-2 of the 4) left its zero
+        # row in the spread, so any runner above ~28.6% win probability
+        # carried a phantom range equal to its own maximum and scenario
+        # stability hard-zeroed — which gates mc_is_playable. Spread over
+        # regimes actually simulated only; a single sampled regime means
+        # no observed scenario variation, not maximal. "Sampled" requires
+        # enough draws to estimate a rate: a regime hit a handful of times
+        # in 20k sims has per-runner win rates of 0 or 1 by construction,
+        # which resurrects the same phantom range through the back door.
+        min_draws = max(30, mc_sims // 100)
+        sampled_regimes = regime_draws >= min_draws
+        _sampled_win = scenario_win[sampled_regimes]
+        if sampled_regimes.sum() >= 2:
+            scenario_ranges = _sampled_win.max(axis=0) - _sampled_win.min(axis=0)
+        else:
+            scenario_ranges = np.zeros(n)
+    else:
+        scenario_ranges = scenario_win.max(axis=0) - scenario_win.min(axis=0)
     
     results = []
     for i, base in enumerate(analysis):
         lower, upper = wilson_interval((finish_positions[:, i] == 1).sum(), mc_sims, alpha=MC_SIM_LIMITS['ci_alpha'])
         ci_width = upper - lower
-        stability = stability_from_positions(std_pos[i], ci_width)
+        stability = stability_from_positions(std_pos[i], ci_width, field_size=n)
         scen_stability = max(0.0, min(100.0, 100 - scenario_ranges[i] * 350))
         stability_score = 0.7 * stability + 0.3 * scen_stability
         
