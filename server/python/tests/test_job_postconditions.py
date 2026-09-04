@@ -624,12 +624,20 @@ def test_run_sizes_the_timeout_to_the_script(handler, monkeypatch):
     instead — nothing downstream reads tips_<date>.json, and its first race
     alone (532.2s on 2026-08-05) exceeds the gap bound. Everything else keeps
     the historical 840s.
+
+    The tips bound moved 21600 -> 30600 on 2026-09-04. Every measurement it was
+    sized on came from runs where the LLM contributed nothing — 1.1s across 30
+    races on 2026-09-02, because every call was failing. A working provider adds
+    six blocking, sequential calls per race, roughly 120s, which puts a 55-race
+    card at 92% of the old bound. The failure that bound buys is the worst
+    available: the tips JSON is written once, after the whole meet loop, so a
+    subprocess killed at the cap leaves no file at all.
     """
     calls = _captured_run(monkeypatch, handler)
     expected = {
         "stride_build.py": 3400,
         "consensus_agent.py": 9000,
-        "run_tips_pipeline.py": 21600,
+        "run_tips_pipeline.py": 30600,
         "download_racecards.py": 840,
     }
     for script, timeout in expected.items():

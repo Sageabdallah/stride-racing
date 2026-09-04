@@ -761,9 +761,16 @@ def _mc_audit_write_enabled() -> bool:
     numbers that date's record, and training_view_v2 is built from
     prediction_audit. run_tips_pipeline --skip-db-store never reached these
     because they live here, not in the store step (2026-09-04).
+
+    An allow-list, not a deny-list. The deny-list shape treats every value it
+    does not recognise as ON — including "", which is how a variable is blanked
+    in an ECS task definition or a `VAR=` line. Here the fail-open direction is
+    "silently write to prediction_audit during a preview", so an unrecognised
+    value must not enable it. Matches the shape every other default-on flag in
+    this repo uses (run_tips_pipeline.crowd_gate_only_enabled, _llm_expected).
     """
-    return os.environ.get("STRIDE_MC_AUDIT_WRITE", "true").strip().lower() not in (
-        "0", "false", "no", "off")
+    return os.environ.get("STRIDE_MC_AUDIT_WRITE", "true").strip().lower() in (
+        "true", "1", "yes", "on")
 
 
 def _note_audit_write_off():

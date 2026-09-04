@@ -60,14 +60,46 @@ jobs:
           aws-region: ap-southeast-2
 
       - name: Run each job and report
+        # Inputs reach the script as environment variables, never as ${{ }}
+        # inside the shell text. Interpolated directly, GitHub substitutes them
+        # into the source BEFORE bash parses it, so the wait_minutes `case`
+        # validation below ran downstream of its own injection point: a value
+        # like 20"; some-command; :" executed with the deploy OIDC role already
+        # assumed, and then validated cleanly. As env vars the shell sees data.
+        env:
+          IN_JOBS: ${{ inputs.jobs }}
+          IN_DATE: ${{ inputs.date }}
+          IN_LLM_PROVIDER: ${{ inputs.llm_provider }}
+          IN_WAIT: ${{ inputs.wait_minutes }}
+          SUBNET_ID: ${{ vars.AWS_SUBNET_ID }}
+          SG_ID: ${{ vars.AWS_SG_ID }}
         run: |
-          PASS=""; FAIL=""
-          WAIT="${{ inputs.wait_minutes }}"
+          PASS=""; FAIL=""; RUNNING=""
+          WAIT="$IN_WAIT"
           case "$WAIT" in ''|*[!0-9]*) WAIT=20 ;; esac
+          # Base 10 explicitly: the case above accepts "030", and $(( )) reads a
+          # leading zero as octal, so a padded 030 silently waited 24 minutes.
+          WAIT=$((10#$WAIT))
           if [ "$WAIT" -lt 1 ]; then WAIT=1; fi
           if [ "$WAIT" -gt 300 ]; then WAIT=300; fi
           echo "waiting up to ${WAIT}m per Fargate task"
-          for JOB in $(echo "${{ inputs.jobs }}" | tr ',' ' '); do
+          # The header lists four jobs excluded by design; for the two that
+          # write dated rows that is a rule the workflow must enforce, not a
+          # sentence in an input description. tips-proof and tips-pipeline
+          # differ by six characters and both are plausible things to type at
+          # 10pm — and tips-pipeline is a live dispatcher key that writes the
+          # ledger and the file the frontend reads.
+          for JOB in $(echo "$IN_JOBS" | tr ',' ' '); do
+            case "$JOB" in
+              tips-pipeline|tip-time-snapshot)
+                if [ -n "$IN_DATE" ]; then
+                  echo "::error::$JOB writes dated rows for the date it runs; refusing to run it with date=$IN_DATE. Use tips-proof for a preview."
+                  exit 1
+                fi
+                ;;
+            esac
+          done
+          for JOB in $(echo "$IN_JOBS" | tr ',' ' '); do
             echo "::group::$JOB"
             OK=0
             if echo "$LAMBDA_JOBS" | grep -qw "$JOB"; then
@@ -93,43 +125,68 @@ jobs:
                 *)               TD="stride-$JOB" ;;
               esac
               EXTRA_ENV=""
-              if [ -n "${{ inputs.date }}" ]; then
-                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_DATE\",\"value\":\"${{ inputs.date }}\"}"
+              if [ -n "$IN_DATE" ]; then
+                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_DATE\",\"value\":\"$IN_DATE\"}"
               fi
-              if [ -n "${{ inputs.llm_provider }}" ]; then
+              if [ -n "$IN_LLM_PROVIDER" ]; then
                 # Both variables: LLM_ENABLED=false in the secret would
                 # otherwise make the provider choice a no-op.
-                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"LLM_PROVIDER\",\"value\":\"${{ inputs.llm_provider }}\"},{\"name\":\"LLM_ENABLED\",\"value\":\"true\"}"
+                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"LLM_PROVIDER\",\"value\":\"$IN_LLM_PROVIDER\"},{\"name\":\"LLM_ENABLED\",\"value\":\"true\"}"
               fi
               OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$EXTRA_ENV]}]}"
               TASK=$(aws ecs run-task --cluster stride \
                 --task-definition "$TD" --launch-type FARGATE \
                 --overrides "$OVR" \
-                --network-configuration "awsvpcConfiguration={subnets=[${{ vars.AWS_SUBNET_ID }}],securityGroups=[${{ vars.AWS_SG_ID }}],assignPublicIp=ENABLED}" \
+                --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
                 --query 'tasks[0].taskArn' --output text) || OK=1
               LOG_JOB="${TD#stride-}"
               echo "task: $TASK"
-              for i in $(seq 1 $((WAIT * 3))); do
-                sleep 20
-                ST=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
-                  --query 'tasks[0].lastStatus' --output text)
-                [ "$ST" = "STOPPED" ] && break
-              done
-              EXIT=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
-                --query 'tasks[0].containers[0].exitCode' --output text)
-              REASON=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
-                --query 'tasks[0].stoppedReason' --output text)
-              echo "exit=$EXIT reason=$REASON"
-              [ "$EXIT" = "0" ] || OK=1
+              # run-task failing left TASK empty and fell straight into the
+              # wait, where describe-tasks --tasks "" fails botocore validation
+              # and exits 252 — and under the default `bash -e`, ST=$(...) with
+              # a failing command kills the whole step. Every job after the
+              # failed one was silently never dispatched, with no summary line
+              # to read. Skip to the report instead.
+              if [ -z "$TASK" ] || [ "$TASK" = "None" ]; then
+                echo "::error::$JOB: run-task returned no task ARN; not dispatched"
+                OK=1
+                ST=""
+              else
+                ST=""
+                for i in $(seq 1 $((WAIT * 3))); do
+                  sleep 20
+                  ST=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+                    --query 'tasks[0].lastStatus' --output text 2>/dev/null || echo "UNKNOWN")
+                  [ "$ST" = "STOPPED" ] && break
+                done
+                EXIT=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+                  --query 'tasks[0].containers[0].exitCode' --output text 2>/dev/null || echo None)
+                REASON=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
+                  --query 'tasks[0].stoppedReason' --output text 2>/dev/null || echo None)
+                echo "status=$ST exit=$EXIT reason=$REASON"
+                # "Still running when the wait expired" is not the same event as
+                # "the job failed", and reporting both as FAILED invited exactly
+                # the wrong response: a re-dispatch that puts a SECOND writer on
+                # the same date while the first is still going. Reported apart.
+                if [ "$ST" != "STOPPED" ]; then
+                  echo "::warning::$JOB still RUNNING after ${WAIT}m — not a failure. Task $TASK is still going; do NOT re-dispatch. Track its output artifact instead."
+                  OK=2
+                elif [ "$EXIT" != "0" ]; then
+                  OK=1
+                fi
+              fi
               # Last log lines: the actual failure text, not just a code.
               aws logs tail "/ecs/stride-${LOG_JOB:-$JOB}" --since "$((WAIT + 5))m" \
                 --format short 2>/dev/null | tail -60 || true
             fi
-            if [ "$OK" = "0" ]; then PASS="$PASS $JOB"; else FAIL="$FAIL $JOB"; fi
+            if [ "$OK" = "0" ]; then PASS="$PASS $JOB"
+            elif [ "$OK" = "2" ]; then RUNNING="$RUNNING $JOB"
+            else FAIL="$FAIL $JOB"; fi
             echo "::endgroup::"
           done
           echo "=============================="
           echo "PASSED:$PASS"
+          echo "STILL RUNNING (not a failure, do not re-dispatch):$RUNNING"
           echo "FAILED:$FAIL"
           echo "=============================="
           [ -z "$FAIL" ]

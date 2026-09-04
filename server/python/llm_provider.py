@@ -215,6 +215,18 @@ class AnthropicProvider(LLMProvider):
         )
         if stop_reason == "max_tokens":
             logger.warning(f"Anthropic response truncated (max_tokens={max_tokens})")
+        if not text.strip():
+            # An empty body is a failed call, not a short answer, and the
+            # difference decides whether the caller falls back. GroqProvider
+            # gets this for free: .strip() on a null body raises AttributeError
+            # and becomes an LLMProviderError. Returning "" here instead would
+            # reach generate_rich_insight's SUCCESS path, so ai_analysis is
+            # never substituted, nothing is logged, and the pick is published
+            # blank under a fresh ai_insight_generated_at — indistinguishable
+            # from the 2026-09-02 rows this provider exists to prevent.
+            raise LLMProviderError(
+                f"Anthropic returned no text (stop_reason={stop_reason}, "
+                f"model {self.model})")
         return text.strip()
 
 

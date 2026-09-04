@@ -51,8 +51,13 @@ def _write_tips(root: Path, insights):
     path.write_text(json.dumps({"races": [{"track": "Randwick", "top_picks": picks}]}))
 
 
-def _proof_setup(handler, monkeypatch, tmp_path, insights, card="card"):
-    """insights=None means the pipeline wrote no file at all."""
+def _proof_setup(handler, monkeypatch, tmp_path, insights, card="card", raw=None):
+    """insights=None means the pipeline wrote no file at all.
+
+    raw writes that exact string as the artifact instead, for the shapes a
+    list of insight texts cannot express: an empty races list, error stubs
+    with no picks, and a truncated file.
+    """
     calls = []
     monkeypatch.setenv("STRIDE_DATE", "2026-09-05")
     for key in SWITCHES:
@@ -62,7 +67,11 @@ def _proof_setup(handler, monkeypatch, tmp_path, insights, card="card"):
 
     def run_ok(*args, **kwargs):
         calls.append(("run",) + args)
-        if insights is not None:
+        if raw is not None:
+            path = tmp_path / "racecards" / "tips_2026-09-05_cloudproof.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw)
+        elif insights is not None:
             _write_tips(tmp_path, insights)
         return "ok"
 
@@ -101,6 +110,73 @@ def test_a_run_that_wrote_no_file_fails_instead_of_passing_empty(handler, monkey
     _proof_setup(handler, monkeypatch, tmp_path, None)
     with pytest.raises(RuntimeError, match="absent"):
         handler.job_tips_proof()
+
+
+def test_a_file_with_no_picks_at_all_fails(handler, monkeypatch, tmp_path):
+    """The 2026-08-05 shape: every race errored, top_picks [], exit 0.
+
+    Previously the guard read `if picks and ...`, so zero picks short-circuited
+    the whole assertion and the job returned insights "0/0" — green.
+    """
+    _proof_setup(handler, monkeypatch, tmp_path, None, raw=json.dumps(
+        {"races": [{"track": "Randwick", "race_number": 1, "error": "boom",
+                    "top_picks": [], "bet_status": "ERROR"}]}))
+    with pytest.raises(RuntimeError, match="no top picks at all"):
+        handler.job_tips_proof()
+
+
+def test_an_empty_races_list_fails(handler, monkeypatch, tmp_path):
+    _proof_setup(handler, monkeypatch, tmp_path, None,
+                 raw='{"date": "2026-09-05", "races": []}')
+    with pytest.raises(RuntimeError, match="no top picks at all"):
+        handler.job_tips_proof()
+
+
+def test_an_unparseable_file_fails_rather_than_reading_as_zero_insights(
+        handler, monkeypatch, tmp_path):
+    _proof_setup(handler, monkeypatch, tmp_path, None,
+                 raw='{"races": [{"top_picks": [{"ai_insight": "THE FORM')
+    with pytest.raises(RuntimeError, match="could not be parsed"):
+        handler.job_tips_proof()
+
+
+def test_a_partial_llm_collapse_fails_instead_of_passing_green(handler, monkeypatch, tmp_path):
+    """1 of 330 used to pass: the gate fired only at exactly zero.
+
+    Rate limiting part-way through a card is the likely shape, not the exotic
+    one — generate_rich_insight swallows every provider error into a blank
+    string per pick and the run still exits 0.
+    """
+    monkeypatch.delenv("LLM_ENABLED", raising=False)
+    _proof_setup(handler, monkeypatch, tmp_path, ["THE FORM: ..."] + [""] * 329)
+    with pytest.raises(RuntimeError, match="only 1 of 330"):
+        handler.job_tips_proof()
+
+
+def test_coverage_at_the_floor_passes_and_just_below_it_fails(handler, monkeypatch, tmp_path):
+    monkeypatch.delenv("LLM_ENABLED", raising=False)
+    assert handler.INSIGHT_COVERAGE_FLOOR == 0.80
+
+    _proof_setup(handler, monkeypatch, tmp_path, ["x"] * 80 + [""] * 20)
+    assert handler.job_tips_proof()["insights"] == "80/100"
+
+    _proof_setup(handler, monkeypatch, tmp_path, ["x"] * 79 + [""] * 21)
+    with pytest.raises(RuntimeError, match="only 79 of 100"):
+        handler.job_tips_proof()
+
+
+def test_llm_expected_matches_the_pipelines_own_parsing_exactly(handler, monkeypatch):
+    """The handler must not be more permissive than the pipeline it asserts on.
+
+    An added .strip() made LLM_ENABLED=' true ' mean "insights expected" here
+    and "LLM off" there, failing a run that behaved exactly as configured.
+    """
+    pipeline_reads = lambda v: v.lower() in ("true", "1", "yes")
+    for value in (" true ", "true\n", "True", "false", " ", "1", "yes", "no"):
+        monkeypatch.setenv("LLM_ENABLED", value)
+        assert handler._llm_expected() == pipeline_reads(value), value
+    monkeypatch.delenv("LLM_ENABLED", raising=False)
+    assert handler._llm_expected() is True, "unset means on, as in the pipeline"
 
 
 def test_a_quiet_day_scores_nothing_and_says_so(handler, monkeypatch, tmp_path):
@@ -181,6 +257,67 @@ def test_verify_jobs_can_pin_the_provider_and_wait_for_a_long_task():
     assert "STRIDE_DATE" in text and "inputs.date" in text, "the date override must survive"
 
 
+def _verify_jobs_run_block():
+    """The shell body of the 'Run each job and report' step, and its env map."""
+    import yaml
+    doc = yaml.safe_load(VERIFY_JOBS.read_text())
+    for step in doc["jobs"]["verify"]["steps"]:
+        if step.get("name", "").startswith("Run each job"):
+            return step["run"], step.get("env", {})
+    raise AssertionError("run step not found")
+
+
+def test_dispatch_inputs_reach_the_shell_as_env_not_as_interpolated_text():
+    """Interpolated inline, an input is substituted into the script source
+    before bash parses it, so wait_minutes' own `case` validation ran after
+    the value had already executed."""
+    body, env = _verify_jobs_run_block()
+    assert not re.search(r"\$\{\{", body), \
+        "no GitHub expression may appear inside the shell body"
+    for name in ("IN_JOBS", "IN_DATE", "IN_LLM_PROVIDER", "IN_WAIT", "SUBNET_ID", "SG_ID"):
+        assert name in env, f"{name} must be passed through env"
+
+
+def test_the_ledger_writing_jobs_are_refused_with_a_date():
+    """A rule, not a sentence in an input description: tips-proof and
+    tips-pipeline differ by six characters and only one is safe to date."""
+    body, _ = _verify_jobs_run_block()
+    assert "tips-pipeline|tip-time-snapshot" in body
+    assert re.search(r"refusing to run it with date", body)
+
+
+def test_wait_minutes_is_normalised_to_base_ten():
+    body, _ = _verify_jobs_run_block()
+    assert "10#" in body, "a padded 030 is octal inside $(( )) and waits 24m, not 30m"
+
+
+def test_a_still_running_task_is_reported_apart_from_a_failure():
+    """Reporting both as FAILED invited a re-dispatch that would put a second
+    writer on the same date while the first was still going."""
+    body, _ = _verify_jobs_run_block()
+    assert 'if [ "$ST" != "STOPPED" ]' in body
+    assert "OK=2" in body and "RUNNING=" in body
+    assert "do NOT re-dispatch" in body
+    assert "STILL RUNNING" in body, "the summary must name them separately"
+
+
+def test_a_failed_dispatch_does_not_kill_the_rest_of_the_sweep():
+    """run-task failing left TASK empty; describe-tasks --tasks '' exits 252 and
+    bash -e killed the step, silently skipping every remaining job."""
+    body, _ = _verify_jobs_run_block()
+    assert '[ -z "$TASK" ]' in body
+    assert "not dispatched" in body
+
+
+def test_the_tips_subprocess_bound_covers_a_saturday_card_with_the_llm_on(handler):
+    """Six blocking LLM calls per race, sequential, on top of MC. The old
+    21600s was already 500s under its own no-LLM worst case, and a subprocess
+    killed at the cap writes NO tips file at all."""
+    assert handler.JOB_TIMEOUTS["run_tips_pipeline.py"] >= 28800
+    # 08:05 start + the bound must still land before the 22:30 results slot.
+    assert handler.JOB_TIMEOUTS["run_tips_pipeline.py"] <= 14 * 3600
+
+
 def test_mc_audit_gate_defaults_on_and_reads_the_off_values(monkeypatch):
     import mc_api
 
@@ -189,8 +326,20 @@ def test_mc_audit_gate_defaults_on_and_reads_the_off_values(monkeypatch):
     for off in ("false", "0", "no", "OFF", " off "):
         monkeypatch.setenv("STRIDE_MC_AUDIT_WRITE", off)
         assert mc_api._mc_audit_write_enabled() is False, off
-    monkeypatch.setenv("STRIDE_MC_AUDIT_WRITE", "true")
-    assert mc_api._mc_audit_write_enabled() is True
+    for on in ("true", "1", "yes", " TRUE ", "on"):
+        monkeypatch.setenv("STRIDE_MC_AUDIT_WRITE", on)
+        assert mc_api._mc_audit_write_enabled() is True, on
+
+
+def test_the_gate_fails_closed_on_a_value_it_does_not_recognise(monkeypatch):
+    """An allow-list, because the fail-open direction here writes to
+    prediction_audit during a preview. "" is how a variable is blanked in an
+    ECS task definition, and the deny-list shape read it as ON."""
+    import mc_api
+
+    for unrecognised in ("", "   ", "n", "none", "disable", "disabled", "maybe"):
+        monkeypatch.setenv("STRIDE_MC_AUDIT_WRITE", unrecognised)
+        assert mc_api._mc_audit_write_enabled() is False, repr(unrecognised)
 
 
 def test_the_three_mc_writers_sit_behind_the_gate():
