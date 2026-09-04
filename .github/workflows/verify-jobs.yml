@@ -33,6 +33,9 @@ on:
       tracks:
         description: "Optional comma-separated track filter for tips-proof, e.g. 'Randwick,Eagle Farm'. Empty = the whole card. A 55-race Saturday is 4-5h and cannot be watched to completion (see wait_minutes); a four-track subset is roughly 3.5h. Ignored by every other job."
         default: ""
+      bsp_range:
+        description: "Date range for bsp-corpus as 'YYYY-MM-DD..YYYY-MM-DD' (inclusive). Empty = yesterday only. Each day is one small CSV, so a year is roughly 365 fetches — run it in chunks that fit inside wait_minutes. Ignored by every other job."
+        default: ""
       wait_minutes:
         description: "Minutes to wait for each Fargate task before reading its exit code (1-55, default 20). HARD CEILING 55: the OIDC role session lasts one hour, after which every AWS call in this job fails and the task can no longer be observed from here. A job that runs longer is dispatched and reported STILL RUNNING with its task ARN — it keeps running on ECS and must be tracked by its artifact, not by this workflow."
         default: "20"
@@ -74,6 +77,7 @@ jobs:
           IN_DATE: ${{ inputs.date }}
           IN_LLM_PROVIDER: ${{ inputs.llm_provider }}
           IN_TRACKS: ${{ inputs.tracks }}
+          IN_BSP_RANGE: ${{ inputs.bsp_range }}
           IN_WAIT: ${{ inputs.wait_minutes }}
           SUBNET_ID: ${{ vars.AWS_SUBNET_ID }}
           SG_ID: ${{ vars.AWS_SG_ID }}
@@ -136,6 +140,12 @@ jobs:
                 llm-proof)       TD=stride-tips-pipeline ;;
                 consensus-proof) TD=stride-consensus-agent ;;
                 panel-proof)     TD=stride-consensus-agent ;;
+                # No task definition of their own: they need the image, a
+                # DATABASE_URL and outbound HTTPS, which the ETL task already
+                # has. Adding a definition would mean editing infra/*.sh, and
+                # those scripts call update-schedule, which is full-replacement.
+                bsp-sample)      TD=stride-nightly-etl ;;
+                bsp-corpus)      TD=stride-nightly-etl ;;
                 *)               TD="stride-$JOB" ;;
               esac
               EXTRA_ENV=""
@@ -149,6 +159,17 @@ jobs:
               fi
               if [ -n "$IN_TRACKS" ]; then
                 EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_TRACKS\",\"value\":\"$IN_TRACKS\"}"
+              fi
+              if [ -n "$IN_BSP_RANGE" ]; then
+                # 'A..B' -> two variables. Split here rather than in the job so
+                # a malformed range fails before a container is paid for.
+                BSP_SINCE="${IN_BSP_RANGE%%..*}"
+                BSP_UNTIL="${IN_BSP_RANGE##*..}"
+                case "$BSP_SINCE$BSP_UNTIL" in
+                  ????-??-?????-??-??) ;;
+                  *) echo "::error::bsp_range must be YYYY-MM-DD..YYYY-MM-DD, got '$IN_BSP_RANGE'"; exit 1 ;;
+                esac
+                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_BSP_SINCE\",\"value\":\"$BSP_SINCE\"},{\"name\":\"STRIDE_BSP_UNTIL\",\"value\":\"$BSP_UNTIL\"}"
               fi
               OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$EXTRA_ENV]}]}"
               TASK=$(aws ecs run-task --cluster stride \

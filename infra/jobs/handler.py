@@ -1112,6 +1112,74 @@ def job_llm_proof() -> dict:
             "insight_chars": ",".join(str(c) for c in chars)}
 
 
+def job_bsp_sample() -> dict:
+    """Print one Betfair BSP file's real format. Writes nothing.
+
+    Exists because the format cannot be checked from everywhere. An agent
+    session's egress proxy blocks promo.betfair.com (verified 2026-09-04:
+    curl, WebFetch and the S3 provenance prefix all refused), while this
+    container reaches it every night. So the honest way to confirm the
+    columns before building anything on them is to ask the runtime that can
+    actually see them, rather than trust a parser contract written a year ago.
+
+    STRIDE_DATE picks the race date; default is yesterday, because the file
+    for a race date publishes the following day and today's will not exist.
+    """
+    date_str = os.environ.get("STRIDE_DATE", "").strip()
+    if not date_str:
+        date_str = (datetime.now(SYD).date() - timedelta(days=1)).strftime("%Y-%m-%d")
+    out = _run_ok("bsp_corpus.py", "--sample", date_str, ok_codes=(0, 4))
+    verdict = ""
+    cols = ""
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("BSP_SAMPLE result="):
+            verdict = s
+        elif s.startswith("BSP_SAMPLE missing_columns="):
+            cols = s.split("=", 1)[1]
+    if not verdict:
+        raise RuntimeError(
+            "bsp-sample: bsp_corpus.py printed no BSP_SAMPLE result marker — "
+            "it exited before reaching the file; the tail above carries why.")
+    if not verdict.startswith("BSP_SAMPLE result=PASS"):
+        raise RuntimeError(f"bsp-sample: {verdict} (missing_columns={cols})")
+    return {"last_success_date": date_str, "missing_columns": cols or "none",
+            "detail": out[-1500:]}
+
+
+def job_bsp_corpus() -> dict:
+    """Backfill the full-field BSP corpus over a date range.
+
+    STRIDE_BSP_SINCE / STRIDE_BSP_UNTIL bound the range; both default to
+    yesterday so a bare dispatch ingests one day rather than accidentally
+    walking years. Long backfills are dispatched deliberately with an
+    explicit range.
+
+    Exit 3 (ingested nothing across the whole range) is a failure here, not a
+    quiet success: a backfill that stores no rows and returns 0 is precisely
+    the shape this repository keeps having to catch.
+    """
+    yesterday = (datetime.now(SYD).date() - timedelta(days=1)).strftime("%Y-%m-%d")
+    since = os.environ.get("STRIDE_BSP_SINCE", "").strip() or yesterday
+    until = os.environ.get("STRIDE_BSP_UNTIL", "").strip() or yesterday
+    for label, value in (("STRIDE_BSP_SINCE", since), ("STRIDE_BSP_UNTIL", until)):
+        datetime.strptime(value, "%Y-%m-%d")   # a bad date must not reach a URL
+    print(f"[bsp-corpus] ingesting {since}..{until}")
+    out = _run_ok("bsp_corpus.py", "--since", since, "--until", until, "--commit")
+    rows = files = failures = 0
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("ROWS "):
+            rows = int(s.split()[1])
+        elif s.startswith("FILES "):
+            files = int(s.split()[1])
+        elif s.startswith("FAILURES "):
+            failures = int(s.split()[1])
+    return {"last_success_date": until, "rows_written": rows,
+            "files_ingested": files, "failures": failures,
+            "range": f"{since}..{until}"}
+
+
 def job_consensus_proof() -> dict:
     """Consensus in --dry-run: proves the container, secrets and panel setup
     without LLM spend and without overwriting today's consensus file (which
@@ -1257,6 +1325,8 @@ JOBS = {
     # a path before it runs for real.
     "tips-proof": job_tips_proof,
     "llm-proof": job_llm_proof,
+    "bsp-sample": job_bsp_sample,
+    "bsp-corpus": job_bsp_corpus,
     "consensus-proof": job_consensus_proof,
     "panel-proof": job_panel_proof,
     "nightly-etl": job_nightly_etl,
