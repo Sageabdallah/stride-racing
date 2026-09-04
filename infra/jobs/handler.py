@@ -568,7 +568,47 @@ def job_morning_odds() -> dict:
     #    survives the failure now.
     _sync_up("server/python/intelligence")
 
-    # 3. A baseline exists at all. baseline-night runs at 04:15 with its own
+    # 3. Every scheduled venue has at least one MORNING_CHECK row. The row
+    #    check above is all-or-nothing per DAY: on 2026-08-05 this job passed
+    #    green with odds for 2 of 4 scheduled venues (Canterbury, Doomben)
+    #    while Cranbourne and Belmont Park mapped zero — 16 races dark and
+    #    invisible. Per-VENUE, never per-race: Betfair publishes provincial
+    #    markets only a few hours out, so a venue with 3 of 8 races covered
+    #    at 08:00 is healthy, and a per-race check would false-alarm on every
+    #    provincial card. stride_norm_track is the DB's own normaliser
+    #    (identity_normalization.py), applied to BOTH sides: race_schedule
+    #    stores capitalised names and snapshots store lowercased ones, and
+    #    before 41df6c8 the function's ELSE branch deleted uppercase letters,
+    #    so the first cut of this check (#97) would have reported every venue
+    #    missing on every day. scripts/verify_venue_coverage.py executes this
+    #    comparison against the real schema; it was run against prod before
+    #    this shipped (Aug 5/6 known answers match, recent days report none
+    #    missing).
+    venues_scheduled = _db_query(
+        "SELECT COUNT(DISTINCT stride_norm_track(track)) FROM race_schedule "
+        "WHERE race_date = %s", (_today(),))[0]
+    missing = _db_query(
+        "SELECT COALESCE(array_agg(sched.track ORDER BY sched.track), '{}') "
+        "FROM ("
+        "  SELECT MIN(track) AS track, stride_norm_track(track) AS v "
+        "  FROM race_schedule WHERE race_date = %s GROUP BY v"
+        ") sched LEFT JOIN ("
+        "  SELECT DISTINCT stride_norm_track(track) AS v "
+        "  FROM betfair_odds_snapshots "
+        "  WHERE race_date = %s AND snapshot_type = 'MORNING_CHECK' "
+        "  AND snapshot_time >= %s"
+        ") cov ON cov.v = sched.v "
+        "WHERE cov.v IS NULL",
+        (_today(), _today(), t0))[0]
+    if missing:
+        raise RuntimeError(
+            f"morning-odds: {len(missing)} of {venues_scheduled} scheduled "
+            f"venues have NO MORNING_CHECK odds today: "
+            f"{', '.join(missing)}. The day-level row check cannot see a "
+            f"single dark venue — this is the 2026-08-05 failure, which "
+            f"passed green at the time.")
+
+    # 4. A baseline exists at all. baseline-night runs at 04:15 with its own
     #    "wrote zero rows" postcondition, so reaching a non-quiet morning
     #    with zero baseline rows means that alarm should already have fired.
     #    Checked and raised on before signals are queried: the old
@@ -585,7 +625,7 @@ def job_morning_odds() -> dict:
             f"not run clean today. Confirm it actually fired before treating "
             f"this as a first day with nothing to diff against.")
 
-    # 4. Signals were derived, not just prices stored. On 2026-04-06 this
+    # 5. Signals were derived, not just prices stored. On 2026-04-06 this
     #    job wrote 272 MORNING_CHECK rows against a 230-row baseline and
     #    produced ZERO market_signal_scores: compute_market_signals keys the
     #    baseline on the raw horse name (odds_movement.py:204-212, :231), so

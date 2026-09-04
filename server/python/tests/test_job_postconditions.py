@@ -275,7 +275,8 @@ def test_morning_odds_fails_on_baseline_present_but_zero_signals(handler,
     """
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
-    counts = iter([(272,), (230,), (0,)])   # morning, baseline, signals
+    # morning rows, venues scheduled, missing venues, baseline, signals
+    counts = iter([(272,), (2,), ([],), (230,), (0,)])
     monkeypatch.setattr(handler, "_db_query", lambda sql, p: next(counts))
     with pytest.raises(RuntimeError) as e:
         handler.job_morning_odds()
@@ -301,7 +302,8 @@ def test_morning_odds_fails_when_there_is_no_baseline_at_all(handler,
     """
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
-    counts = iter([(272,), (0,)])           # morning rows, then no baseline
+    # morning rows, venues scheduled, missing venues, then no baseline
+    counts = iter([(272,), (2,), ([],), (0,)])
     monkeypatch.setattr(handler, "_db_query", lambda sql, p: next(counts))
     with pytest.raises(RuntimeError) as e:
         handler.job_morning_odds()
@@ -330,6 +332,8 @@ def test_morning_odds_relays_the_signals_file_before_it_asserts(handler,
 
     def _q(sql, p):
         order.append("query")
+        if "array_agg" in sql:
+            return ([],)
         return (272,) if "MORNING_CHECK" in sql else (0,)
     monkeypatch.setattr(handler, "_db_query", _q)
 
@@ -339,6 +343,181 @@ def test_morning_odds_relays_the_signals_file_before_it_asserts(handler,
     assert order.index("sync") < len(order) - 1, (
         "sync_up ran last — the failing assertion above it would have "
         "stranded the file in a container that is about to exit")
+
+
+# ------------------------------------- per-venue morning odds coverage
+
+def _venue_coverage_db(handler, monkeypatch, scheduled, covered_rows,
+                       rows=40, baseline=230, signals=12):
+    """Route _db_query by query shape, so the venue post-condition runs
+    against a fake schedule/snapshot state rather than a positional count
+    script. covered_rows are (track, race_number) pairs, so a venue covered
+    on only some races is still a covered venue — the distinction the
+    per-venue granularity exists to protect."""
+    queries = []
+
+    def query(sql, params):
+        queries.append(sql)
+        text = " ".join(sql.split()).lower()
+        if "array_agg" in text:
+            covered_venues = {track for track, _ in covered_rows}
+            return (sorted(set(scheduled) - covered_venues),)
+        if "from race_schedule" in text:
+            return (len(set(scheduled)),)
+        if "morning_check" in text:
+            return (rows,)
+        if "baseline_night" in text:
+            return (baseline,)
+        if "market_signal_scores" in text:
+            return (signals,)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+    monkeypatch.setattr(handler, "_db_query", query)
+    return queries
+
+
+def test_morning_odds_passes_when_every_scheduled_venue_is_covered(handler,
+                                                                   monkeypatch):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    _venue_coverage_db(
+        handler, monkeypatch,
+        scheduled=["Canterbury", "Doomben"],
+        covered_rows=[("Canterbury", n) for n in range(1, 8)]
+                     + [("Doomben", n) for n in range(1, 9)])
+    out = handler.job_morning_odds()
+    assert out["morning_rows"] == 40
+
+
+def test_morning_odds_fails_naming_venues_with_no_odds(handler, monkeypatch):
+    """The 2026-08-05 shape, finally loud.
+
+    Canterbury and Doomben wrote MORNING_CHECK odds; Cranbourne and Belmont
+    Park mapped zero markets. The day-level row check passed (15 rows > 0)
+    and the job went green with 16 races dark. The per-venue check must
+    raise and NAME the dark venues — a bare count tells nobody which
+    meetings went missing.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    _venue_coverage_db(
+        handler, monkeypatch,
+        scheduled=["Canterbury", "Doomben", "Cranbourne", "Belmont Park"],
+        covered_rows=[("Canterbury", n) for n in range(1, 8)]
+                     + [("Doomben", n) for n in range(1, 9)])
+    with pytest.raises(RuntimeError) as e:
+        handler.job_morning_odds()
+    message = str(e.value)
+    assert "Cranbourne" in message
+    assert "Belmont Park" in message
+    assert "2 of 4" in message
+
+
+def test_morning_odds_venue_check_is_per_venue_not_per_race(handler,
+                                                            monkeypatch):
+    """A venue with only 3 of 8 races covered still passes.
+
+    Betfair publishes provincial markets only a few hours before the jump,
+    so at 08:00 most of a provincial card has no market yet. Tightening
+    this to per-race would false-alarm on every provincial card — the
+    scheduled-venue count must stay COUNT(DISTINCT venue), never a
+    race-level comparison.
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    queries = _venue_coverage_db(
+        handler, monkeypatch,
+        scheduled=["Ballarat Synthetic"],
+        covered_rows=[("Ballarat Synthetic", 1), ("Ballarat Synthetic", 2),
+                      ("Ballarat Synthetic", 3)])
+    handler.job_morning_odds()   # must not raise
+    count_sql = next(
+        " ".join(sql.split()).lower() for sql in queries
+        if "count(" in " ".join(sql.split()).lower()
+        and "from race_schedule" in " ".join(sql.split()).lower())
+    assert "count(distinct stride_norm_track(track))" in count_sql
+
+
+def test_morning_odds_venue_check_passes_with_no_schedule(handler,
+                                                          monkeypatch):
+    """Zero scheduled venues is not a dark venue: a quiet day is handled
+    upstream by _require_racecard, so this check must simply not fire."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    _venue_coverage_db(handler, monkeypatch, scheduled=[], covered_rows=[])
+    handler.job_morning_odds()   # must not raise
+
+
+def test_morning_odds_venue_check_runs_after_the_signals_file_is_relayed(
+        handler, monkeypatch):
+    """A dark venue is a health finding, not a reason to strand the day's
+    degraded-but-usable market file in a container about to exit."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    order = []
+    monkeypatch.setattr(handler, "_sync_up",
+                        lambda *a, **k: order.append("sync") or 0)
+    queries = _venue_coverage_db(
+        handler, monkeypatch,
+        scheduled=["Canterbury", "Cranbourne"],
+        covered_rows=[("Canterbury", 1)])
+    routed = handler._db_query
+
+    def _q(sql, p):
+        if "array_agg" in sql:
+            order.append("venue")
+        return routed(sql, p)
+    monkeypatch.setattr(handler, "_db_query", _q)
+    with pytest.raises(RuntimeError, match="Cranbourne"):
+        handler.job_morning_odds()
+    assert order.index("sync") < order.index("venue")
+
+
+# ------------------------------------- normaliser lockstep
+
+# The verification script's case table: capitalised schedule values, an
+# already-lowercase snapshot value, and one name per explicit alias branch.
+NORM_CASE_TABLE = {
+    "Canterbury": "canterbury",
+    "Belmont Park": "belmontpark",
+    "Ballarat Synthetic": "ballaratsynthetic",
+    "canterbury": "canterbury",
+    "Royal Randwick": "randwick",
+    "Caulfield": "caulfield",
+}
+
+
+def test_python_mirror_agrees_with_sql_normaliser_on_the_case_table():
+    """betfair_markets.norm_track is documented as the Python lockstep
+    mirror of stride_norm_track (identity_normalization.py, whose ordering
+    test_phase_minus_1_contracts pins). If they are supposed to agree, a
+    test should say so — on the same case table the verification script
+    uses, so the two normalisers cannot drift apart silently."""
+    import betfair_markets
+    for name, expected in NORM_CASE_TABLE.items():
+        assert betfair_markets.norm_track(name) == expected, name
+
+
+def test_handler_normalises_both_sides_of_the_venue_comparison(handler,
+                                                               monkeypatch):
+    """A one-sided edit — normalising the schedule but not the snapshots,
+    or vice versa — compiles fine, passes faked-cursor tests, and never
+    matches in production. Pin that BOTH sides go through
+    stride_norm_track."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_db_now", lambda: 0, raising=False)
+    queries = _venue_coverage_db(
+        handler, monkeypatch,
+        scheduled=["Canterbury"], covered_rows=[("Canterbury", 1)])
+    handler.job_morning_odds()
+    texts = [" ".join(sql.split()).lower() for sql in queries]
+    missing_sql = next(t for t in texts if "array_agg" in t)
+    assert missing_sql.count("stride_norm_track(track)") == 2, (
+        "the missing-venue query must apply stride_norm_track to the "
+        "schedule side AND the snapshot side")
+    scheduled_sql = next(t for t in texts
+                         if "count(distinct" in t and "race_schedule" in t)
+    assert "count(distinct stride_norm_track(track))" in scheduled_sql
 
 
 def test_results_collect_treats_a_timeout_on_today_as_non_fatal(handler,
