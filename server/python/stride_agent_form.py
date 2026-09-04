@@ -191,6 +191,7 @@ def _batch_prefetch_fitness_data(horse_names, race_date, conn):
     Returns the original fetch function so the caller can restore it after the batch.
     """
     import fitness_peak
+    from result_margins import beaten_margin
 
     original_fetch = fitness_peak._fetch_race_history
     if not horse_names:
@@ -259,21 +260,21 @@ def _batch_prefetch_fitness_data(horse_names, race_date, conn):
                     pos = int(pos_raw)
                 except (ValueError, TypeError):
                     pass
-            margin = None
-            if margin_raw is not None:
-                try:
-                    margin = float(margin_raw)
-                except (ValueError, TypeError):
-                    pass
+            # Lengths behind the winner, None for the winner, whichever
+            # importer wrote the row (result_margins). This is the prep-cycle
+            # path the pipeline runs; the intelligence/ copy #157 fixed is
+            # not imported by anything.
+            margin = beaten_margin(pos, margin_raw)
             all_history[hname][rd] = {
                 'race_date': rd, 'position': pos,
                 'margin': margin, 'distance': dist, 'race_class': rc,
             }
         elif all_history[hname][rd]['margin'] is None and margin_raw is not None:
-            try:
-                all_history[hname][rd]['margin'] = float(margin_raw)
-            except (ValueError, TypeError):
-                pass
+            # A winner training_data left blank must stay blank: filling it
+            # from the duplicate row would put the winning margin back.
+            known = all_history[hname][rd]
+            position = known['position'] if known['position'] is not None else pos_raw
+            known['margin'] = beaten_margin(position, margin_raw)
 
     cur.close()
 
