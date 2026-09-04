@@ -91,6 +91,38 @@ def test_the_proof_switches_off_every_incidental_write(handler, monkeypatch, tmp
     assert ("sync", "racecards", "tips_2026-09-05_cloudproof.json") in calls
 
 
+def test_a_track_filter_reaches_the_pipeline_positionally(handler, monkeypatch, tmp_path):
+    """The pipeline has always taken tracks positionally; the job never passed
+    them, so the only preview available was the whole 55-race card — which
+    cannot be watched to completion inside a one-hour credential."""
+    monkeypatch.setenv("STRIDE_TRACKS", "Randwick, Eagle Farm ,Belmont Park")
+    calls = _proof_setup(handler, monkeypatch, tmp_path, ["x"])
+    handler.job_tips_proof()
+    run = [c for c in calls if c[0] == "run"][0]
+    assert run == ("run", "run_tips_pipeline.py", "2026-09-05",
+                   "Randwick", "Eagle Farm", "Belmont Park",
+                   "--skip-db-store", "--output-suffix", "cloudproof"), \
+        "tracks go before the flags, whitespace trimmed, blanks dropped"
+
+
+def test_no_track_filter_scores_the_whole_card(handler, monkeypatch, tmp_path):
+    for value in ("", "   ", ",,"):
+        monkeypatch.setenv("STRIDE_TRACKS", value)
+        calls = _proof_setup(handler, monkeypatch, tmp_path, ["x"])
+        handler.job_tips_proof()
+        run = [c for c in calls if c[0] == "run"][0]
+        assert run == ("run", "run_tips_pipeline.py", "2026-09-05",
+                       "--skip-db-store", "--output-suffix", "cloudproof"), repr(value)
+
+
+def test_the_workflow_can_pass_a_track_filter():
+    body, env = _verify_jobs_run_block()
+    assert "IN_TRACKS" in env
+    assert "STRIDE_TRACKS" in body
+    text = VERIFY_JOBS.read_text()
+    assert re.search(r"^\s+tracks:\n\s+description:", text, re.M), "no tracks input"
+
+
 def test_no_insights_with_the_llm_enabled_relays_first_then_fails(handler, monkeypatch, tmp_path):
     monkeypatch.delenv("LLM_ENABLED", raising=False)
     calls = _proof_setup(handler, monkeypatch, tmp_path, ["", "", ""])

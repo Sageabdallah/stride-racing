@@ -30,6 +30,9 @@ on:
       llm_provider:
         description: "Optional LLM provider for THIS dispatch (groq | anthropic | ollama), set on the task as LLM_PROVIDER with LLM_ENABLED=true. The task environment wins over the stride/prod secret, so this changes one run and never the schedule. Empty = whatever the secret says."
         default: ""
+      tracks:
+        description: "Optional comma-separated track filter for tips-proof, e.g. 'Randwick,Eagle Farm'. Empty = the whole card. A 55-race Saturday is 4-5h and cannot be watched to completion (see wait_minutes); a four-track subset is roughly 3.5h. Ignored by every other job."
+        default: ""
       wait_minutes:
         description: "Minutes to wait for each Fargate task before reading its exit code (1-55, default 20). HARD CEILING 55: the OIDC role session lasts one hour, after which every AWS call in this job fails and the task can no longer be observed from here. A job that runs longer is dispatched and reported STILL RUNNING with its task ARN — it keeps running on ECS and must be tracked by its artifact, not by this workflow."
         default: "20"
@@ -70,6 +73,7 @@ jobs:
           IN_JOBS: ${{ inputs.jobs }}
           IN_DATE: ${{ inputs.date }}
           IN_LLM_PROVIDER: ${{ inputs.llm_provider }}
+          IN_TRACKS: ${{ inputs.tracks }}
           IN_WAIT: ${{ inputs.wait_minutes }}
           SUBNET_ID: ${{ vars.AWS_SUBNET_ID }}
           SG_ID: ${{ vars.AWS_SG_ID }}
@@ -142,6 +146,9 @@ jobs:
                 # Both variables: LLM_ENABLED=false in the secret would
                 # otherwise make the provider choice a no-op.
                 EXTRA_ENV="$EXTRA_ENV,{\"name\":\"LLM_PROVIDER\",\"value\":\"$IN_LLM_PROVIDER\"},{\"name\":\"LLM_ENABLED\",\"value\":\"true\"}"
+              fi
+              if [ -n "$IN_TRACKS" ]; then
+                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_TRACKS\",\"value\":\"$IN_TRACKS\"}"
               fi
               OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$EXTRA_ENV]}]}"
               TASK=$(aws ecs run-task --cluster stride \
