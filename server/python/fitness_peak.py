@@ -8,6 +8,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 try:
+    from result_margins import beaten_margin
+except ImportError:  # imported with a different cwd; the module sits beside this file
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from result_margins import beaten_margin
+
+try:
     import psycopg2
     PSYCOPG2_AVAILABLE = True
 except ImportError:
@@ -95,12 +101,10 @@ def _fetch_race_history(horse_name, race_date, conn):
                         pos = int(row[1])
                     except (ValueError, TypeError):
                         pass
-                margin = None
-                if row[2] is not None:
-                    try:
-                        margin = float(row[2])
-                    except (ValueError, TypeError):
-                        pass
+                # Lengths behind the winner, None for the winner, whichever
+                # importer wrote the row (result_margins). Read raw, a Punting
+                # Form win by three lengths scored as a three-length defeat.
+                margin = beaten_margin(pos, row[2])
                 seen_dates[rd] = {
                     'race_date': rd,
                     'position': pos,
@@ -109,10 +113,11 @@ def _fetch_race_history(horse_name, race_date, conn):
                     'race_class': row[4],
                 }
             elif rd and rd in seen_dates and seen_dates[rd]['margin'] is None and row[2] is not None:
-                try:
-                    seen_dates[rd]['margin'] = float(row[2])
-                except (ValueError, TypeError):
-                    pass
+                # A winner training_data left blank must stay blank: filling
+                # it from the duplicate row would put the winning margin back.
+                known = seen_dates[rd]
+                position = known['position'] if known['position'] is not None else row[1]
+                known['margin'] = beaten_margin(position, row[2])
         cur.close()
     except Exception as e:
         _log(f"Error querying race_results_history for {horse_name}: {e}")
