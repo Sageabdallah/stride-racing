@@ -34,7 +34,10 @@ import os, sys, json, argparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.normpath(os.path.join(SCRIPT_DIR, os.pardir, os.pardir, ".env"))
-EXPLICIT_ENV = r"c:\Users\sagea\OneDrive\Desktop\Race-Analytics\Race-Analytics\.env"
+# A .env outside the repo, for a checkout whose root has none. This used to be
+# a hardcoded path to one dev machine's Windows checkout, which resolved on no
+# other machine — including the Mac it was meant for.
+EXPLICIT_ENV = os.environ.get("STRIDE_ENV_FILE", "")
 def _load_env(path):
     env = {}
     try:
@@ -51,7 +54,7 @@ def _load_env(path):
     return env
 
 _env = _load_env(ENV_PATH)
-if not _env.get("DATABASE_URL"):
+if EXPLICIT_ENV and not _env.get("DATABASE_URL"):
     _env = _load_env(EXPLICIT_ENV)
 DATABASE_URL = _env.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
 for _key, _value in _env.items():

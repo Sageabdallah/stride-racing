@@ -141,20 +141,19 @@ the human-readable insights that ship with each tip.
 run on race day            supporting
 ─────────────────          ─────────────────
 server/python/
-  run_full_pipeline.py     retrain_v2.py, train_ml*.py       (training)
+  run_full_pipeline.py     retrain_v2.py, train_ml_enhanced.py  (training)
   download_racecards.py    backtest*.py, walk_forward_*.py   (evaluation)
   run_tips_pipeline.py     backfill_*.py                     (repair)
   mc_api.py                research/                         (diagnostics)
-  stride_build.py          intelligence/build_*.py           (gen-3 rewrite, unwired)
-  consensus_agent.py       nsw_*sniffer*, *_discovery.py     (dev tooling)
+  stride_build.py
+  consensus_agent.py
   odds_movement.py
   *collector*.py
 racecard/feature/model/intelligence modules   (see 11-module-reference.md)
 
-repo root: build_features.py (standalone CSV extractor),
-           monte_carlo.py (standalone MC showcase),
+repo root: monte_carlo.py (standalone MC showcase),
            racing_system_v8.3_mc.py (factor model + base MC library),
-           download_training_data.py, migrations/, examples/, scripts/
+           migrations/, examples/, scripts/
 ```
 
 **Excluded from the published repo** (`.gitignore`): trained models (`*.pkl`,

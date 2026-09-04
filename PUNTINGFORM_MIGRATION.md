@@ -399,7 +399,7 @@ walk-forward + promotion-gate evidence (`retrain_preflight.py`):
       CLV settled vs close/BSP for 2–4 weeks
 - [ ] [U] Betfair live key activation (Automation Hub form — submitted?)
 - [ ] [U] Mac session: self-hosted runner (unlocks Betfair automation), local
-      `.env` update, purge old password (see `ACTION_THIS.md`)
+      `.env` update, purge old password
 - **Decision gate:** positive CLV → tune staking/selection and consider live
   betting; flat/negative CLV → iterate Phase E, spend nothing further.
 

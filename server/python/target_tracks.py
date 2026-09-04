@@ -8,12 +8,11 @@ STRIDE covers required a code change, a review, a merge and — on the AWS side 
 a container image rebuild. That is a heavy process for a decision that wants to
 be tried, watched for a week and reverted if the tips get worse.
 
-It also meant the list could only be found by grepping. There are six other
-track lists in this repository and no two are identical: odds_movement.py and
-download_historical.py both carry `pakenham`, and odds_movement.py and
-download_training_data.py both carry `sunshine coast`, while the download list
-here carries neither. So the odds layer and the history layer already expect
-tracks the racecard cannot produce. Measured against race_results_history,
+It also meant the list could only be found by grepping. The track lists in this
+repository are not identical: odds_movement.py and download_historical.py both
+carry `pakenham`, and odds_movement.py carries `sunshine coast`, while the
+download list here carries neither. So the odds layer and the history layer
+already expect tracks the racecard cannot produce. Measured against race_results_history,
 those two tracks appear on 10 of the 28 days in the 75 to 2026-08-03 that had
 no target-track racing at all.
 

@@ -10,14 +10,16 @@ the live daily path. *(dead)* = no callers found / superseded.
 > invoke more. Treat "zero importers" as a prompt to check those two surfaces, not
 > as evidence a module is dead.
 
+> **Removed in the 2026-09 cleanup** (dead-API importers, unwired gen-3 builders,
+> unused libraries, one-off discovery tools): see
+> [`REPO_CLEANUP_AUDIT.md`](REPO_CLEANUP_AUDIT.md) for the list and the evidence.
+
 ## Repo root
 
 | File | Purpose |
 |---|---|
 | **`racing_system_v8.3_mc.py`** | v8.2 17-factor model + production Plackett-Luce MC + Kelly staking + TipGenerator; imported by mc_api and runnable standalone |
 | `monte_carlo.py` | Standalone skew-normal MC engine with exotics/bet-slips (CLI showcase; not imported) |
-| `build_features.py` | Standalone race-JSON → features.csv extractor with leakage self-checks (backtest tooling) |
-| `download_training_data.py` | Comprehensive 365-day historical downloader (8 tracks, ~80 fields/runner) |
 
 ## Orchestrators
 
@@ -45,9 +47,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`fetch_and_import_date.py`** | One date: PF results → `race_results_history` (append) |
 | `backfill_results.py` | Date-range gap backfill, week by week: reuses `fetch_and_import_date` + all three sectional collectors (run via the `backfill-results` Action) — has self-test |
 | `audit_write_smoke.py` | Sentinel-row smoke test of mc_api's `prediction_audit` write path, self-cleaning (run via the `audit-smoke` Action) |
-| `import_historical_to_db.py` *(dead-API era)* | Historical JSON → `training_data` + `race_results_history` with heuristic prior predictions |
-| `import_race_results.py` *(dead-API era)* | **TRUNCATE-and-reload** of `race_results_history` from track imports (destructive — do not run) |
-| `import_track_json.py` / `_fast.py` *(dead-API era)* | Track-import JSON → `training_data` (row-wise / bulk execute_values) |
 | `backfill_barrier_trials.py` → `import_barrier_trials_to_db.py` | Barrier-trial download → `barrier_trial_results` table |
 
 ## Ingestion — results & sectionals
@@ -64,9 +63,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `nsw_xml_collector.py` | Alternative NSW path: free XML results + 600 m sectional |
 | `weekly_sectional_collector.py` | Sunday sweep of all three sectional collectors |
 | `ingest_target_track_results_and_sectionals.py` | One-date fan-out: results + correct per-track sectional source |
-| `racing_com_api_discovery.py`, `nsw_api_sniffer.py`, `nsw_deep_sniffer.py` | Playwright endpoint-discovery dev tools |
 | `sp_health.py`, `results_health_check.py` | Data-quality gates (SP coverage, position sanity) |
-| `weather_api.py` | *(dead)* going-forecast stub, no callers |
 
 ## Normalization
 
@@ -100,8 +97,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `track_condition_db.py` | Horse-going records + pace energy model; canonical going keywords |
 | `glicko2_elo.py` | Surface-conditional Glicko-2 rating engine — has self-test |
 | `target_encoding.py` | Leave-one-out smoothed target encoding |
-| `feature_store.py` | Two-tier feature cache + feature registry (provenance) |
-| `learned_sectional_combination.py` | Learned blend weights over sectional engines (L-BFGS-B) |
 | **`relative_market.py`** | Phase-5 within-race market-position features (favourite ladder); parity with mc_api — has self-test |
 
 ## ML training & calibration
@@ -110,7 +105,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 |---|---|
 | **`retrain_v2.py`** | Production trainer: XGB+LGB+CatBoost, walk-forward + purge gap, OOF isotonic → `racing_ensemble_v2.pkl` |
 | **`refresh_training_view_v2.py`** | Rebuilds `training_view_v2` matview (union of prediction sources + outcomes + prior sectionals) |
-| `train_ml.py` | v1 trainer (delegates to RacingMLModel) |
 | `train_ml_enhanced.py` | "Enhanced" single-model trainer (temporal CV, isotonic-vs-Platt, SHAP) |
 | **`calibration_model.py`** | Global isotonic calibrator applied in the tips pipeline |
 | `conditional_logit.py` | Benter-style two-stage model+market blend (opt-in via `STRIDE_CL_BLEND`; fit CLI + self-test) |
@@ -119,7 +113,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `stacking_meta_learner.py` | OOF logistic stacking over base predictions (fit-path bug fixed; activates on newly trained v1 artifacts) |
 | `focal_loss.py` | Focal-loss objectives *(implemented, unwired)* |
 | `predictability_meta_model.py` | Race-level "will the favourite win" chaos classifier |
-| `model_versioning.py` | Model registry + shadow A/B promotion rules *(unused so far)* |
 | `feature_drift_monitor.py` | Importance-drift monitoring (JS divergence bands) |
 | `compare_features.py` | Training-vs-inference feature parity audit |
 | `ml_status.py` | CLI: print model status JSON |
@@ -132,7 +125,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 |---|---|
 | **`mc_api.py`** | Production MC orchestrator (7,782 lines): factor model + base MC + sectional overlay + feature adjustments + banker detection; stdin/stdout JSON or in-process |
 | **`realistic_simulate.py`** | Mixture-noise / multi-phase-energy / sectional-profile overlay engine |
-| `adaptive_mc.py` | *(dead)* adaptive sim counts with convergence stopping |
 
 ## Intelligence layer
 
@@ -144,14 +136,12 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`stride_agent_form.py`** | Agent 2: franking classification, prep cycles, sectional trends, trainer patterns (deterministic) |
 | `intelligence_common.py` | Gen-2 shared utils (DB, racecard parsing) |
 | `intelligence/common.py` | Gen-3 shared utils (bucketing, cohort filters) |
-| `intelligence/build_*.py` (8 files) | Gen-3 parallel rewrite of the builders *(not wired into production)* |
-| `market_overlay_common.py` | SP-based market-overlay map (shared gen-2/gen-3) |
+| `market_overlay_common.py` | SP-based market-overlay map (gen-2) |
 | **`banker_detector.py`** | Dominant-favourite detection (composite score, adaptive thresholds) |
 | **`luckless_analyser.py`** | Excuse detection from stewards' comments → probability uplift |
 | **`track_bias_points.py`** | Static per-track bias configs → points scoring |
 | `blackbook_candidates.py` | Unlucky-closer watchlist generator |
 | `advanced_race_analysis.py` | Standalone 4-phase LLM race analyst |
-| `historical_analysis.py` | One-off print-only performance report |
 
 ## Consensus & market
 
@@ -160,14 +150,13 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`consensus_agent.py`** | Tipster polling (Tavily) + web research (Perplexity) + extraction (Claude) → crowd/consensus scores |
 | **`consensus_blender.py`** | Convergence library: V2 blend/tiers/injections/gate + V3 crowd-first classifier (live) |
 | **`odds_movement.py`** | Overnight/morning odds snapshots → STEAM/FIRMING/DRIFT market pillar |
-| `validate_panel.py` | Tipster-panel reachability pre-flight |
+| `panel_liveness.py` | Tipster-panel reachability pre-flight (ALIVE/FLAKY/DEAD), run by `infra/09c_upload_panel.sh` |
 | `source_accuracy_tracker.py` | Records tipster hit rates (feedback loop not yet closed) |
 | **`llm_provider.py`** | Groq/Ollama provider abstraction with JSON hardening |
 | **`llm_form_analysis.py`** | Pre-MC LLM race analysis (±0.08 mu adjustments) |
 | **`llm_post_scorer.py`** | Post-MC AI scores, rankings, rich insights, brief assessments |
 | `market_analysis.py` | Steam/drift features + probability multipliers (model-side) |
 | `market_velocity.py` | Velocity/acceleration/smart-money features + MC sigma modifier |
-| `market_efficiency.py` | Overround-based market segmentation + per-segment strategy |
 | `build_betfair_mapping.py` | Betfair historical stream ETL → runner map + labeled training view |
 
 ## Backtesting, learning, risk & output
@@ -186,7 +175,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `format_tips.py` | Console tips renderer |
 | **`validate_tips.py`** | Tips-contract validator (hard gate) |
 | **`backfill_tips_contract.py`** | Re-stamps the selection contract on saved tips files |
-| `backfill_{phase2,zscores,zscores_targeted,rrh_missing_dates,research_sources}.py` | Data repair sweeps (see backtesting doc §6) |
+| `backfill_{phase2,zscores,zscores_targeted,rrh_missing_dates}.py` | Data repair sweeps (see backtesting doc §6) |
 | `research/performance_autopsy_last21days.py` | Losing-tip failure-mode classifier |
 | `research/investigate_sectional_market_going.py` | Sectional-coverage + wet-going diagnostics |
 | `research/winner_pattern_gap/` | Two-agent winner-pattern research pipeline + synthesis |

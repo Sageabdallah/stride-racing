@@ -59,8 +59,11 @@ The superseded STRIDE Decision-Learning V1 implementation guide is retained at
 [`docs/decision-learning/V1_IMPLEMENTATION_GUIDE.md`](docs/decision-learning/V1_IMPLEMENTATION_GUIDE.md).
 The current Phase -1 implementation record is at
 [`docs/phase-minus-1/ARCHITECTURE_STABILISATION.md`](docs/phase-minus-1/ARCHITECTURE_STABILISATION.md);
-later decision-learning phases remain governed by the separately supplied V2
-documentation pack and must not be inferred from the archived V1 guide.
+later decision-learning phases remain governed by the V2 documentation pack —
+the numbered files `00_MASTER_INDEX.md` to `17_IMPLEMENTATION_STATUS.md`, in
+that same [`docs/decision-learning/`](docs/decision-learning/README.md) folder
+since 2026-09-03 and at the repository root before that — and must not be
+inferred from the archived V1 guide.
 
 The full pipeline reference lives under `.claude/skills/` — `stride-full` for the
 system reference and model baselines, `stride-health` for health gates and retrain

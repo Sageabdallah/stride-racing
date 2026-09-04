@@ -14,10 +14,10 @@ Related docs: [ML training & calibration](05-ml-training-and-calibration.md) ·
 
 ## 1. Two parallel pipelines
 
-1. **`build_features.py`** (repo root, 1,000 lines) — a standalone JSON→CSV extractor
-   for backtesting: reads race-result JSON files, emits `features.csv` plus a sanity
-   report with an explicit leakage self-check. Self-contained; not imported by the
-   production path.
+1. `build_features.py` (repo root) was a standalone JSON→CSV extractor for
+   backtesting over the old Racing API result files. It was removed in the 2026-09
+   cleanup because nothing produces its input any more; only the production
+   pipeline below remains.
 2. **`server/python/*`** — the production pipeline. `retrain_v2.py` assembles the
    110-column matrix for training; `run_tips_pipeline.py`/`mc_api.py` assemble the
    same features per runner at inference. `form_feature_builder.py` produces the
@@ -174,8 +174,6 @@ computes them — computed-but-dropped outputs.
   batch training uses per-month as-of caches so aggregates only see data strictly
   before each month boundary.
 - `jockey_momentum`: windows bounded `race_date < ref_date`.
-- `build_features.py`: subtracts the current race from post-race cumulative API
-  stats (`adjust_stats_to_pre_race`) and joins sectionals with `race_date < race`.
 - `target_encoding.py`: leave-one-out encoding with Gaussian noise (σ=0.01),
   smoothing 10.0.
 - `refresh_training_view_v2`: prior-sectionals via temporal LATERAL join.
@@ -196,18 +194,12 @@ missing dates, which is wrong for historical training rows.
 
 ## 5. Supporting infrastructure
 
-- **`feature_store.py`** — two-tier cache (LRU memory, max 10,000 entries + JSON
-  disk, max 1,000 races, TTL 24 h) plus a `FeatureRegistry` documenting ~53 features
-  with their producing module — the best in-code provenance map.
 - **`race_normaliser.py`** — runs before the MC engine: canonicalizes going/names/
   classes, validates the racecard (distance 400–5000 m, field ≥ 2, overround
   0.90–1.60, duplicate barriers/odds), builds the pace map, and emits candidate
   engineered features.
 - **`normalize.py` / `horse_names.py` / `learning_track_map.py`** — name and track
   canonicalization (see [Data & ingestion §5](03-data-and-ingestion.md)).
-- **`learned_sectional_combination.py`** — learns blend weights over the five
-  sectional engines by L-BFGS-B maximum likelihood (L2 λ=0.1), optionally
-  distance-conditional; auxiliary, not part of the 110-column contract.
 - **`speed_ratings.py`** — synthetic par-time speed ratings
   (`100 + (par − time) × 5 + track_adj`, clamped [60, 130]); production role is the
   `speed_rating_trajectory` slope.

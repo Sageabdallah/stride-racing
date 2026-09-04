@@ -13,14 +13,14 @@ Related docs: [Daily pipeline](02-daily-pipeline.md) ·
 
 ## 1. Three generations — what actually feeds production
 
-The layer contains three code lineages computing overlapping concepts. Only two feed
-the live pipeline:
+The layer has had three code lineages computing overlapping concepts. Two feed
+the live pipeline; the third was removed in the 2026-09 cleanup:
 
 | Gen | Code | Output | Live? |
 |---|---|---|---|
 | 1 — Deep engines | `form_franking.py`, `franking_graph.py` | DB table `franking_scores` + in-memory graph | **Yes** (via table + `get_franking_graph()`) |
 | 2 — STRIDE agents | `stride_agent_track.py`, `stride_agent_form.py`, orchestrated by `stride_build.py` | flat JSONs in `server/python/intelligence/` | **Yes** — read by `run_tips_pipeline.load_intelligence_files()` |
-| 3 — `intelligence/` package | `intelligence/build_*.py` | date-suffixed JSONs under `intelligence/output/<date>/` | **No** — parallel rewrite, not wired in |
+| 3 — `intelligence/` package | `intelligence/build_*.py` — **removed 2026-09** (a parallel rewrite that was never wired in); only `intelligence/common.py` remains | — | **No** |
 
 Two similarly-named utility modules mark the boundary: `intelligence_common.py`
 (gen 2) vs `intelligence/common.py` (gen 3).
@@ -78,8 +78,9 @@ Treats results as a network (NetworkX `MultiDiGraph`):
   trainer-transfer edges never fire.
 
 A third, unrelated "franking" exists in `mc_api.calculate_sectional_franking_value`
-(sectional-based, env-gated), and a fourth simple heuristic in the gen-3
-`intelligence/build_form_franking.py` — worth knowing when you grep for "franking".
+(sectional-based, env-gated) — worth knowing when you grep for "franking". (A fourth
+heuristic in the gen-3 `intelligence/build_form_franking.py` was removed in the
+2026-09 cleanup.)
 
 ---
 
@@ -174,20 +175,17 @@ regardless of the edge calculation (`_check_intelligence_override`,
 - **`advanced_race_analysis.py`** — a genuine LLM agent (Groq, 4-phase full-field
   analysis, temperature 0.4) with hard constraint enforcement (one winner, ≤ 3
   places, probabilities renormalized). Standalone; not wired into the daily flow.
-- **`historical_analysis.py`** — one-off print-only reporting script (hardcoded
-  dates/tracks).
 
 ---
 
 ## 6. Quirks
 
-- Three (arguably four) independent "form franking" implementations exist — the
-  ELO engine, the graph engine, the gen-3 heuristic builder, and mc_api's sectional
-  franking. The gen-2 agent is the reconciler that production reads.
-- The gen-3 `intelligence/build_*.py` package has no orchestrator and no live
-  consumers; treat as an in-progress rewrite.
-- `build_trainer_patterns.py` (gen-3) is a stub (`historical_pattern_available:
-  false` always) because trainer names aren't in `race_results_history`.
+- Three independent "form franking" implementations exist — the ELO engine, the
+  graph engine, and mc_api's sectional franking. The gen-2 agent is the reconciler
+  that production reads.
+- The gen-3 `intelligence/build_*.py` builders (eight files, never wired in, one a
+  permanent stub) were removed in the 2026-09 cleanup; `intelligence/common.py`
+  stays because the blender, the agents and the collectors import it.
 - `stride_agent_track.build_class_distance_patterns` used to assign a track name
   to an unused variable called `date_str` — the dead line has been removed.
 - Date windows are all hardcoded: ELO half-life 90d, franking decay 60d, franking

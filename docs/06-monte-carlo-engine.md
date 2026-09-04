@@ -25,8 +25,8 @@ Python pipeline also loads **in-process** via importlib
 (`run_tips_pipeline.run_mc_simulation`, `run_tips_pipeline.py:384`) so model caches
 survive across a full race card.
 
-`adaptive_mc.py` (adaptive sim counts, convergence-stopping) has **no importers** —
-aspirational dead code.
+(`adaptive_mc.py`, an adaptive sim-count sampler that nothing imported, was removed
+in the 2026-09 cleanup.)
 
 ---
 
@@ -220,6 +220,7 @@ leader-bias tables, tight-turn lists, Kelly) with slightly different numbers —
 - Elite-jockey lists exist in two representations (weighted dict in racing_system;
   tactical profiles in realistic_simulate).
 - CI method differs by engine: bootstrap (monte_carlo.py) vs Wilson (everything else).
-- `adaptive_mc.py` and `monte_carlo.py`'s `CalibrationEngine` are unused.
+- `monte_carlo.py`'s `CalibrationEngine` is unused (`adaptive_mc.py`, also unused, was
+  removed in the 2026-09 cleanup).
 - `DEFAULT_CONFIG['race_shock_sigma']` in monte_carlo.py is dead — the race-level
   shared shock was removed ("audit fix #4", lines 639-642) because it inflated CIs.

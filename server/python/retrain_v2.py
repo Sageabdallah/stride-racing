@@ -33,7 +33,10 @@ sys.path.insert(0, SCRIPT_DIR)
 ENV_PATH = os.path.normpath(
     os.path.join(SCRIPT_DIR, os.pardir, os.pardir, ".env")
 )
-EXPLICIT_ENV = r"c:\Users\sagea\OneDrive\Desktop\Race-Analytics\Race-Analytics\.env"
+# A .env outside the repo, for a checkout whose root has none. This used to be
+# a hardcoded path to one dev machine's Windows checkout, which resolved on no
+# other machine — including the Mac it was meant for.
+EXPLICIT_ENV = os.environ.get("STRIDE_ENV_FILE", "")
 
 
 def _load_env(path: str) -> Dict[str, str]:
@@ -53,14 +56,16 @@ def _load_env(path: str) -> Dict[str, str]:
 
 
 _env = _load_env(ENV_PATH)
-if not _env.get("DATABASE_URL"):
+if EXPLICIT_ENV and not _env.get("DATABASE_URL"):
     _env = _load_env(EXPLICIT_ENV)
 
 DATABASE_URL = _env.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
 
 if not DATABASE_URL:
     print(
-        f"ERROR: DATABASE_URL not found. Checked {ENV_PATH} and {EXPLICIT_ENV}.",
+        f"ERROR: DATABASE_URL not found. Checked {ENV_PATH}"
+        f"{' and ' + EXPLICIT_ENV if EXPLICIT_ENV else ''}"
+        " (set STRIDE_ENV_FILE to point at a .env elsewhere).",
         file=sys.stderr,
     )
     sys.exit(1)
