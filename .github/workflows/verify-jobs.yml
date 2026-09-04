@@ -18,6 +18,9 @@ on:
       jobs:
         description: "Comma-separated job names (default: the safe set)"
         default: "calibrator-coverage,bsp-settle,late-odds-watch,weekly-digest,racecard-collect,results-collect,nightly-etl,gap-heal"
+      date:
+        description: "Optional race date (YYYY-MM-DD) the Fargate jobs run for, passed as STRIDE_DATE. Empty = today in Sydney. Lets the chain be run early for a chosen day (racecard-collect, intelligence-build, consensus-agent, tips-proof); never combine with tips-pipeline, which writes the ledger."
+        default: ""
 
 permissions:
   id-token: write
@@ -70,7 +73,11 @@ jobs:
                 panel-proof)     TD=stride-consensus-agent ;;
                 *)               TD="stride-$JOB" ;;
               esac
-              OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}]}]}"
+              DATE_ENV=""
+              if [ -n "${{ inputs.date }}" ]; then
+                DATE_ENV=",{\"name\":\"STRIDE_DATE\",\"value\":\"${{ inputs.date }}\"}"
+              fi
+              OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$DATE_ENV]}]}"
               TASK=$(aws ecs run-task --cluster stride \
                 --task-definition "$TD" --launch-type FARGATE \
                 --overrides "$OVR" \

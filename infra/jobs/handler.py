@@ -60,6 +60,23 @@ def _put_state(job: str, **attrs) -> None:
 
 
 def _today() -> str:
+    """The race date every job keys its work off: the Sydney calendar date,
+    or STRIDE_DATE when an operator sets it on a hand-dispatched task
+    (verify-jobs.yml's `date` input).
+
+    Every artifact in the chain is named by this date (racecard, intelligence,
+    consensus_<date>.json, tips_<date>.json), so overriding it once here runs
+    the whole chain for a chosen day: a Friday preview of Saturday's card, or
+    a rebuild of a day the schedule missed. Never set it on a schedule, and
+    never pair it with the real tips-pipeline job outside its slot: that job
+    writes ledger rows the registered window depends on. tips-proof is the
+    out-of-slot variant, and writes nothing to the database.
+    """
+    forced = os.environ.get("STRIDE_DATE", "").strip()
+    if forced:
+        # Anything that is not a calendar date is a typo, not a request.
+        datetime.strptime(forced, "%Y-%m-%d")
+        return forced
     return datetime.now(SYD).strftime("%Y-%m-%d")
 
 
@@ -915,6 +932,12 @@ def job_tips_proof() -> dict:
     _tips_prepare()
     out = _run_ok("run_tips_pipeline.py", _today(), "--skip-db-store",
                   "--output-suffix", "cloudproof")
+    # No consumer reads the suffixed file, but for a preview run of a chosen
+    # date (STRIDE_DATE) it is the whole point, and the task's filesystem is
+    # gone the moment it stops. Relayed under its own name, so it can never
+    # be mistaken for the real tips_<date>.json the frontend and the Saturday
+    # wrap-up read.
+    _sync_up("racecards", f"tips_{_today()}_cloudproof.json")
     return {"last_success_date": _today(), "detail": out[-400:]}
 
 
@@ -1073,6 +1096,11 @@ def dispatch(event=None, context=None):
     job = os.environ.get("STRIDE_JOB", "").strip()
     if job not in JOBS:
         raise RuntimeError(f"unknown STRIDE_JOB {job!r}; known: {sorted(JOBS)}")
+    if os.environ.get("STRIDE_DATE", "").strip():
+        # Said once, up front, so a log that shows Saturday's card being built
+        # on a Friday afternoon explains itself.
+        print(f"[dispatch] STRIDE_DATE override: running {job} for {_today()} "
+              f"(Sydney today is {datetime.now(SYD).strftime('%Y-%m-%d')})")
     _load_secrets()
     _stage_models()
     _stage_panel()
