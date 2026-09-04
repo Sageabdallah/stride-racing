@@ -29,11 +29,12 @@ server/python with the same environment the pipeline gets.
 """
 
 import argparse
+import json
 import logging
 import sys
 
-from llm_provider import LLMProviderError, get_provider
-from llm_post_scorer import generate_rich_insight
+from llm_provider import LLMProviderError, get_provider, _extract_json
+from llm_post_scorer import generate_rich_insight, score_race_horses
 
 TRACK = "Randwick"
 RACE_NUMBER = 4
@@ -119,6 +120,63 @@ def build_field() -> list:
     ]
 
 
+def prove_scoring(llm, field, max_chars: int) -> bool:
+    """Does the JSON-returning stage work, and if not, is it truncation?
+
+    Insight generation proved prose works. It says nothing about
+    score_race_horses, which is the only stage that asks for structured JSON
+    and the only one that failed on 2026-09-05: 114 of 114 picks carried
+    insight text and 0 of 114 carried an ai_score. That stage is silent when
+    it fails — generate_json returns {} on a parse failure and
+    score_race_horses does `if not result: return horses` with no log line —
+    so nothing distinguishes "scored" from "gave up" at the call site.
+
+    Two measurements, because the interesting failure is invisible from the
+    first alone:
+      1. Run the real score_race_horses on the fixture field and count how
+         many horses came back with an ai_score.
+      2. If none did, ask the same model for the same SHAPE of answer at the
+         production ceiling and at a generous one, and report the raw
+         character count and whether it parses. A response that parses at
+         8000 tokens and not at 2500 is truncation, full stop; one that fails
+         at both is a format problem and needs a different fix.
+    """
+    scored = score_race_horses(
+        horses=list(field[:6]), track=TRACK, race_number=RACE_NUMBER,
+        race_name="Fixture Handicap", distance=DISTANCE, going=GOING,
+        race_class=RACE_CLASS, all_horses=field,
+    )
+    got = sum(1 for h in scored if h.get("ai_score") is not None)
+    print(f"LLM_PROOF scored={got}/{len(field[:6])}")
+    if got:
+        return True
+
+    probe = (
+        "Return a JSON object with a \"horses\" array of 6 elements. Each element: "
+        "\"horse\" (string), \"ai_score\" (integer 0-100), \"analysis\" (4-8 sentences), "
+        "\"key_edge\" (one sentence), \"risk_factors\" (array of strings), "
+        "\"vs_field\" (one sentence). Also top-level \"tip_type\", \"winner\", "
+        "\"selection_ranking\" (array), \"ranking_reasoning\" (one sentence). "
+        "Horses: " + ", ".join(h["horse"] for h in field[:6]) + ". "
+        "Invent plausible racing analysis; this is a capacity probe."
+    )
+    for budget in (2500, 8000):
+        try:
+            raw = llm.generate(probe, system="Return ONLY valid JSON. No preamble.",
+                               max_tokens=budget)
+        except LLMProviderError as e:
+            print(f"LLM_PROOF probe budget={budget} ERROR {e}")
+            continue
+        parsed = _extract_json(raw)
+        n = len(parsed.get("horses", [])) if isinstance(parsed, dict) else 0
+        print(f"LLM_PROOF probe budget={budget} chars={len(raw)} "
+              f"parsed={'yes' if parsed else 'no'} horses={n}")
+        print(f"----- probe tail at {budget} (last 200 chars) -----")
+        print(raw[-200:] if raw else "(empty)")
+        print("-----")
+    return False
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Prove the configured LLM produces insight text before a run depends on it.")
@@ -167,6 +225,16 @@ def main(argv=None) -> int:
         print(f"LLM_PROOF result=FAIL empty insight for {', '.join(empties)} — "
               f"the pipeline would publish blank ai_insight here")
         return 1
+
+    # Prose working proves one of the four LLM stages. Reported separately so a
+    # green insight proof can never again be read as "the LLM is fine".
+    scoring_ok = prove_scoring(llm, field, args.max_chars)
+    if not scoring_ok:
+        print("LLM_PROOF result=FAIL insights generate but score_race_horses "
+              "returns no ai_score — the 30% AI blend into selectionScore is "
+              "silently absent, as it was for all 114 picks on 2026-09-05")
+        return 1
+
     print("LLM_PROOF result=PASS")
     return 0
 
