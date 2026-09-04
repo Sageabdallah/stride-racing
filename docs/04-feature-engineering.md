@@ -14,10 +14,10 @@ Related docs: [ML training & calibration](05-ml-training-and-calibration.md) ·
 
 ## 1. Two parallel pipelines
 
-1. **`build_features.py`** (repo root, 1,000 lines) — a standalone JSON→CSV extractor
-   for backtesting: reads race-result JSON files, emits `features.csv` plus a sanity
-   report with an explicit leakage self-check. Self-contained; not imported by the
-   production path.
+1. `build_features.py` (repo root) was a standalone JSON→CSV extractor for
+   backtesting over the old Racing API result files. It was removed in the 2026-09
+   cleanup because nothing produces its input any more; only the production
+   pipeline below remains.
 2. **`server/python/*`** — the production pipeline. `retrain_v2.py` assembles the
    110-column matrix for training; `run_tips_pipeline.py`/`mc_api.py` assemble the
    same features per runner at inference. `form_feature_builder.py` produces the
@@ -174,8 +174,6 @@ computes them — computed-but-dropped outputs.
   batch training uses per-month as-of caches so aggregates only see data strictly
   before each month boundary.
 - `jockey_momentum`: windows bounded `race_date < ref_date`.
-- `build_features.py`: subtracts the current race from post-race cumulative API
-  stats (`adjust_stats_to_pre_race`) and joins sectionals with `race_date < race`.
 - `target_encoding.py`: leave-one-out encoding with Gaussian noise (σ=0.01),
   smoothing 10.0.
 - `refresh_training_view_v2`: prior-sectionals via temporal LATERAL join.

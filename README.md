@@ -233,10 +233,8 @@ docs/                       The reference documents, deploy runbook, ROI
 migrations/                 PostgreSQL schema
 examples/                   Sample race-day output and the backtest summary
 scripts/                    Provider probes, Betfair key checks, calibration plot
-build_features.py           Feature engineering entry point
 monte_carlo.py              Monte Carlo race simulation
 racing_system_v8.3_mc.py    Standalone racing/simulation system
-download_training_data.py   Training-data assembly (old provider, kept for reference)
 requirements.txt            Python dependencies (pyproject.toml and uv.lock mirror it)
 .env.example                Required environment variables (template)
 server/python/tipster_panel.example.json
@@ -246,7 +244,8 @@ server/python/tipster_panel.example.json
 The numbered files at the root (`00_MASTER_INDEX.md` to
 `17_IMPLEMENTATION_STATUS.md`) are the plan for the decision-learning layer
 and its progress tracker. The other root documents are planning and status
-notes from the ROI programme. `CLAUDE.md` and `AGENTS.md` are the working
+notes from the ROI programme. `CLAUDE.md` and
+[`docs/roi-roadmap/AGENTS.md`](docs/roi-roadmap/AGENTS.md) are the working
 rules for the coding agents that help maintain the repo.
 
 ## Configuration

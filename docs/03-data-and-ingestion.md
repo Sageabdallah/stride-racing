@@ -62,14 +62,15 @@ as lost ground, and the form score's win-margin bonus fires for post-June
 2026 wins only. The winning margin is still recoverable as the runner-up's
 beaten margin, which is how `mc_api` reads it.
 
-Modules belonging to the dead-API era and no longer on any live path:
-`import_historical_to_db.py`, `import_race_results.py`, `import_track_json(_fast).py`,
-`download_training_data.py`. They are retained per the repo's never-delete-a-superseded-
-generation rule (see `docs/analysis/SYSTEM_MAP.md`), not because they still run.
-
-The Playwright "sniffer" scripts (`racing_com_api_discovery.py`, `nsw_api_sniffer.py`,
-`nsw_deep_sniffer.py`) are the reverse-engineering tools that discovered the GraphQL
-and pidata endpoints — dev tooling, not part of production.
+The dead-API-era modules that consumed its output — `import_historical_to_db.py`,
+`import_race_results.py`, `import_track_json(_fast).py`, and the root
+`download_training_data.py` / `build_features.py` — were removed in the 2026-09
+cleanup ([`REPO_CLEANUP_AUDIT.md`](REPO_CLEANUP_AUDIT.md)): with the API dead and
+the Punting Form importers writing straight to the database, nothing produced
+their input any more. The never-delete-a-superseded-generation rule in
+`docs/analysis/SYSTEM_MAP.md` was set aside for modules that could no longer run
+at all. The Playwright "sniffer" scripts that discovered the GraphQL and pidata
+endpoints went in the same pass; the endpoints live in the collectors.
 
 Sectional collection is routed **per state** by `learning_track_map.py` /
 `ingest_target_track_results_and_sectionals.py`: NSW → `nsw_pidata`, QLD →
@@ -91,15 +92,7 @@ the intelligence agents. Requests use a retry session (3 retries, backoff on
 **Bulk history** (one-off/backfill):
 - `download_historical.py` — "ultra-slow mode" urllib downloader with checkpoints,
   ~27 tracks, rate limits (0.8 s/request, 60 s cooldowns on 403/429).
-- `download_training_data.py` (repo root) — comprehensive-field variant (≈ 80 fields
-  per runner: margins, odds, gear, breeding, sectionals, in-running positions) but
-  only 8 tracks. Both write `historical_data/historical_training_data.json` —
-  **they clobber each other**; pick one.
-- Importers (all dead-API era — see §1a; retained, not live): `import_historical_to_db.py` (→ `training_data` +
-  `race_results_history`, append-mode), `import_track_json(_fast).py`
-  (`historical_data/track_imports/*.json` → `training_data`),
-  `import_race_results.py` (**TRUNCATE-and-reload** of `race_results_history` —
-  destructive, the odd one out).
+- The dead-API-era JSON importers were removed in the 2026-09 cleanup (see §1a).
 - Barrier trials: `backfill_barrier_trials.py` (download) →
   `import_barrier_trials_to_db.py` (creates + fills `barrier_trial_results`,
   idempotent on `UNIQUE(horse_id, trial_date, course, race_name)`).
@@ -234,8 +227,6 @@ The repo assumes these exist in Neon — there is no CREATE TABLE for them anywh
 
 ## 7. Quirks worth knowing
 
-- **TLS verification is disabled** (`verify=False` / `CERT_NONE`) in the Racing-API
-  downloaders.
 - Two BM class-level cutoff schemes disagree between importers (88/70/58/50 vs
   85/72/64/58).
 - `fetch_and_import_date.py` and `import_barrier_trials_to_db.py` contain a

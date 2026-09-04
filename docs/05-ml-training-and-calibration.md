@@ -156,7 +156,6 @@ The resulting `mlPredictedProb` is blended with the Monte-Carlo probability in
 | `models/double_calibrator.pkl` | ml_model.train | RacingMLModel.predict_proba |
 | `server/python/calibration_model.json` | mc_recalibration | mc_api |
 | `models/drift_history.json` | feature_drift_monitor | drift reports |
-| `models/registry/` | model_versioning | (unused so far) |
 
 All model artifacts are git-ignored (`.gitignore:39-41,56`) — this published repo
 contains code only.
@@ -172,10 +171,8 @@ contains code only.
   whether the *favourite* wins from 9 features (field size, class tier, wet, odds
   concentration HHI, market confidence…), yielding
   `highly_predictable / normal / chaotic` and a confidence modifier in [0.5, 1.2].
-- **`model_versioning.py`** — a `ModelRegistry` (auto-incrementing `v{major}.{minor}`,
-  one active version) plus a `ShadowTester` that promotes a shadow model only after
-  ≥ 50 races and shadow AUC > primary + 0.02. No `models/registry/` exists yet —
-  written but not adopted.
+- `model_versioning.py` (a never-adopted `ModelRegistry` + `ShadowTester`) was removed
+  in the 2026-09 cleanup; artifact versioning is `release_manifest.py`.
 - **`feature_drift_monitor.py`** — snapshots feature importances after each train;
   computes JS divergence (green < 0.05, amber < 0.15, red ≥ 0.15), Kendall-tau rank
   stability, and red-flags concentration (barrier features > 0.35 of total

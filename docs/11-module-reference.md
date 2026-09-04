@@ -10,14 +10,16 @@ the live daily path. *(dead)* = no callers found / superseded.
 > invoke more. Treat "zero importers" as a prompt to check those two surfaces, not
 > as evidence a module is dead.
 
+> **Removed in the 2026-09 cleanup** (dead-API importers, unwired gen-3 builders,
+> unused libraries, one-off discovery tools): see
+> [`REPO_CLEANUP_AUDIT.md`](REPO_CLEANUP_AUDIT.md) for the list and the evidence.
+
 ## Repo root
 
 | File | Purpose |
 |---|---|
 | **`racing_system_v8.3_mc.py`** | v8.2 17-factor model + production Plackett-Luce MC + Kelly staking + TipGenerator; imported by mc_api and runnable standalone |
 | `monte_carlo.py` | Standalone skew-normal MC engine with exotics/bet-slips (CLI showcase; not imported) |
-| `build_features.py` | Standalone race-JSON → features.csv extractor with leakage self-checks (backtest tooling) |
-| `download_training_data.py` | Comprehensive 365-day historical downloader (8 tracks, ~80 fields/runner) |
 
 ## Orchestrators
 
@@ -45,9 +47,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`fetch_and_import_date.py`** | One date: PF results → `race_results_history` (append) |
 | `backfill_results.py` | Date-range gap backfill, week by week: reuses `fetch_and_import_date` + all three sectional collectors (run via the `backfill-results` Action) — has self-test |
 | `audit_write_smoke.py` | Sentinel-row smoke test of mc_api's `prediction_audit` write path, self-cleaning (run via the `audit-smoke` Action) |
-| `import_historical_to_db.py` *(dead-API era)* | Historical JSON → `training_data` + `race_results_history` with heuristic prior predictions |
-| `import_race_results.py` *(dead-API era)* | **TRUNCATE-and-reload** of `race_results_history` from track imports (destructive — do not run) |
-| `import_track_json.py` / `_fast.py` *(dead-API era)* | Track-import JSON → `training_data` (row-wise / bulk execute_values) |
 | `backfill_barrier_trials.py` → `import_barrier_trials_to_db.py` | Barrier-trial download → `barrier_trial_results` table |
 
 ## Ingestion — results & sectionals
@@ -64,7 +63,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `nsw_xml_collector.py` | Alternative NSW path: free XML results + 600 m sectional |
 | `weekly_sectional_collector.py` | Sunday sweep of all three sectional collectors |
 | `ingest_target_track_results_and_sectionals.py` | One-date fan-out: results + correct per-track sectional source |
-| `racing_com_api_discovery.py`, `nsw_api_sniffer.py`, `nsw_deep_sniffer.py` | Playwright endpoint-discovery dev tools |
 | `sp_health.py`, `results_health_check.py` | Data-quality gates (SP coverage, position sanity) |
 | `weather_api.py` | *(dead)* going-forecast stub, no callers |
 
@@ -119,7 +117,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `stacking_meta_learner.py` | OOF logistic stacking over base predictions (fit-path bug fixed; activates on newly trained v1 artifacts) |
 | `focal_loss.py` | Focal-loss objectives *(implemented, unwired)* |
 | `predictability_meta_model.py` | Race-level "will the favourite win" chaos classifier |
-| `model_versioning.py` | Model registry + shadow A/B promotion rules *(unused so far)* |
 | `feature_drift_monitor.py` | Importance-drift monitoring (JS divergence bands) |
 | `compare_features.py` | Training-vs-inference feature parity audit |
 | `ml_status.py` | CLI: print model status JSON |
@@ -132,7 +129,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 |---|---|
 | **`mc_api.py`** | Production MC orchestrator (7,782 lines): factor model + base MC + sectional overlay + feature adjustments + banker detection; stdin/stdout JSON or in-process |
 | **`realistic_simulate.py`** | Mixture-noise / multi-phase-energy / sectional-profile overlay engine |
-| `adaptive_mc.py` | *(dead)* adaptive sim counts with convergence stopping |
 
 ## Intelligence layer
 
@@ -144,8 +140,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`stride_agent_form.py`** | Agent 2: franking classification, prep cycles, sectional trends, trainer patterns (deterministic) |
 | `intelligence_common.py` | Gen-2 shared utils (DB, racecard parsing) |
 | `intelligence/common.py` | Gen-3 shared utils (bucketing, cohort filters) |
-| `intelligence/build_*.py` (8 files) | Gen-3 parallel rewrite of the builders *(not wired into production)* |
-| `market_overlay_common.py` | SP-based market-overlay map (shared gen-2/gen-3) |
+| `market_overlay_common.py` | SP-based market-overlay map (gen-2) |
 | **`banker_detector.py`** | Dominant-favourite detection (composite score, adaptive thresholds) |
 | **`luckless_analyser.py`** | Excuse detection from stewards' comments → probability uplift |
 | **`track_bias_points.py`** | Static per-track bias configs → points scoring |
@@ -186,7 +181,7 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `format_tips.py` | Console tips renderer |
 | **`validate_tips.py`** | Tips-contract validator (hard gate) |
 | **`backfill_tips_contract.py`** | Re-stamps the selection contract on saved tips files |
-| `backfill_{phase2,zscores,zscores_targeted,rrh_missing_dates,research_sources}.py` | Data repair sweeps (see backtesting doc §6) |
+| `backfill_{phase2,zscores,zscores_targeted,rrh_missing_dates}.py` | Data repair sweeps (see backtesting doc §6) |
 | `research/performance_autopsy_last21days.py` | Losing-tip failure-mode classifier |
 | `research/investigate_sectional_market_going.py` | Sectional-coverage + wet-going diagnostics |
 | `research/winner_pattern_gap/` | Two-agent winner-pattern research pipeline + synthesis |

@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Extends build_features.py keyword lists with AUS stewards-specific terms.
+# Trouble-keyword rules (extended from the lists in the retired build_features.py
+# extractor) with AUS stewards-specific terms.
 
 _INCIDENT_RULES: List[Tuple[str, str, str, int]] = [
     ("blocked for a run", "BLOCKED_RUN", "traffic", 3),

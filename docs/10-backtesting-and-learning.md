@@ -141,7 +141,6 @@ plus the convergence stake recommendation (FULL/STANDARD/REDUCED/NONE) — see
 | `backfill_phase2.py` | Full recompute of all Phase-2 columns + daily variants per (track, date) — idempotent |
 | `backfill_zscores.py` / `_targeted.py` | Sectional z-scores (full sweep / NULL-only) |
 | `backfill_rrh_missing_dates.py` | Calendar dates with zero `race_results_history` rows → re-fetch |
-| `backfill_research_sources.py` | Rebuilds the research corpus (track JSON imports, Betfair mapping, training view refresh) |
 | `backfill_tips_contract.py` | Re-stamps the selection contract (`bet_pick`/`coverage_pick`/`should_bet`…) into saved tips files when the contract format evolves — uses the live functions imported from `run_tips_pipeline` so the logic can't drift |
 
 ---
@@ -165,3 +164,15 @@ From `examples/backtest_summary.json` (352 metro races, 3,396 runners,
 Caveats the docs should keep honest: SP-only settlement (no exchange commission or
 better-than-SP execution modelled), win-only staking, and `backtest.py`'s missing
 purge gap (use `walk_forward_backtest.py` when rigour matters).
+
+Standing evaluation-hygiene rules recorded by the 2026-08-01 retrain-gate audit
+(carried here from the retired merge-execution plan):
+
+- `backtest.py walk_forward_backtest` has a ZERO purge gap (vs 14 d in the
+  production trainer) — its numbers are never quotable as evidence.
+- Franking/Elo are as-of-now by design: never replay the `mc_api` scoring path
+  over historical dates; retrospective `mc_api` numbers are inflated.
+- Betfair snapshot capture stays on `baseline`/`morning` kinds until a pre-jump
+  market-status guard exists; the Punting Form Phase E accessors (strike rates,
+  ratings, speedmaps) have no as-of parameter and are serve-time only — never
+  inputs to historical feature building.
