@@ -31,7 +31,7 @@ on:
         description: "Optional LLM provider for THIS dispatch (groq | anthropic | ollama), set on the task as LLM_PROVIDER with LLM_ENABLED=true. The task environment wins over the stride/prod secret, so this changes one run and never the schedule. Empty = whatever the secret says."
         default: ""
       wait_minutes:
-        description: "Minutes to wait for each Fargate task before reading its exit code (1-300, default 20). consensus-agent and tips-proof on a Saturday card need 150-240. A task still running when the wait ends is reported FAILED here but keeps running."
+        description: "Minutes to wait for each Fargate task before reading its exit code (1-55, default 20). HARD CEILING 55: the OIDC role session lasts one hour, after which every AWS call in this job fails and the task can no longer be observed from here. A job that runs longer is dispatched and reported STILL RUNNING with its task ARN — it keeps running on ECS and must be tracked by its artifact, not by this workflow."
         default: "20"
 
 permissions:
@@ -81,7 +81,17 @@ jobs:
           # leading zero as octal, so a padded 030 silently waited 24 minutes.
           WAIT=$((10#$WAIT))
           if [ "$WAIT" -lt 1 ]; then WAIT=1; fi
-          if [ "$WAIT" -gt 300 ]; then WAIT=300; fi
+          # 55, not 300. The OIDC role session assumed above lasts ONE HOUR.
+          # On 2026-09-04 a consensus run was given wait_minutes=150; at exactly
+          # 60 minutes describe-tasks began returning ExpiredTokenException and
+          # the step died with exit 254, reporting a red run for a Fargate task
+          # that was still healthily running and untouched. Waiting longer than
+          # the credentials live cannot work: past this point the workflow can
+          # no longer observe anything, so it must say so rather than spin.
+          if [ "$WAIT" -gt 55 ]; then
+            echo "::warning::wait_minutes=$WAIT exceeds the 55m OIDC session ceiling; clamping to 55. Longer jobs are dispatched and tracked by their artifact."
+            WAIT=55
+          fi
           echo "waiting up to ${WAIT}m per Fargate task"
           # The header lists four jobs excluded by design; for the two that
           # write dated rows that is a rule the workflow must enforce, not a
@@ -153,11 +163,29 @@ jobs:
                 ST=""
               else
                 ST=""
+                BLIND=0
                 for i in $(seq 1 $((WAIT * 3))); do
                   sleep 20
+                  # 2>&1 not 2>/dev/null: the reason the call failed is the
+                  # whole diagnosis, and discarding it is what made an expired
+                  # token look like a task problem for an hour.
                   ST=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
-                    --query 'tasks[0].lastStatus' --output text 2>/dev/null || echo "UNKNOWN")
-                  [ "$ST" = "STOPPED" ] && break
+                    --query 'tasks[0].lastStatus' --output text 2>&1 || echo "CALL_FAILED")
+                  case "$ST" in
+                    STOPPED) break ;;
+                    *ExpiredToken*|*CALL_FAILED*|*error*|*Error*)
+                      BLIND=$((BLIND + 1))
+                      # Three consecutive failures is a dead credential, not a
+                      # blip. Keeping the loop alive past that only burns time
+                      # we cannot see through.
+                      if [ "$BLIND" -ge 3 ]; then
+                        echo "::warning::$JOB: cannot observe the task any more (last AWS response: $ST). The task is UNAFFECTED and still running."
+                        ST="UNOBSERVABLE"
+                        break
+                      fi
+                      ;;
+                    *) BLIND=0 ;;
+                  esac
                 done
                 EXIT=$(aws ecs describe-tasks --cluster stride --tasks "$TASK" \
                   --query 'tasks[0].containers[0].exitCode' --output text 2>/dev/null || echo None)
@@ -168,7 +196,10 @@ jobs:
                 # "the job failed", and reporting both as FAILED invited exactly
                 # the wrong response: a re-dispatch that puts a SECOND writer on
                 # the same date while the first is still going. Reported apart.
-                if [ "$ST" != "STOPPED" ]; then
+                if [ "$ST" = "UNOBSERVABLE" ]; then
+                  echo "::warning::$JOB: credentials expired before the task finished. Task $TASK is still running on ECS; this workflow simply lost the ability to watch it. NOT a failure, and re-dispatching would start a SECOND writer for the same date."
+                  OK=2
+                elif [ "$ST" != "STOPPED" ]; then
                   echo "::warning::$JOB still RUNNING after ${WAIT}m — not a failure. Task $TASK is still going; do NOT re-dispatch. Track its output artifact instead."
                   OK=2
                 elif [ "$EXIT" != "0" ]; then

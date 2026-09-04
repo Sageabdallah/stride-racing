@@ -298,6 +298,34 @@ def test_wait_minutes_is_normalised_to_base_ten():
     assert "10#" in body, "a padded 030 is octal inside $(( )) and waits 24m, not 30m"
 
 
+def test_the_wait_cannot_outlive_the_credentials_that_do_the_watching():
+    """The OIDC role session lasts one hour.
+
+    On 2026-09-04 a consensus run was given wait_minutes=150. At exactly 60
+    minutes describe-tasks returned ExpiredTokenException, the step died with
+    exit 254, and a red run was reported for a Fargate task that was still
+    running and completely unaffected. Waiting longer than the credentials live
+    is not a longer wait, it is a blind one.
+    """
+    body, _ = _verify_jobs_run_block()
+    assert "WAIT=55" in body, "the wait must be clamped under the 1h session"
+    assert "-gt 300" not in body, "the old 300m ceiling outlived the credentials by four hours"
+
+
+def test_losing_the_credentials_is_reported_as_unobservable_not_failed():
+    """The distinction that matters operationally: a task we can no longer
+    watch is still running, and re-dispatching it would start a second writer
+    on the same date."""
+    body, _ = _verify_jobs_run_block()
+    assert "UNOBSERVABLE" in body
+    assert "ExpiredToken" in body, "the expiry must be detected, not inferred from silence"
+    assert "still running on ECS" in body
+    assert "SECOND writer" in body, "the operator must be told not to re-dispatch"
+    # The reason a call failed is the whole diagnosis; discarding it to
+    # /dev/null is what made an expired token look like a task problem.
+    assert "2>&1 || echo \"CALL_FAILED\"" in body
+
+
 def test_a_still_running_task_is_reported_apart_from_a_failure():
     """Reporting both as FAILED invited a re-dispatch that would put a second
     writer on the same date while the first was still going."""
