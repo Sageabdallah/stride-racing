@@ -175,8 +175,6 @@ regardless of the edge calculation (`_check_intelligence_override`,
 - **`advanced_race_analysis.py`** — a genuine LLM agent (Groq, 4-phase full-field
   analysis, temperature 0.4) with hard constraint enforcement (one winner, ≤ 3
   places, probabilities renormalized). Standalone; not wired into the daily flow.
-- **`historical_analysis.py`** — one-off print-only reporting script (hardcoded
-  dates/tracks).
 
 ---
 

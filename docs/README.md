@@ -51,8 +51,10 @@ data — see the main README). Verification performed while writing these docs
 (2026-07-12, Python 3.11.15):
 
 - `python -m compileall` — **all ~150 modules compile cleanly**.
-- There is **no test suite** in the repo (no pytest/unittest files). Two modules
-  carry executable self-tests, both pass:
+- The pytest suite (`python -m pytest server/python`) passes: 864 tests as of
+  2026-09-03, run by the `ci` workflow on every push. *(At the time these docs
+  were written there was no test suite; it was added in August 2026.)* Modules
+  also carry executable self-tests, run by the same workflow:
   - `python server/python/glicko2_elo.py` — Glicko-2 demo: ratings update across
     surfaces, persist and reload.
   - `python server/python/temporal_staleness.py` — staleness feature suite: "All

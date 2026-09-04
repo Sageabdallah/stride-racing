@@ -141,7 +141,7 @@ the human-readable insights that ship with each tip.
 run on race day            supporting
 ─────────────────          ─────────────────
 server/python/
-  run_full_pipeline.py     retrain_v2.py, train_ml*.py       (training)
+  run_full_pipeline.py     retrain_v2.py, train_ml_enhanced.py  (training)
   download_racecards.py    backtest*.py, walk_forward_*.py   (evaluation)
   run_tips_pipeline.py     backfill_*.py                     (repair)
   mc_api.py                research/                         (diagnostics)

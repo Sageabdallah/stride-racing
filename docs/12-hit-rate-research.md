@@ -442,9 +442,10 @@ Ordered by expected hit-rate return per unit of risk:
 6. **Close the tipster-accuracy feedback loop** — **done, see §4c** (opt-in
    via `STRIDE_ACCURACY_WEIGHTS`). Remaining: after a month of panel history,
    compare consensus-pillar hit rate with the flag on vs off.
-7. **Finish `weather_api.py`** — going misclassification is a documented
-   failure category in the 21-day autopsy; the stub already defines the
-   uncertainty-widening interface.
+7. **Add going forecasting** — going misclassification is a documented failure
+   category in the 21-day autopsy. The `weather_api.py` stub that sketched an
+   uncertainty-widening interface but returned static values was removed in the
+   2026-09 cleanup; a real version needs a BOM or commercial feed.
 
 ## 6. Validation protocol
 

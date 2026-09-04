@@ -20,7 +20,6 @@ Related docs: [Architecture](01-architecture.md) · [Daily pipeline](02-daily-pi
 | **racing.com GraphQL** | `https://graphql.rmdprod.racing.com/` | `x-api-key` (`RACING_COM_API_KEY`) + referer header | VIC/SA sectionals (per-split times) | `racing_com_sectionals_collector` |
 | **Racing NSW pidata** | `pidata.racingnsw.com.au/RNSW/RacesLogsMetadata.json` + `.tol` files | none | NSW GPS sectionals (200 m intervals) | `nsw_sectional_collector` |
 | **Racing NSW XML** | `racing.racingnsw.com.au/FreeFields/…XML.aspx` | none | NSW results + a single 600 m sectional | `nsw_xml_collector` (alternative path) |
-| Weather | — | — | **stub only** — `weather_api.py` returns static fallback and has no callers | — |
 
 ### 1a. The Racing API migration (2026-08)
 
@@ -234,7 +233,6 @@ The repo assumes these exist in Neon — there is no CREATE TABLE for them anywh
 - `auto_results_collector --daemon` previously ignored `--check-interval` and
   hardcoded 5 minutes; it now honours a positive `--check-interval` and defaults
   to 5.
-- `weather_api.py` is an unwired stub (confidence 0.0, `source: 'stub'`).
 - `betfair_odds_snapshots` holds Racing-API prices in Phase 1; genuine Betfair data
   enters only via `build_betfair_mapping.py` (historical stream ETL for research
   labels).

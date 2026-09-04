@@ -5,6 +5,8 @@ are demonstrably out of date and modules that nothing can reach. This file
 replaces the 2026-03-20 audit of the same name, which described a repository
 shape (`client/`, `server/*.ts`, `shared/`, `knip`) that no longer exists here.
 
+**48 files removed** (18 Markdown, 29 Python, 1 JSON), each verified below.
+
 ## Method
 
 Every file was tested against the repository as it stands, not judged by its
@@ -23,82 +25,125 @@ name or age:
 
 Two surfaces are outside this repository and could not be checked: the
 untracked Express/TypeScript server and the gitignored `.claude/skills/`
-runbooks, both of which invoke Python modules by filename. Nothing below was
-removed on the strength of "no caller" alone if either surface could
-plausibly still call it; those modules sit in the second table instead.
+runbooks, both of which invoke Python modules by filename. Where a document
+states that one of those surfaces calls a module, the module was kept — see
+§2.
 
-## 1. Removed in this pass (34 files)
+## 1. Removed
 
-### Markdown (13)
+### Stale planning and status documents (11)
 
 | File | Why | Evidence |
 |---|---|---|
 | `AGENTS.md` (root) | Duplicate | Byte-identical to `docs/roi-roadmap/AGENTS.md`. Its relative references (`README.md` as the wave index, `00-evidence-base.md`, `NN-*.md`) only resolve inside `docs/roi-roadmap/`. README now links the surviving copy. |
-| `ACTION_THIS.md` | Finished checklist (2026-07-31) | Self-hosted runner is now used by six workflows; the "racing.com vs Punting Form" decision it defers is settled in `PUNTINGFORM_MIGRATION.md`; Betfair verification it asks for is recorded in `scripts/BETFAIR_KEYS_STATUS.md`. The one open item (Mac session) is already tracked in `PUNTINGFORM_MIGRATION.md`'s [U] list. |
-| `attentionsage.md` | Finished checklist | Asks to merge PRs #1–#10: all are merged (`git log`; #4 landed as `58057c6`). The deploy session it schedules happened 2026-08-02 (ledger live per the `docs/roi-roadmap/README.md` tracker; day zero in `docs/project_retrain_gate.md`). |
-| `PROGRAM_STATUS.md` | Stale status (2026-07-29) | Opens with "Nothing has merged yet. Main = `58b75fc`"; PRs #1–#20 merged 2026-08-01/02. Its board is superseded by the roadmap tracker and `docs/project_retrain_gate.md`. |
+| `ACTION_THIS.md` | Finished checklist (2026-07-31) | Self-hosted runner is now used by six workflows; the "racing.com vs Punting Form" decision it defers is settled in `PUNTINGFORM_MIGRATION.md`; the Betfair verification it asks for is recorded in `scripts/BETFAIR_KEYS_STATUS.md`. Its one open item is already tracked in `PUNTINGFORM_MIGRATION.md`'s [U] list. |
+| `attentionsage.md` | Finished checklist | Asks to merge PRs #1–#10: all merged (`git log`; #4 landed as `58057c6`). The deploy session it schedules happened 2026-08-02 (day zero in `docs/project_retrain_gate.md`). |
+| `PROGRAM_STATUS.md` | Stale status (2026-07-29) | Opens with "Nothing has merged yet. Main = `58b75fc`"; PRs #1–#20 merged 2026-08-01/02. Superseded by the roadmap tracker and `docs/project_retrain_gate.md`. |
 | `MERGE_EXECUTION_PLAN.md` | Executed plan (2026-07-29) | Merge order for the same PRs, all merged. Its three durable "standing rules" (§4b) were carried into `docs/10-backtesting-and-learning.md`; its leak invariants are `docs/roi-roadmap/AGENTS.md` rules 5–7. Unreferenced. |
-| `OUTSTANDING_WORK.md` | Stale snapshot (2026-07-27) | §0.1 ("has the pipeline ever run?") is answered by the AWS chain running since 2026-08-02 (`infra/EXECUTION_STATUS.md`); §0.2's three branches no longer exist on `origin`; §4's flag table is wrong (`STRIDE_INTERACTION_PARITY` defaults ON, `.env.example`). Open research questions live in `docs/analysis/IMPLEMENTATION_PLAN.md`, `docs/analysis/RESULTS.md` and `docs/12`. Unreferenced. |
-| `docs/REPO_CLEANUP_AUDIT.md` (2026-03 version) | Obsolete | Audits `client/`, `server/*.ts`, `shared/`, `attached_assets/`, `knip` output; none exist in this repository. Replaced by this file. |
-| `docs/design_guidelines.md` | Wrong repo | UI design spec (nav bar, hero image, Tailwind spacing) for the frontend, which is gitignored. Only referrer was the old audit. |
-| `docs/research/proof/` (5 files) | Superseded run | Pre-backfill research output: synthesis reads "No strong cross-agent overlap", "Sample size: 0". `proof_after_backfill/` is the same pipeline re-run on complete data (sample 81) and is the run `IMPLEMENTATION.md` implements. `agent1_findings.md` was byte-identical between the two. No path references. |
+| `OUTSTANDING_WORK.md` | Stale snapshot (2026-07-27) | §0.1 ("has the pipeline ever run?") is answered by the AWS chain running since 2026-08-02 (`infra/EXECUTION_STATUS.md`); §0.2's three branches no longer exist on `origin`; §4's flag table is wrong (`STRIDE_INTERACTION_PARITY` defaults ON, `.env.example`). |
+| `HUMAN_INTERACTION.md` | Stale narrative (2026-07) | Its three "only a human can do" actions: the ledger migration was applied 2026-08-02, the `selection-diagnostics` workflow exists and runs, the conditional-logit refit has a released result quoted in `docs/12`. Its headline claim ("the system has never been measured") predates the accrual window. |
+| `ROADMAP_REVIEW.md` | Stale review (2026-07-27) | An external review of the roadmap pack, explicitly "verified against the repository at the current commit" — 8 of its 14 tasks have since been executed and the Punting Form migration has moved the code it cites. Its two "modify" verdicts were actioned when those tasks shipped. Unreferenced. |
+| `agent_research.md`, `orchestrator_instuctions.md` | Executed prompts | One-shot agent briefs for the two research phases. Their output is `docs/analysis/` (SYSTEM_MAP, ACADEMIC_FINDINGS, IMPROVEMENT_REPORT, IMPLEMENTATION_PLAN) plus RESULTS.md; SYSTEM_MAP §5a restates the guardrails inline. The two live citations (RESULTS.md header, `ship_criteria.py` docstring) now stand alone. |
+| `docs/REPO_CLEANUP_AUDIT.md` (2026-03) | Obsolete | Audited `client/`, `server/*.ts`, `shared/`, `attached_assets/`, `knip` output; none exist here. Replaced by this file. |
 
-### Python (21)
+### Documents for code that is not in this repository (2)
 
 | File | Why | Evidence |
 |---|---|---|
-| `download_training_data.py` (root) | Dead provider | Hard-codes `api.theracingapi.com` and exits at import without `RACING_API_USERNAME`. The Racing API ceased Australian coverage 2026-07 (credentials return 401). The Punting Form successor is `server/python/download_historical.py`. |
-| `build_features.py` (root) | No input left | Reads the historical JSON (`course`/`draw`/`sp`/`runners` shape) that only `download_training_data.py` produced. README's "feature engineering entry point" label was wrong: live feature engineering is `form_feature_builder.py`, `serve_features.py`, `retrain_v2.py`. |
-| `import_historical_to_db.py` | Dead-API era | `--input historical_data/historical_training_data.json`, "from download_training_data.py". |
-| `import_track_json.py`, `import_track_json_fast.py` | Dead-API era | Consume `historical_data/track_imports/*.json` in "Racing API JSON format". |
-| `import_race_results.py` | Dead-API era, destructive | `TRUNCATE TABLE race_results_history` then reload from the same dead-era files. Module reference already said "do not run". |
-| `backfill_research_sources.py` | One-off, half dead | Rebuilds the winner-pattern research corpus; step 1 shells out to `import_track_json_fast.py`. That research is complete (`docs/research/proof_after_backfill/IMPLEMENTATION.md`); the other steps are plain CLIs (`build_betfair_mapping.py`, `refresh_training_view_v2.py`). |
-| `adaptive_mc.py` | Never used | Zero importers; `docs/06` "unused", `docs/11` "(dead)", SYSTEM_MAP "dead". |
-| `model_versioning.py` | Never adopted | Zero importers; `docs/05` "written but not adopted". Its role is filled by `release_manifest.py`, which `handler.py` and `run_tips_pipeline.py` import. |
-| `racing_com_api_discovery.py` | One-off dev tool | Hard-coded Replit `/nix/store/...chromium` path and February-2026 sample URLs. The GraphQL endpoint it found lives in `racing_com_sectionals_collector.py`. |
-| `nsw_api_sniffer.py`, `nsw_deep_sniffer.py` | One-off dev tools | Endpoint discovery for pidata, now encoded in `nsw_sectional_collector.py`. `nsw_api_sniffer.py` runs `pip install playwright` at import. Zero callers. |
-| `betfair_smoke_test.py` | Superseded | Cert login → `listEventTypes`. Covered by `scripts/betfair_cert_check.py` (cert login) and `scripts/betfair_keys_smoke.py` (workflow-wired). Not referenced anywhere. |
-| `intelligence/build_*.py` (8 files) | Never wired | Gen-3 parallel rewrite of the builders. Zero importers, subprocess or workflow references; `stride_build.py` runs the gen-2 agents; `docs/07` "not wired in"; `build_trainer_patterns.py` was a permanent stub. Their output directory is read by nothing. `intelligence/common.py` stays (18 importers). |
+| `docs/design_guidelines.md` | Wrong repo | UI design spec (nav bar, hero image, Tailwind spacing) for the frontend, which is gitignored. Only referrer was the old audit. |
+| `docs/ADVANCED_RACE_ANALYSIS.md` | Mostly absent code | Documents API routes, a React hook and component, and a Drizzle schema in the excluded TS server; 4 of the 6 files in its own "Files Added/Modified" table, and the `examples/sample_4phase_analysis.json` it points at, do not exist here. The engine it describes stays and is summarised in `docs/07` §5. Unreferenced. |
+
+### Superseded research output (5)
+
+`docs/research/proof/` — the pre-backfill run of the winner-pattern pipeline.
+Its synthesis reads "No strong cross-agent overlap", "Sample size: 0".
+`proof_after_backfill/` is the same pipeline re-run on complete data (sample
+81) and is the run `IMPLEMENTATION.md` implements. `agent1_findings.md` was
+byte-identical between the two. No code path references either directory.
+
+### The Racing API era (7)
+
+The provider ceased Australian coverage in July 2026 and its credentials
+return 401. These consumed its output and nothing produces their input now.
+
+| File | Evidence |
+|---|---|
+| `download_training_data.py` | Hard-codes `api.theracingapi.com`; exits at import without `RACING_API_USERNAME`. The Punting Form successor is `server/python/download_historical.py`. |
+| `build_features.py` | Reads the historical JSON (`course`/`draw`/`sp`/`runners` shape) that only `download_training_data.py` produced. README's "feature engineering entry point" label was wrong: live feature engineering is `form_feature_builder.py`, `serve_features.py`, `retrain_v2.py`. |
+| `import_historical_to_db.py` | `--input historical_data/historical_training_data.json`, "from download_training_data.py". |
+| `import_track_json.py`, `import_track_json_fast.py` | Consume `historical_data/track_imports/*.json` in "Racing API JSON format". |
+| `import_race_results.py` | `TRUNCATE TABLE race_results_history` then reload from the same dead-era files. The module reference already said "do not run". |
+| `backfill_research_sources.py` | One-off corpus rebuild whose first step shells out to `import_track_json_fast.py`. That research is finished (`docs/research/proof_after_backfill/IMPLEMENTATION.md`); its other two steps are plain CLIs. |
+
+### Written but never wired (13)
+
+Zero importers, zero subprocess callers, zero workflow or infra references.
+
+| File | Evidence |
+|---|---|
+| `adaptive_mc.py` | `docs/06` "unused", `docs/11` "(dead)", SYSTEM_MAP "dead". |
+| `model_versioning.py` | `docs/05` "written but not adopted"; no `models/registry/` exists. Artifact versioning is `release_manifest.py`, which `handler.py` and `run_tips_pipeline.py` import. |
+| `feature_store.py` | 572 lines of cache and registry that nothing calls, so the cache never fills. Feature provenance is covered with better evidence by `docs/research/FEATURE_PROVENANCE.md` and `feature_liveness_audit.py`, which audit all 113 columns against the trained artifact. |
+| `learned_sectional_combination.py` | Learns blend weights for the five sectional engines; nothing consumes the weights. `docs/04` called it "auxiliary, not part of the 110-column contract". |
+| `market_efficiency.py` | Standing prohibition 7 (`docs/analysis/IMPLEMENTATION_PLAN.md` §5) forbids wiring it, and nothing does. Removal retires the prohibition rather than breaking it. The `market_efficiency_value`/`_flag` features in `serve_features.py` are unrelated and stay. |
+| `train_ml.py` | The v1 trainer CLI, superseded twice (`train_ml_enhanced.py` → `retrain_v2.py`); reads the legacy `training_data` table, and `retrain-model.yml` runs `retrain_v2.py`. `ml_model.RacingMLModel` (which it wrapped) stays: the backtest harness trains one per fold. |
+| `intelligence/build_*.py` (8 files) | The gen-3 parallel rewrite of the builders. `stride_build.py` runs the gen-2 agents; `docs/07` "not wired in"; `build_trainer_patterns.py` was a permanent stub (`historical_pattern_available: false` always). Nothing reads their output directory. `intelligence/common.py` stays — 18 modules import it. |
+
+### One-off tools whose job is done (6)
+
+| File | Evidence |
+|---|---|
+| `racing_com_api_discovery.py` | Hard-coded Replit `/nix/store/…chromium` path and February-2026 sample URLs. The GraphQL endpoint it found lives in `racing_com_sectionals_collector.py`. |
+| `nsw_api_sniffer.py`, `nsw_deep_sniffer.py` | Endpoint discovery for pidata, now encoded in `nsw_sectional_collector.py`. `nsw_api_sniffer.py` runs `pip install playwright` at import. |
+| `betfair_smoke_test.py` | Cert login → `listEventTypes`, superseded by `scripts/betfair_cert_check.py` (cert login) and `scripts/betfair_keys_smoke.py` (workflow-wired). |
+| `historical_analysis.py` | Self-described one-off with hardcoded "last 3 months" queries, no CLI arguments and **no `__main__` guard** — importing it opens a database connection and prints a report. |
+| `validate_trial_linkage.py` | One-time audit of how many barrier-trial runners join to race records. Absent from the module reference; the maintained PF-era identity audit is `pf_trust_checks.py`. |
+
+### Superseded by a better version of itself (1)
+
+`validate_panel.py` — a plain `requests.get` reachability check over the
+tipster panel. `panel_liveness.py` (2026-08-06) does the same job with the
+ALIVE/FLAKY/DEAD distinction that a bare pass/fail cannot express, is wired
+into `infra/09c_upload_panel.sh`, and has a test.
+
+### Stale duplicate artifact (1)
+
+Root `pf_fork_remap.json` — the 2026-08-01 run of the horse-ID fork audit.
+`server/python/pf_fork_remap.json` is the 2026-08-02 run of the same audit and
+is the one with the `post_apply` block; `pf_fork_repair.py` writes it there.
 
 ### Edits made so nothing dangles
 
-`README.md` (layout table, agent-rules link), `docs/01`, `docs/03`, `docs/05`,
-`docs/06`, `docs/07`, `docs/10` (plus the three standing rules from the
-retired merge plan), `docs/11`, `PUNTINGFORM_MIGRATION.md`, and one comment
-in `server/python/luckless_analyser.py`. Dated research and audit documents
-(`docs/analysis/*`, `docs/roi-roadmap/00-evidence-base.md`,
-`docs/research/*`, `research/report.md`) still name some removed files; they
-describe the state at their own date and were left alone.
+`README.md`, `docs/01`, `03`, `04`, `05`, `06`, `07`, `08`, `10`, `11`, `12`,
+`docs/README.md`, `docs/analysis/RESULTS.md`, `PUNTINGFORM_MIGRATION.md`, and
+comments or docstrings in `luckless_analyser.py`, `ship_criteria.py`,
+`fit_calibrator.py` and `target_tracks.py`. The three standing
+evaluation-hygiene rules from the retired merge plan now live in `docs/10`.
+Dated research and audit documents (`docs/analysis/*`,
+`docs/roi-roadmap/00-evidence-base.md`, `docs/research/*`,
+`research/report.md`) still name some removed files; they describe the state
+at their own date and were left alone.
 
-## 2. Recommended for removal, not removed — owner's call
+## 2. Kept, and why
 
-Each of these is unreachable from anything in this repository, but either a
-documented rule protects it, a private surface might still call it, or it
-carries content worth relocating first.
+Unreachable from this repository, but removing them would be a guess rather
+than a cleanup.
 
-| File | Finding | What stops the deletion |
-|---|---|---|
-| `HUMAN_INTERACTION.md` | 2026-07 narrative; two of its three "only a human can do" actions are done (ledger migration applied 2026-08-02; `selection-diagnostics` workflow exists). | Only referrer was `OUTSTANDING_WORK.md` (removed). Keep if the plain-language explanation is still wanted. |
-| `ROADMAP_REVIEW.md` | 2026-07-27 review of the roadmap pack; 8 of the 14 tasks have since been executed. Unreferenced. | Review verdicts for the six open tasks (08, 10–14) are still readable. |
-| `agent_research.md`, `orchestrator_instuctions.md` | The prompts that produced `docs/analysis/*`; the research phase is complete. | `docs/analysis/RESULTS.md` cites the protocol in `orchestrator_instuctions.md`. Better moved under `docs/analysis/` than deleted. |
-| `docs/ADVANCED_RACE_ANALYSIS.md` + `advanced_race_analysis.py` | The doc describes API routes, a React component and a Drizzle schema in the excluded TS server; 4 of the 6 files it lists and `examples/sample_4phase_analysis.json` do not exist here. The module has zero importers. | The module may still be called by the local Express server. |
-| `monte_carlo.py` (root) | Standalone MC engine, not imported by anything; the production engine is `racing_system_v8.3_mc.py` via `mc_api.py`. `docs/06` calls part of it unused. | README and `docs/README.md` present it as a runnable showcase. |
-| `weather_api.py` | Unwired stub returning static values (`docs/03`, `docs/11`). | `docs/12` roadmap item 7 says "Finish `weather_api.py`". |
-| `train_ml.py` | v1 trainer, zero importers, superseded twice (`train_ml_enhanced.py` → `retrain_v2.py`). | SYSTEM_MAP's "never delete a superseded generation" rule names this chain. |
-| `feature_store.py` | Zero importers. | `docs/04` values its `FeatureRegistry` as a provenance map. |
-| `learned_sectional_combination.py` | Zero importers; "auxiliary" per `docs/04`. | Research tool. |
-| `market_efficiency.py` | Zero importers. | Standing prohibition #7 (`docs/analysis/IMPLEMENTATION_PLAN.md` §5) says "no wiring"; deleting it retires the prohibition rather than breaking it. |
-| `nsw_xml_collector.py` | "Alternative NSW path", zero callers. | Could serve as a fallback source. |
-| `providers/theracingapi.py` | Dead provider, kept selectable in the registry. | `providers/test_contract.py` subclasses it as the fake-transport base; removal needs that test rewritten around `PuntingFormProvider`. |
-| `historical_analysis.py` | Self-described one-off; runs queries at import. | May be the "performance" step of the private `/stride-full` runbook. |
-| `weekly_sectional_collector.py` | Subprocess wrapper over the three collectors; `sectional-schedules.yml` and `handler.py` `job_nightly_etl` call them directly. | Only known caller was the untracked TS scheduler; a private runbook might still use it. |
-| `validate_panel.py` | Reachability check superseded by `panel_liveness.py` (2026-08-06, wired into `infra/09c_upload_panel.sh`). | Same. |
-| `ml_status.py`, `format_tips.py` | Tiny CLIs whose only callers were in the untracked Express server. | Same. |
-| `validate_trial_linkage.py` | Read-only audit CLI, no callers, absent from the module reference. | Same. |
-| `docs/decision-learning/V1_IMPLEMENTATION_GUIDE.md` | Superseded guide; states a FastAPI/EventBridge stack that `02_ARCHITECTURE_AND_CONTRACTS.md` corrects. | `CLAUDE.md` says it is retained deliberately. |
-| Root `00_…17_*.md` | Current decision-learning plan (README says so; `02` updated 2026-08-13). | Keep; they would read better under `docs/decision-learning/`. |
+| File | Why it stays |
+|---|---|
+| `weekly_sectional_collector.py`, `ml_status.py`, `format_tips.py`, `advanced_race_analysis.py` | `docs/03` states the untracked TypeScript scheduler drives the weekly sweep, and `docs/11`'s scope caveat records that `server/routes.ts` and `server/scheduler.ts` invoke a dozen Python modules by filename. These four are exactly that shape — a status CLI, a renderer, a Sunday sweep, an LLM analyst behind an API route. Deleting them could break the owner's local app, and nothing here can prove otherwise. |
+| `nsw_xml_collector.py` | An alternative ingestion path for a live source (free Racing NSW XML: results plus a 600 m sectional). It is the one deletion that could cost data later, and this system's failure history is data going quietly missing. Unwired, but a real second source. |
+| `monte_carlo.py` | Standalone, runnable, and advertised as such by README and `docs/README.md`, which record it running end to end. In a repository published for review, that is the point. |
+| `providers/theracingapi.py` | Dead as a provider, but `providers/test_contract.py` subclasses it as the reference implementation the contract tests run against, and the internal schema was frozen from its shape. Removing it means rewriting 204 lines of test fixtures around Punting Form — a refactor with regression risk, not a cleanup. |
+| `docs/decision-learning/V1_IMPLEMENTATION_GUIDE.md` | `CLAUDE.md` states it is retained deliberately as the superseded V1 guide. |
+| Root `00_…17_*.md` | The current decision-learning plan, not a historical one (`02_ARCHITECTURE_AND_CONTRACTS.md` was updated 2026-08-13 and corrects `CLAUDE.md` on the live stack). They would read better under `docs/decision-learning/`, but moving 18 cross-linked files is a rename, not a cleanup. |
 
-## 3. Kept on purpose (examples that looked dead but are not)
+Also kept, and worth a link from somewhere rather than deletion:
+`docs/CONSENSUS_AGENT_IMPROVEMENT.md` and
+`docs/roi-roadmap/10-exchange-spike.md` are unreferenced but current design
+records.
+
+## 3. Kept — looked dead, is not
 
 - `focal_loss.py`, `stacking_meta_learner.py`, `target_encoding.py`: imported by `ml_model.py`.
 - `train_ml_enhanced.py`: imported by `mc_api.py`.
@@ -107,14 +152,16 @@ carries content worth relocating first.
 - `devig_comparison.py`, `crowd_promotion_report.py`: built for registered, not-yet-run experiments.
 - `run_full_pipeline.py`, `learn_from_results_v2.py`, `blackbook_candidates.py`, `source_accuracy_tracker.py`: steps of the documented runbooks.
 - `backfill_{phase2,zscores,zscores_targeted,rrh_missing_dates,ledger_prices}.py`: repair sweeps listed in `docs/10` §6.
-- `docs/CONSENSUS_AGENT_IMPROVEMENT.md`, `docs/roi-roadmap/10-exchange-spike.md`: unreferenced but current design records; worth linking from `docs/08` and the roadmap tracker.
 
-## 4. Side findings (not in scope, not changed)
+## 4. Side findings
 
-- `pf_fork_remap.json` at the repo root is an older run (2026-08-01) of the same audit output as `server/python/pf_fork_remap.json` (2026-08-02, with `post_apply`).
-- `docs/README.md` still says "There is no test suite in the repo"; CI runs 864 pytest tests.
-- `backfill_zscores.py` and `import_barrier_trials_to_db.py` hard-code a Windows dev-machine path (an unmerged `fix/backfill-zscores-portable-paths` branch exists).
-- `target_tracks.py`'s docstring still cites `download_training_data.py`'s track list as historical rationale.
+Fixed in this pass: the duplicate `pf_fork_remap.json`, and `docs/README.md`'s
+claim that the repo has no test suite (it has 864 tests).
+
+Left alone, for the owner:
+
+- `backfill_zscores.py` and `import_barrier_trials_to_db.py` hard-code a Windows dev-machine path (branch `fix/backfill-zscores-portable-paths` exists and is unmerged).
+- `docs/roi-roadmap/AGENTS.md` rule 10 still forbids wiring `market_efficiency.py`, which no longer exists. The prohibition is satisfied trivially; the contract text was not edited because changing a rule's wording is not cleanup.
 
 ## 5. Verification
 

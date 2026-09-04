@@ -64,7 +64,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `weekly_sectional_collector.py` | Sunday sweep of all three sectional collectors |
 | `ingest_target_track_results_and_sectionals.py` | One-date fan-out: results + correct per-track sectional source |
 | `sp_health.py`, `results_health_check.py` | Data-quality gates (SP coverage, position sanity) |
-| `weather_api.py` | *(dead)* going-forecast stub, no callers |
 
 ## Normalization
 
@@ -98,8 +97,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | `track_condition_db.py` | Horse-going records + pace energy model; canonical going keywords |
 | `glicko2_elo.py` | Surface-conditional Glicko-2 rating engine — has self-test |
 | `target_encoding.py` | Leave-one-out smoothed target encoding |
-| `feature_store.py` | Two-tier feature cache + feature registry (provenance) |
-| `learned_sectional_combination.py` | Learned blend weights over sectional engines (L-BFGS-B) |
 | **`relative_market.py`** | Phase-5 within-race market-position features (favourite ladder); parity with mc_api — has self-test |
 
 ## ML training & calibration
@@ -108,7 +105,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 |---|---|
 | **`retrain_v2.py`** | Production trainer: XGB+LGB+CatBoost, walk-forward + purge gap, OOF isotonic → `racing_ensemble_v2.pkl` |
 | **`refresh_training_view_v2.py`** | Rebuilds `training_view_v2` matview (union of prediction sources + outcomes + prior sectionals) |
-| `train_ml.py` | v1 trainer (delegates to RacingMLModel) |
 | `train_ml_enhanced.py` | "Enhanced" single-model trainer (temporal CV, isotonic-vs-Platt, SHAP) |
 | **`calibration_model.py`** | Global isotonic calibrator applied in the tips pipeline |
 | `conditional_logit.py` | Benter-style two-stage model+market blend (opt-in via `STRIDE_CL_BLEND`; fit CLI + self-test) |
@@ -146,7 +142,6 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`track_bias_points.py`** | Static per-track bias configs → points scoring |
 | `blackbook_candidates.py` | Unlucky-closer watchlist generator |
 | `advanced_race_analysis.py` | Standalone 4-phase LLM race analyst |
-| `historical_analysis.py` | One-off print-only performance report |
 
 ## Consensus & market
 
@@ -155,14 +150,13 @@ the live daily path. *(dead)* = no callers found / superseded.
 | **`consensus_agent.py`** | Tipster polling (Tavily) + web research (Perplexity) + extraction (Claude) → crowd/consensus scores |
 | **`consensus_blender.py`** | Convergence library: V2 blend/tiers/injections/gate + V3 crowd-first classifier (live) |
 | **`odds_movement.py`** | Overnight/morning odds snapshots → STEAM/FIRMING/DRIFT market pillar |
-| `validate_panel.py` | Tipster-panel reachability pre-flight |
+| `panel_liveness.py` | Tipster-panel reachability pre-flight (ALIVE/FLAKY/DEAD), run by `infra/09c_upload_panel.sh` |
 | `source_accuracy_tracker.py` | Records tipster hit rates (feedback loop not yet closed) |
 | **`llm_provider.py`** | Groq/Ollama provider abstraction with JSON hardening |
 | **`llm_form_analysis.py`** | Pre-MC LLM race analysis (±0.08 mu adjustments) |
 | **`llm_post_scorer.py`** | Post-MC AI scores, rankings, rich insights, brief assessments |
 | `market_analysis.py` | Steam/drift features + probability multipliers (model-side) |
 | `market_velocity.py` | Velocity/acceleration/smart-money features + MC sigma modifier |
-| `market_efficiency.py` | Overround-based market segmentation + per-segment strategy |
 | `build_betfair_mapping.py` | Betfair historical stream ETL → runner map + labeled training view |
 
 ## Backtesting, learning, risk & output

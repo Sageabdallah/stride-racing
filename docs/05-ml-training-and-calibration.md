@@ -10,11 +10,10 @@ Related docs: [Feature engineering](04-feature-engineering.md) ·
 
 ---
 
-## 1. Three trainer generations — which one is live
+## 1. Two trainer generations — which one is live
 
 | Script | Generation | Data source | Models | CV | Output artifact |
 |---|---|---|---|---|---|
-| `train_ml.py` | v1 (oldest) | `training_data` table | delegates to `RacingMLModel` | none | `models/racing_ensemble_v2.pkl` |
 | `train_ml_enhanced.py` | "enhanced" | `prediction_audit` (fallback `training_data`+`selections`) | single model (XGB → LGB → GBM fallback) | `TimeSeriesSplit` capped at 3 folds | `models/enhanced_racing_ensemble.pkl` |
 | **`retrain_v2.py`** | **v2 — current** | **`training_view_v2`** materialized view | **XGBoost + LightGBM + CatBoost** | **walk-forward with purge gap** | **`models/racing_ensemble_v2.pkl`** |
 

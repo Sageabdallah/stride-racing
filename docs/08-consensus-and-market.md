@@ -176,12 +176,14 @@ Carlo engine**, not the convergence gate: probability multipliers 0.85–1.25, M
 modifiers 0.85–1.15, a 0–100 smart-money score, velocity acceleration and
 final-30-minute move features. Don't conflate the two taxonomies when reading logs.
 
-### 3.3 Market efficiency segmentation — `market_efficiency.py`
+### 3.3 Market efficiency segmentation — removed
 
-Classifies each race's market into `ultra_efficient / efficient / moderate /
-inefficient / thin` from overround, field size, class and venue; each segment has its
-own minimum-edge threshold (0.05 / 0.03 / 0.02 / 0.01 / 1.0) and stake modifier.
-Also detects anomalies (overround > 30%, dominant favourite > 60% implied, etc.).
+`market_efficiency.py` classified each race's market into `ultra_efficient /
+efficient / moderate / inefficient / thin` and gave each segment its own
+minimum-edge threshold. Nothing ever imported it, and standing prohibition 7 in
+`docs/analysis/IMPLEMENTATION_PLAN.md` §5 forbade wiring it, so the 2026-09
+cleanup removed it — retiring the prohibition rather than breaking it. Race-level
+efficiency signals that production does use live in `race_context.py`.
 
 ### 3.4 Betfair mapping — `build_betfair_mapping.py`
 

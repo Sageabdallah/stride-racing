@@ -1,8 +1,9 @@
 # RESULTS — Workstream A baseline and per-ticket deltas
 
 Every ticket from `IMPLEMENTATION_PLAN.md` reports its measured delta here,
-against the baseline recorded in §2. The protocol is
-`orchestrator_instuctions.md` § "TICKET EXECUTION PROTOCOL" step 5.
+against the baseline recorded in §2, one row per ticket in the column order of
+§3. (The protocol came from the Phase-2 implementation brief, a one-shot agent
+prompt removed in the 2026-09 cleanup; the row format below is its record.)
 
 > ⚠️ Backtest numbers are not live-trading expectations. Every claim in this
 > file carries its sample size and confidence interval, or it does not belong
@@ -34,9 +35,9 @@ none is exercised. Reports carry this in `config.model_under_test`.
 
 **Status: blocked on data access. No baseline numbers exist.**
 
-The acceptance test in `orchestrator_instuctions.md` § Workstream A asks for
-baseline metrics "from running the CURRENT production model". That cannot be
-produced in this repository, verified empirically on 2026-07-25:
+The Workstream A acceptance test asked for baseline metrics "from running the
+CURRENT production model". That cannot be produced in this repository, verified
+empirically on 2026-07-25:
 
 | Prerequisite | State |
 |---|---|

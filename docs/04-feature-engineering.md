@@ -194,18 +194,12 @@ missing dates, which is wrong for historical training rows.
 
 ## 5. Supporting infrastructure
 
-- **`feature_store.py`** — two-tier cache (LRU memory, max 10,000 entries + JSON
-  disk, max 1,000 races, TTL 24 h) plus a `FeatureRegistry` documenting ~53 features
-  with their producing module — the best in-code provenance map.
 - **`race_normaliser.py`** — runs before the MC engine: canonicalizes going/names/
   classes, validates the racecard (distance 400–5000 m, field ≥ 2, overround
   0.90–1.60, duplicate barriers/odds), builds the pace map, and emits candidate
   engineered features.
 - **`normalize.py` / `horse_names.py` / `learning_track_map.py`** — name and track
   canonicalization (see [Data & ingestion §5](03-data-and-ingestion.md)).
-- **`learned_sectional_combination.py`** — learns blend weights over the five
-  sectional engines by L-BFGS-B maximum likelihood (L2 λ=0.1), optionally
-  distance-conditional; auxiliary, not part of the 110-column contract.
 - **`speed_ratings.py`** — synthetic par-time speed ratings
   (`100 + (par − time) × 5 + track_adj`, clamped [60, 130]); production role is the
   `speed_rating_trajectory` slope.

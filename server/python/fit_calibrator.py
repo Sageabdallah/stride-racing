@@ -111,7 +111,7 @@ def normalise_source_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 def check_coverage(df: pd.DataFrame, source: str,
                    min_rows: Optional[int] = None) -> Dict[str, Any]:
-    """Hard coverage gate (ROADMAP_REVIEW task-05 modification).
+    """Hard coverage gate (roi-roadmap task 05, as amended in review).
 
     Reports the usable sample count and date range for a fit source and
     REFUSES to fit below STRIDE_CAL_MIN_COVERAGE (default 500). Insufficient

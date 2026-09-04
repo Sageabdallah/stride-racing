@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The promotion gate: decide whether a flagged change may be turned on.
 
-`orchestrator_instuctions.md` step 6 states the ship criteria in prose, and
+The ship criteria were stated in prose in the Phase-2 implementation brief, and
 without something that evaluates them they stay aspirational — a ticket gets
 promoted because its headline number moved, which is how a system talks itself
 into a change that costs money. This module turns them into a decision.
