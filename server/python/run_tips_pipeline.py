@@ -1900,13 +1900,17 @@ def store_selections_in_db(race_tips, date_str):
                     "v15": pick.get("odds", 0),
                     "v16": (pick.get("win_pct", 0) / 100 * (pick.get("odds", 0) or 1) - 1) if pick.get("odds") else 0,
                     "v17": edge,
-                    # round(): halve_stake() (staking_controls.py) can leave a
-                    # fractional "0.5u" after the drawdown breaker halves a
-                    # flat 1u stake. int("0.5") used to raise here, and the
-                    # except block below rolled back the whole transaction —
-                    # including the is_active deactivation and every insert
-                    # already made in this batch (see the SAVEPOINT below).
-                    "v18": int(round(_safe_num(str(pick.get("staking") or "0u").replace("u", ""), 0.0))),
+                    # kelly_stake is `real` in the frontend's drizzle schema
+                    # (shared/schema.ts), so the fractional stake halve_stake()
+                    # (staking_controls.py) can leave after the drawdown
+                    # breaker halves a flat 1u stake -- e.g. "0.5u" -- is a
+                    # valid value here, not just a crash to avoid. The old
+                    # int(pick["staking"].replace("u", "")) raised on it, and
+                    # the except block below rolled back the whole
+                    # transaction -- including the is_active deactivation and
+                    # every insert already made in this batch (see the
+                    # SAVEPOINT below).
+                    "v18": _safe_num(str(pick.get("staking") or "0u").replace("u", ""), 0.0),
                     "v19": pick.get("confidence", "low"), "v20": value_rating,
                     "v21": True, "v22": pick.get("running_style", "unknown"),
                     "v23": " | ".join(unique_explanations),
