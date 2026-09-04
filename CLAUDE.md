@@ -22,8 +22,12 @@ Connection: use `DATABASE_URL` from `.env` — never hardcode credentials
 - ONE change at a time — validate end-to-end before stacking next change
 - Working dir is `Race-Analytics/server/python` NOT `Race-Analytics/`
 - Consensus agent MUST run before tips pipeline or all picks become NO_BET
-- backfill_tips_contract.py MUST run after run_tips_pipeline.py — frontend
-  cannot display tips without it
+- backfill_tips_contract.py targets legacy pre-Phase -1 tips files (no
+  `refused_bet_pick` key — see its own guard comment in
+  `backfill_race_contract`). run_tips_pipeline.py already writes a
+  reconciled bet_pick/coverage_pick/selection_contract, so running this
+  script after a current run is a no-op; it is a migration/repair tool, not
+  a required post-step for current-format files
 
 ## Working tree discipline (every session, interactive included)
 

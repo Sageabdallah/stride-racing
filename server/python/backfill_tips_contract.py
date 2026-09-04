@@ -63,9 +63,28 @@ def _build_raw_model_leader(race: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def backfill_race_contract(race: Dict[str, Any]) -> Dict[str, Any]:
     updated = deepcopy(race)
 
-    # Reconciled Phase -1 files are authoritative.  Step-3 backfill exists
-    # for legacy files only and must not reconstruct a bet that the crowd or
-    # risk controls already refused.
+    # A race that failed inside the live pipeline (run_tips_pipeline.py's
+    # per-race exception handler) carries bet_status="ERROR" and an empty
+    # full_field/top_picks — there is nothing to rebuild a pick from. Falling
+    # through to the rebuild path below would silently relabel it NO_BET via
+    # derive_no_bet_reason(None, None)'s generic "no raw model leader" text,
+    # discarding the real error. Leave it exactly as the pipeline wrote it.
+    if updated.get("bet_status") == "ERROR":
+        return updated
+
+    # Reconciled Phase -1 files are authoritative and this key is always
+    # present on them (dict when the crowd/risk gate refused the bet, None
+    # otherwise) — `in updated` is a file-format check, not a "was it
+    # refused" check, and deliberately short-circuits the rebuild path below
+    # for every race a current run produces, refused or not. Do not narrow
+    # this to `isinstance(refused, dict)`: run_tips_pipeline.py's live
+    # bet_pick already carries decision_contract.reconcile_crowd_bet's
+    # crowd-gate fields (crowd_score, convergence_tier, stake_recommendation,
+    # etc. — see decision_contract._GATE_FIELDS) and the drawdown breaker's
+    # actual stake; choose_bet_race_pick() below reconstructs a bet_pick
+    # from raw_model_leader alone and would silently drop all of that.
+    # Step-3 backfill (the rebuild path) exists for legacy pre-Phase -1
+    # files only, which never had this key at all.
     if "refused_bet_pick" in updated:
         refused = updated.get("refused_bet_pick")
         if isinstance(refused, dict):

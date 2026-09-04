@@ -1762,6 +1762,10 @@ def store_selections_in_db(race_tips, date_str):
                     unique_explanations.append(ex)
 
             try:
+                # A single pick's insert failing must not roll back the
+                # is_active deactivation or the picks already inserted
+                # earlier in this loop — scope the rollback to this pick.
+                cur.execute("SAVEPOINT selection_insert")
                 cur.execute("""
                     INSERT INTO selections (
                         track, race_number, race_name, race_date, distance,
@@ -1896,7 +1900,13 @@ def store_selections_in_db(race_tips, date_str):
                     "v15": pick.get("odds", 0),
                     "v16": (pick.get("win_pct", 0) / 100 * (pick.get("odds", 0) or 1) - 1) if pick.get("odds") else 0,
                     "v17": edge,
-                    "v18": int(pick.get("staking", "0u").replace("u", "") or 0),
+                    # round(): halve_stake() (staking_controls.py) can leave a
+                    # fractional "0.5u" after the drawdown breaker halves a
+                    # flat 1u stake. int("0.5") used to raise here, and the
+                    # except block below rolled back the whole transaction —
+                    # including the is_active deactivation and every insert
+                    # already made in this batch (see the SAVEPOINT below).
+                    "v18": int(round(_safe_num(str(pick.get("staking") or "0u").replace("u", ""), 0.0))),
                     "v19": pick.get("confidence", "low"), "v20": value_rating,
                     "v21": True, "v22": pick.get("running_style", "unknown"),
                     "v23": " | ".join(unique_explanations),
@@ -1998,11 +2008,12 @@ def store_selections_in_db(race_tips, date_str):
                     "v106": pick.get("tipsters_polled"),
                     "v107": pick.get("independent_source_rate"),
                 })
+                cur.execute("RELEASE SAVEPOINT selection_insert")
                 inserted += 1
             except Exception as e:
                 print(f"  [DB] Insert failed for {pick.get('horse')}: {e}", file=sys.stderr)
                 try:
-                    conn.rollback()
+                    cur.execute("ROLLBACK TO SAVEPOINT selection_insert")
                 except Exception:
                     pass
 
