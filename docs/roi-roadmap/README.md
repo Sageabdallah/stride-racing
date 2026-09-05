@@ -90,6 +90,6 @@ of accumulation. Every day delayed is a day added to the retrain date.
 | 09 | ✅ | 2026-08-02 | WP-6: registry (VR-001 window B open), validate_forward.py, registry PASS gate in ship_criteria; first validation run is calendar-bound (window B) |
 | 10 | 🟡 | 2026-08-02 | WP-6: shin/power de-vig + STRIDE_DEVIG (default proportional), best-price policy, reference_price wired, exchange spike GO; method SELECTION deferred behind prereg guard |
 | 11 | 🟡 | 2026-08-02 | WP-6: place/each-way shadow settlement built (positions); BLOCKED for dividends: no dividend data exists in results table, PF payloads, or collectors |
-| 12 | ⬜ | | |
+| 12 | 🟡 | 2026-09-05 | branch `claude/model-improvement-analysis-hw2mkv`: retrain_v2 gains per-race top-1 vs tip-time favourite, tail-window early stopping/isotonic (outer fold untouched), cross-fitted combiner arms measured against the production blend, WITHOUT-price ablation; v3 candidate path (retrain-model.yml `v3-candidate` → tips-proof `ensemble_artifact` → compare_candidate_tips.py); STRIDE_LEARNED_BLEND default off. No v3 trained yet: inputs-only preflight RED (5 ZERO_AT_SERVE columns; asof profiles) and the 2026-09-05 pre-registration amendment awaits [SAGE-APPROVAL] |
 | 13 | ⬜ | | |
 | 14 | ⬜ | | |
