@@ -73,6 +73,15 @@ def _serve_nan_contract_enabled() -> bool:
     return os.environ.get("STRIDE_SERVE_NAN_CONTRACT", "false").strip().lower() in ("true", "1", "yes")
 
 
+def _learned_blend_enabled() -> bool:
+    """STRIDE_LEARNED_BLEND (default OFF) — when on AND the loaded artifact
+    carries a fitted ensemble_combiner (retrain_v2 v3 artifacts do), the base
+    predictions are combined by that persisted, OOF-fitted combiner instead of
+    the hardcoded seed weights in _model_performance. Off = byte-identical
+    legacy blend, whatever the artifact carries."""
+    return os.environ.get("STRIDE_LEARNED_BLEND", "false").strip().lower() in ("true", "1", "yes")
+
+
 class RacingMLModel:
     """Ensemble ML model for horse racing predictions."""
     
@@ -579,7 +588,27 @@ class RacingMLModel:
         xgb_pred = self.xgb_model.predict_proba(X_scaled)[:, 1] if self.xgb_model else np.zeros(len(X_scaled))
         lgb_pred = self.lgb_model.predict_proba(X_scaled)[:, 1] if self.lgb_model else np.zeros(len(X_scaled))
         cat_pred = self.catboost_model.predict_proba(X_scaled)[:, 1] if self.catboost_model else np.zeros(len(X_scaled))
-        
+
+        # Learned blend (task-12 step 4): the persisted, OOF-fitted combiner
+        # from the artifact, used only under STRIDE_LEARNED_BLEND. It is a
+        # convex combination of the same raw predictions the legacy blend
+        # uses, so the downstream pipeline calibrator sees the same kind of
+        # quantity. Any model the combiner expects but this artifact lacks
+        # falls through to the legacy chain.
+        combiner = getattr(self, "ensemble_combiner", None)
+        if _learned_blend_enabled() and combiner is not None and getattr(combiner, "is_fitted", False):
+            by_name = {"xgb": (xgb_pred, self.xgb_model), "lgb": (lgb_pred, self.lgb_model),
+                       "cb": (cat_pred, self.catboost_model)}
+            names = list(getattr(combiner, "model_names", ("xgb", "lgb", "cb")))
+            if all(n in by_name and by_name[n][1] is not None for n in names):
+                try:
+                    ensemble = combiner.predict(np.column_stack([by_name[n][0] for n in names]))
+                    return {"xgb": xgb_pred, "lightgbm": lgb_pred, "catboost": cat_pred,
+                            "ensemble": ensemble, "method": "learned_blend",
+                            "weights": combiner.describe().get("weights")}
+                except Exception:
+                    pass
+
         # Try stacking meta-learner first. NB: retrain_v2 artifacts carry per-model _isotonic calibrators that are deliberately NOT applied here — pipeline-level isotonic (ProbabilityCalibrator in run_tips_pipeline.calibrate_and_score) calibrates the final output, and applying both layers would double-calibrate.
         if hasattr(self, 'stacking_learner') and self.stacking_learner is not None and self.stacking_learner.is_fitted:
             try:
@@ -668,7 +697,17 @@ class RacingMLModel:
         return sorted_contrib
     
     def save(self):
-        """Save trained models to disk."""
+        """Save trained models to disk.
+
+        Persists the OOF-fitted ensemble_combiner (retrain_v2 v3 artifacts;
+        read by predict_components only under STRIDE_LEARNED_BLEND). The
+        stacking meta-learner, double calibrator and target encoder that
+        train() fits are still NOT persisted, deliberately: the stacker is
+        fitted on shuffled StratifiedKFold folds (leaks across race dates)
+        and the double calibrator adds a calibration layer under the
+        pipeline's own isotonic (standing prohibition 3). Both fall through
+        to the legacy blend after a reload today; persisting them would
+        switch that path on with no flag and no measurement."""
         model_data = {
             'xgb_model': self.xgb_model,
             'lgb_model': self.lgb_model,
@@ -679,10 +718,37 @@ class RacingMLModel:
             'training_stats': self.training_stats,
             'feature_columns': getattr(self, '_trained_feature_columns', None)
                                or list(self.FEATURE_COLUMNS),
+            'ensemble_combiner': self._combiner_state(getattr(self, 'ensemble_combiner', None)),
         }
         with open(self.model_path, 'wb') as f:
             pickle.dump(model_data, f)
     
+    @staticmethod
+    def _combiner_state(combiner):
+        """Artifact form of the combiner: its plain state dict, never the
+        instance (a class path in the pickle would tie every artifact's load
+        to ensemble_combiner.py existing under that name)."""
+        return combiner.to_state() if hasattr(combiner, "to_state") else combiner
+
+    @staticmethod
+    def _restore_combiner(raw):
+        """Rebuild the combiner from the artifact's state dict. Anything that
+        cannot be restored becomes None — announced on stderr — so a bad or
+        unreadable combiner can never turn a loadable artifact into
+        is_trained=False; the blend just stays legacy. An instance (in-process
+        use) is accepted as is."""
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            try:
+                from ensemble_combiner import EnsembleCombiner
+                return EnsembleCombiner.from_state(raw)
+            except Exception as e:
+                print(f"[ML] artifact carries an ensemble_combiner state that could not be "
+                      f"restored ({e}); the legacy blend will be used", file=sys.stderr)
+                return None
+        return raw
+
     def load(self) -> bool:
         """Load trained models from disk."""
         try:
@@ -703,6 +769,11 @@ class RacingMLModel:
             saved_cols = model_data.get('feature_columns')
             if saved_cols and isinstance(saved_cols, list):
                 self._trained_feature_columns = saved_cols
+            # Persisted OOF-fitted combiner (absent from pre-2026-09-05
+            # artifacts -> None; predict_components then falls through to
+            # the legacy blend exactly as before). No other combination
+            # object is read back — see save().
+            self.ensemble_combiner = self._restore_combiner(model_data.get('ensemble_combiner'))
             return True
         except Exception as e:
             print(f"Failed to load model: {e}")

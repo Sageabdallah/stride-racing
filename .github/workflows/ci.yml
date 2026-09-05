@@ -81,6 +81,7 @@ jobs:
           python shadow_flip_review.py --self-test
           python race_metrics.py
           python compare_candidate_tips.py --self-test
+          python ensemble_combiner.py
           # The liveness audit's own tripwire (z_* must be ASSIGNED at serve
           # once serve_features.py exists) was never run anywhere and had been
           # failing silently — the audit could not see loop assignments.
