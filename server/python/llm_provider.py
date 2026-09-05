@@ -16,7 +16,23 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_OLLAMA_MODEL = "llama3.2:3b"
+# Groq retired this id. A one-word ping returned 404 model_not_found on
+# 2026-09-05. Left exactly as it was rather than replaced with a guess: set
+# LLM_MODEL to a live Groq id when running LLM_PROVIDER=groq, and prove it
+# with the llm-proof job before trusting a card to it.
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# The provider used when LLM_PROVIDER is unset — and unset is the case that
+# matters, because nobody ever chose Groq. It was the default, aimed at a
+# model id that expired underneath it, and the failure was silent: 404 on
+# every call meant 55 races, 165 picks, 0 insights and 2.1 seconds of total
+# LLM time on 2026-09-05, with the same shape three days earlier.
+#
+# Anthropic instead, because ANTHROPIC_API_KEY already reaches every task for
+# the consensus agent, and it is the only provider here with a passing
+# llm-proof behind it. An unset key now lands on a path that works rather
+# than one that 404s; a deployment that wants Groq says so explicitly.
+DEFAULT_LLM_PROVIDER = "anthropic"
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # The Claude provider mirrors consensus_agent.py's extraction call — the one
@@ -285,7 +301,7 @@ def get_provider(force_new: bool = False) -> LLMProvider:
     if _provider_instance is not None and not force_new:
         return _provider_instance
 
-    provider_name = os.environ.get("LLM_PROVIDER", "groq").lower()
+    provider_name = os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).lower()
 
     if provider_name == "ollama":
         _provider_instance = OllamaProvider()

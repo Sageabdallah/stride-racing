@@ -91,6 +91,29 @@ def _load_llm_modules():
         return None
 
 
+def _llm_provider_name():
+    """The provider name recorded as a pick's provenance (v83).
+
+    Resolved exactly the way get_provider resolves it, from the one constant,
+    because these two defaults used to be separate literals: llm_provider.py
+    picked a backend while run_tips_pipeline stamped the row with its own
+    idea of the default. Two copies of a default is one copy too many — the
+    field is supposed to say which provider produced the ai_score, and it can
+    only do that if it cannot disagree with the code that chose one.
+
+    Imported lazily for the same reason _load_llm_modules is: a run with the
+    LLM switched off must not die on an LLM import.
+    """
+    name = os.environ.get("LLM_PROVIDER", "").strip()
+    if name:
+        return name.lower()
+    try:
+        from llm_provider import DEFAULT_LLM_PROVIDER
+        return DEFAULT_LLM_PROVIDER
+    except Exception:
+        return None
+
+
 def _race_seed(date_str, track, race_num):
     """Deterministic per-race MC seed from race identity.
 
@@ -2037,7 +2060,7 @@ def store_selections_in_db(race_tips, date_str):
                         "ai_risk_factors": mc.get("ai_risk_factors", []),
                         "ai_vs_field": mc.get("ai_vs_field", ""),
                     }) if mc.get("ai_analysis") else None,
-                    "v83": os.environ.get("LLM_PROVIDER", "groq") if pick.get("ai_score") else None,
+                    "v83": _llm_provider_name() if pick.get("ai_score") else None,
                     "v84": pick.get("luckless_flag", False),
                     "v85": pick.get("luckless_score", 0) or None,
                     "v86": pick.get("luckless_uplift", 0) or None,
