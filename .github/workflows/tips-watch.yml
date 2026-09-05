@@ -123,9 +123,24 @@ jobs:
           fi
 
       - name: Was there anything to tip?
-        # Self-validating by filename: if the most recent racecard run is stale,
-        # neither file carries today's date and the verdict is racecard_dead,
-        # which is the correct reading of "today's 05:30 produced nothing".
+        # "The newest racecard run" and "the run that built TODAY's card" are
+        # different questions, and the old --limit 1 asked the first while
+        # reporting on the second. A manual dispatch, a re-run, or a preview
+        # for another date sits at the top of that list carrying a different
+        # date's artifact; the filename check then finds neither file and
+        # calls the pipeline dead.
+        #
+        # That is exactly what #163 was. A 2026-09-05 preview dispatched at
+        # 04:07Z put its card at the top of the list, so the 04:46Z sweep
+        # looked for 2026-09-04 inside it, found neither file, and filed
+        # racecard_dead against a day whose quiet sentinel had been written
+        # correctly six hours earlier. Friday's pipeline was healthy.
+        #
+        # The filename check was never the weak part — it validates the
+        # artifact's date honestly. The weak part was only ever looking in one
+        # place. So walk back through recent runs until one carries TODAY, and
+        # call it dead only when none of them does. Artifacts are kept 7 days,
+        # so downloads for older runs simply fail and are skipped.
         id: card
         if: steps.q.outputs.status == 'empty'
         env:
@@ -133,21 +148,26 @@ jobs:
           TODAY: ${{ steps.q.outputs.target_date }}
         run: |
           set +e
-          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
-            --workflow pf-morning-racecards.yml --limit 1 \
-            --json databaseId --jq '.[0].databaseId')
-          rm -rf card_art && mkdir -p card_art
-          if [ -n "$RUN_ID" ]; then
+          VERDICT=racecard_dead
+          CHECKED=0
+          for RUN_ID in $(gh run list --repo "$GITHUB_REPOSITORY" \
+                --workflow pf-morning-racecards.yml --limit 10 \
+                --json databaseId --jq '.[].databaseId'); do
+            rm -rf card_art && mkdir -p card_art
             gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
               -n racecard -D card_art >/dev/null 2>&1
-          fi
-          if [ -f "card_art/quiet_$TODAY.json" ]; then
-            echo "verdict=quiet" >> "$GITHUB_OUTPUT"
-          elif [ -f "card_art/racecard_$TODAY.json" ]; then
-            echo "verdict=card" >> "$GITHUB_OUTPUT"
-          else
-            echo "verdict=racecard_dead" >> "$GITHUB_OUTPUT"
-          fi
+            CHECKED=$((CHECKED + 1))
+            if [ -f "card_art/quiet_$TODAY.json" ]; then
+              VERDICT=quiet
+              break
+            elif [ -f "card_art/racecard_$TODAY.json" ]; then
+              VERDICT=card
+              break
+            fi
+          done
+          echo "checked $CHECKED run(s) for a $TODAY artifact; verdict=$VERDICT"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "runs_checked=$CHECKED" >> "$GITHUB_OUTPUT"
 
       - name: Quiet day — nothing to report
         if: steps.q.outputs.status == 'empty' && steps.card.outputs.verdict == 'quiet'
@@ -169,6 +189,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_DATE: ${{ steps.q.outputs.target_date }}
           VERDICT: ${{ steps.card.outputs.verdict }}
+          RUNS_CHECKED: ${{ steps.card.outputs.runs_checked }}
         run: |
           set -euo pipefail
           TITLE="Tips watch: no predictions for ${TARGET_DATE}"
@@ -181,9 +202,9 @@ jobs:
           fi
 
           if [ "$VERDICT" = "racecard_dead" ]; then
-            START="the 05:30 \`pf-morning-racecards\` run produced neither a racecard nor a
-          quiet-day sentinel for this date, so the pipeline had nothing to work from.
-          Start at the racecard path, not the tips path."
+            START="none of the last ${RUNS_CHECKED:-?} \`pf-morning-racecards\` runs uploaded a
+          racecard or a quiet-day sentinel for this date, so the pipeline had nothing to
+          work from. Start at the racecard path, not the tips path."
           else
             START="a racecard WAS built for this date, so there were races to score. This is
           the silent no-op class: the 10:00 tips task exited without producing output.
