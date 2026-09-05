@@ -8,14 +8,22 @@ import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 
+# scikit-learn is a base dependency of this tree (retrain_v2 and the
+# calibration modules import it unguarded; the CI runner installs it). Until
+# 2026-09-05 these four imports sat inside the booster try-block below, so a
+# missing xgboost, catboost or optuna left StandardScaler unbound and
+# RacingMLModel() raised NameError in __init__ instead of degrading to
+# is_trained=False — on the CI runner, which installs none of the three,
+# the wrapper could not be constructed at all.
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
+from sklearn.calibration import CalibratedClassifierCV
+
 try:
     import xgboost as xgb
     import lightgbm as lgb
     from catboost import CatBoostClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
-    from sklearn.calibration import CalibratedClassifierCV
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     ML_AVAILABLE = True
