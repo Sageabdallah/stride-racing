@@ -854,82 +854,167 @@ def _get_catboost_params() -> Dict:
     }
 
 
+# Fold hygiene (task-12 step 2). The early-stopping / per-model-isotonic
+# window is carved from the TAIL of the training window — the last TAIL_DAYS
+# of it, mirroring the 14-day test window — so the outer test fold is never
+# read by anything but the final scoring. Until 2026-09-05 LightGBM
+# early-stopped on the test fold, CatBoost selected its best iteration on the
+# test fold (use_best_model defaults to True whenever eval_set is given), and
+# all three per-model isotonics were fitted on the test fold's own labels; the
+# published fold AUC/Brier were therefore mildly self-fitted (evidence base
+# C4). Honest numbers are the deliverable, even if worse.
+TAIL_DAYS = 14
+EARLY_STOPPING_ROUNDS = 20
+MIN_TAIL_ROWS = 20
+MIN_TAIL_PER_CLASS = 2
+MIN_FIT_ROWS = 50
+
+
+def _carve_tail(n_rows: int, y: np.ndarray, dates_train=None,
+                tail_days: int = TAIL_DAYS) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Boolean tail mask over the training rows plus a hygiene record.
+
+    Preferred: the last `tail_days` calendar days of the train window (by
+    date). Fallback when that tail is degenerate (too few rows, a class
+    missing, or too few rows left to fit): the last 10% of rows by position
+    (the train frame is date-ordered). If that is degenerate too, no tail:
+    the fold trains without early stopping and without per-model isotonic —
+    said loudly in the record, never patched with test-fold labels.
+    """
+    def ok(mask: np.ndarray) -> bool:
+        n_tail = int(mask.sum())
+        if n_tail < MIN_TAIL_ROWS or (n_rows - n_tail) < MIN_FIT_ROWS:
+            return False
+        yt = y[mask]
+        return int(yt.sum()) >= MIN_TAIL_PER_CLASS and int((yt == 0).sum()) >= MIN_TAIL_PER_CLASS
+
+    record: Dict[str, Any] = {"tail_days": tail_days, "tail_rows": 0, "fit_rows": n_rows,
+                              "tail_start": None, "tail_end": None, "fallback": None,
+                              "early_stopping": False, "isotonic_on": "none"}
+    if dates_train is not None:
+        d = pd.to_datetime(pd.Series(np.asarray(dates_train))).reset_index(drop=True)
+        cutoff = d.max() - timedelta(days=tail_days - 1)
+        mask = (d >= cutoff).to_numpy()
+        if ok(mask):
+            record.update(tail_rows=int(mask.sum()), fit_rows=int(n_rows - mask.sum()),
+                          tail_start=str(d[mask].min().date()), tail_end=str(d[mask].max().date()),
+                          early_stopping=True, isotonic_on="tail")
+            return mask, record
+        record["fallback"] = "positional"
+    else:
+        record["fallback"] = "positional"
+    n_tail = max(int(round(n_rows * 0.10)), 0)
+    mask = np.zeros(n_rows, dtype=bool)
+    if n_tail:
+        mask[-n_tail:] = True
+    if ok(mask):
+        record.update(tail_rows=int(mask.sum()), fit_rows=int(n_rows - mask.sum()),
+                      early_stopping=True, isotonic_on="tail")
+        if dates_train is not None:
+            d = pd.to_datetime(pd.Series(np.asarray(dates_train))).reset_index(drop=True)
+            record.update(tail_start=str(d[mask].min().date()), tail_end=str(d[mask].max().date()))
+        return mask, record
+    record["fallback"] = "none"
+    return np.zeros(n_rows, dtype=bool), record
+
+
+def _fit_isotonic_on_tail(model, X_tail: pd.DataFrame, y_tail: np.ndarray):
+    raw_tail = model.predict_proba(X_tail)[:, 1]
+    iso = IsotonicRegression(out_of_bounds="clip")
+    iso.fit(raw_tail, y_tail)
+    return iso
+
+
 def train_single_fold(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_val: pd.DataFrame,
     y_val: pd.Series,
     feature_cols: List[str],
+    dates_train=None,
 ) -> Tuple[Any, Any, Any, Dict[str, float], Dict[str, list]]:
     """
     Train XGBoost, LightGBM, CatBoost independently on one fold.
-    Apply isotonic calibration on the validation set.
+
+    Early stopping and the per-model isotonic calibrators use a window carved
+    from the tail of the TRAINING rows (_carve_tail); X_val/y_val — the outer
+    test fold — is read only to produce the raw predictions that are returned
+    and scored. Pass dates_train (aligned to X_train) so the tail is the last
+    TAIL_DAYS calendar days; without it the tail is the last 10% of rows.
+
     Returns (xgb_model, lgb_model, cb_model, per_model_auc_dict, oof_raw).
-    oof_raw contains raw (pre-isotonic) predictions for OOF calibrator fitting.
+    oof_raw carries the raw (pre-isotonic) test-fold predictions for the OOF
+    calibrator fit, the test labels, and a "hygiene" record of the tail used.
     """
-    X_tr = X_train[feature_cols].copy()
+    X_tr = X_train[feature_cols].reset_index(drop=True)
     X_vl = X_val[feature_cols].copy()
+    y_tr = np.asarray(y_train).astype(int)
+    tail, hygiene = _carve_tail(len(X_tr), y_tr, dates_train)
+    X_fit, y_fit = X_tr.iloc[~tail], y_tr[~tail]
+    X_tail, y_tail = X_tr.iloc[tail], y_tr[tail]
+    use_tail = hygiene["early_stopping"]
 
     per_model_auc: Dict[str, float] = {}
     raw_xgb: list = []
     raw_lgb: list = []
     raw_cb: list = []
 
+    def _score(model, key):
+        raw = model.predict_proba(X_vl)[:, 1]
+        if use_tail:
+            model._isotonic = _fit_isotonic_on_tail(model, X_tail, y_tail)
+            cal = model._isotonic.transform(raw)
+        else:
+            cal = raw
+        try:
+            per_model_auc[key] = float(roc_auc_score(y_val, cal))
+        except Exception:
+            per_model_auc[key] = float("nan")
+        return list(raw)
+
     xgb_model = None
     if HAS_XGB:
-        xgb_model = xgb.XGBClassifier(**_get_xgb_params())
-        xgb_model.fit(X_tr, y_train, eval_set=[(X_vl, y_val)], verbose=False)
-        raw_xgb = xgb_model.predict_proba(X_vl)[:, 1]
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(raw_xgb, y_val.values)
-        xgb_model._isotonic = iso
-        cal_val = iso.transform(raw_xgb)
-        try:
-            per_model_auc["xgb"] = float(roc_auc_score(y_val, cal_val))
-        except Exception:
-            per_model_auc["xgb"] = float("nan")
-        raw_xgb = list(raw_xgb)
+        params = _get_xgb_params()
+        if use_tail:
+            xgb_model = xgb.XGBClassifier(**params, early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+            xgb_model.fit(X_fit, y_fit, eval_set=[(X_tail, y_tail)], verbose=False)
+        else:
+            xgb_model = xgb.XGBClassifier(**params)
+            xgb_model.fit(X_fit, y_fit, verbose=False)
+        raw_xgb = _score(xgb_model, "xgb")
 
     lgb_model = None
     if HAS_LGB:
         lgb_model = lgb.LGBMClassifier(**_get_lgb_params())
-        lgb_model.fit(
-            X_tr, y_train,
-            eval_set=[(X_vl, y_val)],
-            callbacks=[lgb.early_stopping(20, verbose=False),
-                       lgb.log_evaluation(-1)],
-        )
-        raw_lgb = lgb_model.predict_proba(X_vl)[:, 1]
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(raw_lgb, y_val.values)
-        lgb_model._isotonic = iso
-        cal_val = iso.transform(raw_lgb)
-        try:
-            per_model_auc["lgb"] = float(roc_auc_score(y_val, cal_val))
-        except Exception:
-            per_model_auc["lgb"] = float("nan")
-        raw_lgb = list(raw_lgb)
+        if use_tail:
+            lgb_model.fit(
+                X_fit, y_fit,
+                eval_set=[(X_tail, y_tail)],
+                callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                           lgb.log_evaluation(-1)],
+            )
+        else:
+            lgb_model.fit(X_fit, y_fit)
+        raw_lgb = _score(lgb_model, "lgb")
 
     cb_model = None
     if HAS_CB:
         cb_model = CatBoostClassifier(**_get_catboost_params())
-        cb_model.fit(X_tr, y_train, eval_set=(X_vl, y_val))
-        raw_cb = cb_model.predict_proba(X_vl)[:, 1]
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(raw_cb, y_val.values)
-        cb_model._isotonic = iso
-        cal_val = iso.transform(raw_cb)
-        try:
-            per_model_auc["cb"] = float(roc_auc_score(y_val, cal_val))
-        except Exception:
-            per_model_auc["cb"] = float("nan")
-        raw_cb = list(raw_cb)
+        if use_tail:
+            # use_best_model (default True with an eval_set) now selects on
+            # the train tail, never on the outer test fold.
+            cb_model.fit(X_fit, y_fit, eval_set=(X_tail, y_tail),
+                         early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+        else:
+            cb_model.fit(X_fit, y_fit)
+        raw_cb = _score(cb_model, "cb")
 
     oof_raw = {
         "xgb": raw_xgb,
         "lgb": raw_lgb,
         "cb":  raw_cb,
-        "labels": list(y_val.values),
+        "labels": list(np.asarray(y_val).astype(int)),
+        "hygiene": hygiene,
     }
     return xgb_model, lgb_model, cb_model, per_model_auc, oof_raw
 
@@ -1054,11 +1139,18 @@ def run_walk_forward_cv(
 
         try:
             xgb_m, lgb_m, cb_m, per_auc, oof_raw = train_single_fold(
-                X_train, y_train, X_test, y_test, feature_cols
+                X_train, y_train, X_test, y_test, feature_cols,
+                dates_train=dates.iloc[train_idx],
             )
         except Exception as exc:
             print(f"  ERROR fold {meta['fold']}: {exc}", file=sys.stderr)
             continue
+        hygiene = oof_raw.get("hygiene") or {}
+        if hygiene.get("fallback"):
+            print(f"  fold {meta['fold']}: tail fallback={hygiene['fallback']} "
+                  f"(tail rows {hygiene['tail_rows']}, early stopping "
+                  f"{'on' if hygiene['early_stopping'] else 'OFF'}, isotonic "
+                  f"{hygiene['isotonic_on']})", file=sys.stderr)
 
         if collect_oof_calibrators:
             oof_xgb.extend(oof_raw["xgb"])
@@ -1094,6 +1186,7 @@ def run_walk_forward_cv(
             "auc": fold_auc,
             "brier": fold_brier,
             "per_model_auc": per_auc,
+            "hygiene": hygiene,
         }
         race_line = None
         if race_meta is not None:
@@ -1227,9 +1320,15 @@ def train_final_model(
 ) -> Tuple[Any, Any, Any, Dict[str, float]]:
     """
     Train XGBoost, LightGBM, CatBoost on the full dataset.
-    Uses a held-out 10% split for early stopping only.
-    Isotonic calibrators come from OOF predictions (if provided) to avoid
-    the leak where X_cal is used for both early stopping and calibration fitting.
+
+    The last 10% of rows (date-ordered) is the early-stopping window for all
+    three learners — until 2026-09-05 only LightGBM actually stopped early
+    there; XGBoost received the eval_set for logging only and ran its full
+    200 trees, and CatBoost selected its best iteration there with no patience
+    bound. Isotonic calibrators come from the walk-forward OOF predictions
+    (if provided) so X_cal is never used for both early stopping and
+    calibration fitting. A degenerate window (a class missing) disables early
+    stopping for that fit and says so rather than borrowing rows.
     """
     n = len(X)
     split_idx = int(n * 0.9)
@@ -1238,19 +1337,25 @@ def train_final_model(
     y_train_all = y.iloc[:split_idx]
     X_cal = X.iloc[split_idx:][feature_cols]
     y_cal = y.iloc[split_idx:]
+    y_cal_arr = np.asarray(y_cal).astype(int)
+    cal_ok = (len(y_cal_arr) >= MIN_TAIL_ROWS
+              and int(y_cal_arr.sum()) >= MIN_TAIL_PER_CLASS
+              and int((y_cal_arr == 0).sum()) >= MIN_TAIL_PER_CLASS)
 
-    print(f"\n  Final model: train={split_idx} rows, calibration={n - split_idx} rows")
+    print(f"\n  Final model: train={split_idx} rows, early-stopping window={n - split_idx} rows"
+          f"{'' if cal_ok else ' (DEGENERATE — early stopping disabled for the final fit)'}")
 
     xgb_model = lgb_model = cb_model = None
 
     if HAS_XGB:
         print("  Training final XGBoost ...")
-        xgb_model = xgb.XGBClassifier(**_get_xgb_params())
-        xgb_model.fit(
-            X_train_all, y_train_all,
-            eval_set=[(X_cal, y_cal)],
-            verbose=False,
-        )
+        if cal_ok:
+            xgb_model = xgb.XGBClassifier(**_get_xgb_params(),
+                                          early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+            xgb_model.fit(X_train_all, y_train_all, eval_set=[(X_cal, y_cal)], verbose=False)
+        else:
+            xgb_model = xgb.XGBClassifier(**_get_xgb_params())
+            xgb_model.fit(X_train_all, y_train_all, verbose=False)
         # Assign OOF-fitted isotonic calibrator (no leak — X_cal used only for early stopping)
         if oof_calibrators and "xgb" in oof_calibrators:
             xgb_model._isotonic = oof_calibrators["xgb"]
@@ -1258,19 +1363,26 @@ def train_final_model(
     if HAS_LGB:
         print("  Training final LightGBM ...")
         lgb_model = lgb.LGBMClassifier(**_get_lgb_params())
-        lgb_model.fit(
-            X_train_all, y_train_all,
-            eval_set=[(X_cal, y_cal)],
-            callbacks=[lgb.early_stopping(20, verbose=False),
-                       lgb.log_evaluation(-1)],
-        )
+        if cal_ok:
+            lgb_model.fit(
+                X_train_all, y_train_all,
+                eval_set=[(X_cal, y_cal)],
+                callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                           lgb.log_evaluation(-1)],
+            )
+        else:
+            lgb_model.fit(X_train_all, y_train_all)
         if oof_calibrators and "lgb" in oof_calibrators:
             lgb_model._isotonic = oof_calibrators["lgb"]
 
     if HAS_CB:
         print("  Training final CatBoost ...")
         cb_model = CatBoostClassifier(**_get_catboost_params())
-        cb_model.fit(X_train_all, y_train_all, eval_set=(X_cal, y_cal))
+        if cal_ok:
+            cb_model.fit(X_train_all, y_train_all, eval_set=(X_cal, y_cal),
+                         early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+        else:
+            cb_model.fit(X_train_all, y_train_all)
         if oof_calibrators and "cb" in oof_calibrators:
             cb_model._isotonic = oof_calibrators["cb"]
 
