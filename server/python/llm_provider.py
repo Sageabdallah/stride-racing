@@ -33,6 +33,14 @@ ANTHROPIC_TIMEOUT_SECONDS = 120
 # Rate limiting for Groq free tier (30 req/min)
 GROQ_MIN_DELAY_SECONDS = 2.1  # ~28 req/min to stay safe
 
+# A body cut off at max_tokens is deterministic, not a flake: the same prompt
+# at the same ceiling truncates in the same place every time. generate_json's
+# retry therefore spent a second call to fail identically. Raising the ceiling
+# is the only retry that can succeed, and the ceiling below is where a prompt
+# that wants unbounded output stops rather than runs away.
+TRUNCATION_RETRY_FACTOR = 2
+TRUNCATION_RETRY_CEILING = 16000
+
 
 class LLMProviderError(Exception):
     pass
@@ -42,6 +50,12 @@ class LLMProviderError(Exception):
 class LLMProvider:
     def __init__(self, model: str):
         self.model = model
+        # Whether the last generate() ran out of budget instead of finishing.
+        # Every provider already detected this and threw it away into a log
+        # line, so no caller could act on it. Plain instance state is honest
+        # here: the tips pipeline drives one provider from one thread, race
+        # after race, and every generate() resets it before the call.
+        self.last_truncated = False
 
     def generate(
         self,
@@ -60,14 +74,38 @@ class LLMProvider:
         max_tokens: int = 1024,
         retries: int = 1,
     ) -> Dict[str, Any]:
-        """Generate and parse JSON from LLM response, with optional retry."""
+        """Generate and parse JSON, raising the ceiling if the body was cut off.
+
+        A retry at the same ceiling cannot fix truncation — it is not a flake,
+        it is the budget. That is how every ai_score this system ever asked for
+        was lost: 2500 tokens for six horses of JSON prose, two identical
+        failures, and an empty dict handed back without a word.
+        """
+        budget = max_tokens
         for attempt in range(1 + retries):
-            raw = self.generate(prompt, system=system, temperature=temperature, max_tokens=max_tokens)
+            raw = self.generate(prompt, system=system, temperature=temperature,
+                                max_tokens=budget)
             result = _extract_json(raw)
             if result:
                 return result
-            if attempt < retries:
+            if attempt >= retries:
+                break
+            if not self.last_truncated:
                 logger.info("JSON parse failed, retrying...")
+            elif budget >= TRUNCATION_RETRY_CEILING:
+                logger.warning(
+                    "JSON parse failed on a body cut off at the %d-token "
+                    "ceiling; a retry cannot fix this", TRUNCATION_RETRY_CEILING)
+            else:
+                budget = min(budget * TRUNCATION_RETRY_FACTOR,
+                             TRUNCATION_RETRY_CEILING)
+                logger.warning(
+                    "JSON parse failed on a body cut off at max_tokens; "
+                    "retrying at %d", budget)
+        if self.last_truncated:
+            logger.warning(
+                "giving up on JSON: response still truncated at max_tokens=%d",
+                budget)
         return {}
 
 
@@ -85,6 +123,7 @@ class OllamaProvider(LLMProvider):
     ) -> str:
         import requests
 
+        self.last_truncated = False
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -104,7 +143,9 @@ class OllamaProvider(LLMProvider):
                 timeout=120,
             )
             resp.raise_for_status()
-            return resp.json().get("response", "").strip()
+            body = resp.json()
+            self.last_truncated = body.get("done_reason") == "length"
+            return body.get("response", "").strip()
         except requests.ConnectionError:
             raise LLMProviderError(
                 f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
@@ -138,6 +179,7 @@ class GroqProvider(LLMProvider):
         temperature: float = 0.3,
         max_tokens: int = 1024,
     ) -> str:
+        self.last_truncated = False
         elapsed = time.time() - GroqProvider._last_call_time
         if elapsed < GROQ_MIN_DELAY_SECONDS:
             time.sleep(GROQ_MIN_DELAY_SECONDS - elapsed)
@@ -156,6 +198,7 @@ class GroqProvider(LLMProvider):
             )
             GroqProvider._last_call_time = time.time()
             finish = resp.choices[0].finish_reason
+            self.last_truncated = finish == "length"
             if finish == "length":
                 logger.warning(f"Groq response truncated (max_tokens={max_tokens})")
             return resp.choices[0].message.content.strip()
@@ -188,6 +231,7 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.3,
         max_tokens: int = 1024,
     ) -> str:
+        self.last_truncated = False
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -203,6 +247,7 @@ class AnthropicProvider(LLMProvider):
             raise LLMProviderError(f"Anthropic API error: {e}")
 
         stop_reason = getattr(resp, "stop_reason", None)
+        self.last_truncated = stop_reason == "max_tokens"
         if stop_reason == "refusal":
             # HTTP 200 with no usable body. Raising keeps the caller's
             # fallback path honest instead of handing it an empty string that

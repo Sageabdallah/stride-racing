@@ -6,13 +6,25 @@ into the LLM to produce an AI score (0-100) blended into the final selection sco
 rich plain-English form analysis, and 'why this horse over others' comparison.
 """
 
-import json
 import logging
 from typing import Dict, Any, List, Optional
 
 from llm_provider import get_provider, LLMProviderError
 
 logger = logging.getLogger(__name__)
+
+# max_tokens is a ceiling, not an allocation: tokens the model never generates
+# are neither produced nor billed, so a generous ceiling costs nothing and a
+# tight one costs the entire response. The fixed 2500 below was roughly what
+# six horses of JSON prose actually need — sitting on the boundary, which is
+# why the scorer failed on every race it was ever asked to score. These scale
+# with the work requested instead, so a 16-runner field does not rediscover
+# the same cliff.
+SCORER_TOKENS_BASE = 800
+SCORER_TOKENS_PER_HORSE = 600
+INSIGHT_MAX_TOKENS = 3000
+BRIEF_TOKENS_BASE = 600
+BRIEF_TOKENS_PER_HORSE = 250
 
 
 
@@ -783,22 +795,33 @@ Add these fields to your JSON response (at the top level, alongside the "horses"
 - "ranking_reasoning": "one sentence — the primary signal driving this selection, referencing Tier 1 evidence"
 - "no_bet_reason": "one sentence" (only when tip_type is "no_bet") """
 
+    budget = SCORER_TOKENS_BASE + SCORER_TOKENS_PER_HORSE * max(1, len(horses))
     try:
         result = llm.generate_json(
             prompt,
             system=SCORER_SYSTEM_PROMPT,
             temperature=0.35,
-            max_tokens=2500,
+            max_tokens=budget,
         )
     except LLMProviderError as e:
         logger.warning(f"LLM scoring failed for {track} R{race_number}: {e}")
         return horses
 
+    # Both of the returns below hand back the field untouched, which the
+    # pipeline cannot tell apart from "the LLM is switched off". Said out loud,
+    # because that silence is exactly how a dead scorer survived to production.
     if not result:
+        logger.warning(
+            "LLM scoring returned no usable JSON for %s R%s at max_tokens=%d; "
+            "%d horses left with no ai_score", track, race_number, budget,
+            len(horses))
         return horses
 
     ai_horses = result.get("horses", [])
     if not ai_horses:
+        logger.warning(
+            "LLM scoring for %s R%s parsed but carried no horses array; "
+            "%d horses left with no ai_score", track, race_number, len(horses))
         return horses
 
     ai_lookup = {}
@@ -967,8 +990,16 @@ WHY HIM). Make every sentence specific and evidence-based."""
             prompt,
             system=INSIGHT_SYSTEM_PROMPT,
             temperature=0.4,
-            max_tokens=1500,
+            max_tokens=INSIGHT_MAX_TOKENS,
         )
+        if getattr(llm, "last_truncated", False):
+            # The text is still returned — a cut-off insight beats none — but
+            # it stops mid-word, and which picks those are is a fact a reader
+            # is entitled to. 8 of 114 on 2026-09-05, none of them flagged.
+            logger.warning(
+                "insight for %s (%s R%s) hit the %d-token ceiling and ends "
+                "mid-sentence", horse.get("horse", "?"), track, race_number,
+                INSIGHT_MAX_TOKENS)
         return insight.strip()
     except LLMProviderError as e:
         logger.warning(f"LLM insight generation failed: {e}")
@@ -1027,20 +1058,25 @@ If a horse is clearly outclassed, say so plainly.
 Return ONLY valid JSON:
 {{"assessments": {{"Horse Name": "2-3 sentence assessment", ...}}}}"""
 
+    # One call covers every non-tipped runner, so the output a fixed 2500 had
+    # to hold grew with the field. It failed 13 of 38 races on 2026-09-05.
+    budget = BRIEF_TOKENS_BASE + BRIEF_TOKENS_PER_HORSE * len(non_tipped_horses)
     try:
-        raw = llm.generate(
+        # generate_json rather than a hand-rolled find("{")/rfind("}"): it
+        # recovers fenced and lightly malformed bodies, and it is the path that
+        # escalates the ceiling when the body came back cut off.
+        data = llm.generate_json(
             prompt,
             system=BRIEF_SYSTEM_PROMPT,
             temperature=0.3,
-            max_tokens=2500,
+            max_tokens=budget,
         )
-        raw = raw.strip()
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start >= 0 and end > start:
-            data = json.loads(raw[start:end])
-            return data.get("assessments", {})
-        return {}
-    except (json.JSONDecodeError, LLMProviderError) as e:
+    except LLMProviderError as e:
         logger.warning(f"Brief assessments failed: {e}")
         return {}
+    assessments = (data or {}).get("assessments", {})
+    if not assessments:
+        logger.warning(
+            "brief assessments returned nothing for %s at max_tokens=%d "
+            "(%d non-tipped horses)", track, budget, len(non_tipped_horses))
+    return assessments

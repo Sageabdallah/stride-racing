@@ -77,7 +77,10 @@ def test_pass_when_both_picks_come_back_with_text(monkeypatch, capsys):
     insight_calls = [c for c in stub.calls if c[1] == llm_post_scorer.INSIGHT_SYSTEM_PROMPT]
     assert len(insight_calls) == 2
     assert all("THE FORM" in system for _, system, _ in insight_calls)
-    assert all(max_tokens == 1500 for _, _, max_tokens in insight_calls)
+    assert all(max_tokens == llm_post_scorer.INSIGHT_MAX_TOKENS
+               for _, _, max_tokens in insight_calls)
+    assert llm_post_scorer.INSIGHT_MAX_TOKENS > 1500, \
+        "1500 cut 8 of 114 insights mid-word on 2026-09-05; do not go back"
     assert any("Rosehill" in prompt for prompt, _, _ in insight_calls), \
         "the first fixture's recent runs must reach the prompt"
 
@@ -96,10 +99,15 @@ def test_working_insights_do_not_excuse_a_dead_scoring_stage(monkeypatch, capsys
     assert code == 1
     assert "LLM_PROOF scored=0/6" in out
     assert "score_race_horses returns no ai_score" in out
-    assert "30% AI blend" in out, "the message must say what is actually lost"
-    # And it must have probed BOTH budgets so truncation is distinguishable
-    # from a format problem rather than guessed at.
-    assert "probe budget=2500" in out and "probe budget=8000" in out
+    assert "selection ranking" in out and "STRIDE_AI_BLEND" in out, \
+        "the message must say what is actually lost"
+    # And it must have probed BOTH the ceiling that failed and the one now in
+    # force, so truncation stays distinguishable from a format problem.
+    import llm_post_scorer
+    live = (llm_post_scorer.SCORER_TOKENS_BASE
+            + llm_post_scorer.SCORER_TOKENS_PER_HORSE * 6)
+    assert "probe budget=2500" in out and f"probe budget={live}" in out
+    assert live > 2500, "2500 is the control that failed, not a live value"
 
 
 def test_the_scoring_probe_reports_size_and_parse_outcome(monkeypatch, capsys):

@@ -34,7 +34,8 @@ import logging
 import sys
 
 from llm_provider import LLMProviderError, get_provider, _extract_json
-from llm_post_scorer import generate_rich_insight, score_race_horses
+from llm_post_scorer import (SCORER_TOKENS_BASE, SCORER_TOKENS_PER_HORSE,
+                             generate_rich_insight, score_race_horses)
 
 TRACK = "Randwick"
 RACE_NUMBER = 4
@@ -127,19 +128,18 @@ def prove_scoring(llm, field, max_chars: int) -> bool:
     score_race_horses, which is the only stage that asks for structured JSON
     and the only one that failed on 2026-09-05: 114 of 114 picks carried
     insight text and 0 of 114 carried an ai_score. That stage is silent when
-    it fails — generate_json returns {} on a parse failure and
-    score_race_horses does `if not result: return horses` with no log line —
-    so nothing distinguishes "scored" from "gave up" at the call site.
+    it fails, and until the ceilings were fixed nothing distinguished
+    "scored" from "gave up" at the call site at all.
 
     Two measurements, because the interesting failure is invisible from the
     first alone:
       1. Run the real score_race_horses on the fixture field and count how
          many horses came back with an ai_score.
       2. If none did, ask the same model for the same SHAPE of answer at the
-         production ceiling and at a generous one, and report the raw
-         character count and whether it parses. A response that parses at
-         8000 tokens and not at 2500 is truncation, full stop; one that fails
-         at both is a format problem and needs a different fix.
+         ceiling that used to fail and at the one now in force, and report the
+         raw character count and whether it parses. Parsing at the live
+         ceiling and not at 2500 is truncation, full stop, and proves the fix;
+         failing at both is a format problem and needs a different fix.
     """
     scored = score_race_horses(
         horses=list(field[:6]), track=TRACK, race_number=RACE_NUMBER,
@@ -160,7 +160,12 @@ def prove_scoring(llm, field, max_chars: int) -> bool:
         "Horses: " + ", ".join(h["horse"] for h in field[:6]) + ". "
         "Invent plausible racing analysis; this is a capacity probe."
     )
-    for budget in (2500, 8000):
+    # 2500 is kept as the historical control, not as a live value: it is the
+    # fixed ceiling that failed every race on 2026-09-05. The second is what
+    # the scorer actually asks for now, so the two together answer "was it the
+    # budget, and is the budget enough" in one pass.
+    live = SCORER_TOKENS_BASE + SCORER_TOKENS_PER_HORSE * 6
+    for budget in (2500, live):
         try:
             raw = llm.generate(probe, system="Return ONLY valid JSON. No preamble.",
                                max_tokens=budget)
@@ -231,8 +236,10 @@ def main(argv=None) -> int:
     scoring_ok = prove_scoring(llm, field, args.max_chars)
     if not scoring_ok:
         print("LLM_PROOF result=FAIL insights generate but score_race_horses "
-              "returns no ai_score — the 30% AI blend into selectionScore is "
-              "silently absent, as it was for all 114 picks on 2026-09-05")
+              "returns no ai_score — the AI analysis fields and the LLM "
+              "selection ranking come from that same call, and the "
+              "STRIDE_AI_BLEND adjustment to selectionScore has nothing to "
+              "act on, as was true for all 114 picks on 2026-09-05")
         return 1
 
     print("LLM_PROOF result=PASS")
