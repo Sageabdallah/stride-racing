@@ -2,6 +2,7 @@
 import os
 import json
 import pickle
+import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -160,10 +161,37 @@ class RacingMLModel:
         'jockey_wet_residual',
     ]
     
+    # Candidate-artifact override. Production never sets it: the stable slot
+    # stays models/racing_ensemble_v2.pkl (infra/jobs/handler.py
+    # REQUIRED_MODEL_ARTIFACTS, the release manifest). The tips-proof job sets
+    # it to score a day with a staged candidate (models/racing_ensemble_v3.pkl)
+    # and write nothing — that is the "one week parallel scoring" of
+    # docs/project_retrain_gate.md. A bare filename resolves under models/;
+    # an absolute path is used as is. Announced on stderr whenever it is
+    # honoured, and loudly when the file is missing: without the artifact the
+    # wrapper degrades to is_trained=False and a proof would score with no ML
+    # at all while looking like a candidate run.
+    ARTIFACT_OVERRIDE_ENV = "STRIDE_ENSEMBLE_ARTIFACT"
+    DEFAULT_ARTIFACT = "racing_ensemble_v2.pkl"
+
+    @classmethod
+    def resolve_artifact_path(cls, model_path: str = None) -> str:
+        models_dir = os.path.join(os.path.dirname(__file__), "models")
+        if model_path:
+            return model_path
+        override = os.environ.get(cls.ARTIFACT_OVERRIDE_ENV, "").strip()
+        if not override:
+            return os.path.join(models_dir, cls.DEFAULT_ARTIFACT)
+        path = override if os.path.isabs(override) else os.path.join(models_dir, override)
+        exists = os.path.exists(path)
+        print(f"[ML] artifact override {cls.ARTIFACT_OVERRIDE_ENV}={override!r} -> {path} "
+              f"(exists: {exists})" + ("" if exists else
+              " — WARNING: missing; the wrapper will report is_trained=False and the run "
+              "will score WITHOUT the candidate"), file=sys.stderr)
+        return path
+
     def __init__(self, model_path: str = None):
-        self.model_path = model_path or os.path.join(
-            os.path.dirname(__file__), 'models', 'racing_ensemble_v2.pkl'
-        )
+        self.model_path = self.resolve_artifact_path(model_path)
         self.xgb_model = None
         self.lgb_model = None
         self.catboost_model = None

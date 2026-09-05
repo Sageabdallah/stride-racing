@@ -90,8 +90,25 @@ features (→ [14](14-late-odds-features.md)).
 ## Rollout & flags
 
 - Staged artifact promotion (existing discipline): `racing_ensemble_v3.pkl` beside
-  v2, env pointer, one-week parallel scoring, then switch.
-- Rollback: point back to v2 artifact.
+  v2, one-week parallel scoring, then switch.
+- **Mechanics (2026-09-05).** Production keeps the stable slot: `RacingMLModel`
+  loads `models/racing_ensemble_v2.pkl`, `REQUIRED_MODEL_ARTIFACTS` and the
+  release manifest name it, and nothing in production reads an env pointer. The
+  candidate is scored by the `tips-proof` job with `STRIDE_ENSEMBLE_ARTIFACT`
+  set on the task (verify-jobs input `ensemble_artifact`): the wrapper honours
+  the override only when set, the proof writes nothing to the database and
+  relays `tips_<date>_candidate.json`, and `compare_candidate_tips.py` puts it
+  beside the real `tips_<date>.json`. The proof refuses to run if the candidate
+  was not staged (a missing artifact would otherwise score with no ML while
+  looking like a candidate run). The candidate is produced by the
+  `retrain-model` workflow in `v3-candidate` mode, where snapshot odds are fixed
+  in the workflow rather than chosen, the run is refused below the snapshot-row
+  floor and when the inputs-only preflight is not green, and the artifact is
+  written with `--model-version v3` so the preflight freshness gate can pass.
+  Promotion = the operator installs the candidate into the stable slot after
+  the NEW-BEATS-OLD rule ([12-preregistration.md](12-preregistration.md)) is
+  met on the parallel week.
+- Rollback: point back to v2 artifact (reinstall it into the stable slot).
 
 ## Guardrails
 

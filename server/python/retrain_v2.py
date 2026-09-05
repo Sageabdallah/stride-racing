@@ -14,6 +14,7 @@ Walk-forward CV parameters:
 """
 
 import argparse
+import json
 import os
 import sys
 import pickle
@@ -1394,6 +1395,9 @@ def train_final_model(
 
 
 
+DEFAULT_MODEL_VERSION = "v2"
+
+
 def save_model(
     xgb_model,
     lgb_model,
@@ -1403,7 +1407,13 @@ def save_model(
     cv_results: Dict[str, Any],
     ablation_results: Dict[str, Any],
     output_path: str,
+    version: str = DEFAULT_MODEL_VERSION,
+    extra: Optional[Dict[str, Any]] = None,
 ):
+    """`version` was hardcoded "v2" until 2026-09-05. retrain_preflight's
+    freshness gate REDs a candidate whose version equals the live artifact's,
+    so no output of this trainer could pass it while production runs v2;
+    the task-12 candidate is written as "v3". Default unchanged."""
     payload = {
         "xgb_model": xgb_model,
         "lgb_model": lgb_model,
@@ -1413,11 +1423,64 @@ def save_model(
         "cv_results": cv_results,
         "ablation_results": ablation_results,
         "trained_at": datetime.now().isoformat(),
-        "version": "v2",
+        "version": version,
     }
+    if extra:
+        payload.update(extra)
     with open(output_path, "wb") as fh:
         pickle.dump(payload, fh)
-    print(f"\n  Model saved to: {output_path}")
+    print(f"\n  Model saved to: {output_path}  (version {version})")
+
+
+def enforce_snapshot_floor(df: pd.DataFrame, min_rows: Optional[int]) -> int:
+    """Refuse (exit 2) to train a snapshot-odds candidate below `min_rows`.
+
+    filter_snapshot_rows already refuses an EMPTY frame; a small one is the
+    quieter failure — a candidate fitted on a few hundred rows would reach the
+    preflight looking like any other. The workflow passes
+    odds_ablation.DEFAULT_MIN_ROWS; None (the default here) applies no floor,
+    so a legacy run is unchanged."""
+    if min_rows is None:
+        return len(df)
+    if len(df) < int(min_rows):
+        print(f"  REFUSAL: {len(df):,} snapshot rows < floor {int(min_rows):,} — not enough "
+              f"tip-time odds accrued to train a candidate. Wait; do not fall back to SP.",
+              file=sys.stderr)
+        sys.exit(2)
+    print(f"  Snapshot floor: {len(df):,} rows >= {int(min_rows):,}")
+    return len(df)
+
+
+def _json_safe(obj: Any) -> Any:
+    """cv_results carries fitted IsotonicRegression objects under
+    oof_calibrators; drop them (the artifact keeps them) so the report is
+    plain JSON."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items() if k != "oof_calibrators"}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.floating, np.integer)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
+def write_report(path: str, cv_results: Dict[str, Any], ablation_results: Dict[str, Any],
+                 importance: Dict[str, float], meta: Dict[str, Any]) -> str:
+    """The run's evidence as JSON next to the artifact: CV (per-fold AUC/
+    Brier, per-race metrics, fold hygiene), ablation arms, importances, and
+    the run metadata (odds mode, version, row counts)."""
+    report = {
+        "meta": meta,
+        "cv": _json_safe(cv_results),
+        "ablation": _json_safe(ablation_results),
+        "feature_importance": {k: float(v) for k, v in importance.items()},
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, default=str)
+    print(f"  Report written to: {path}")
+    return path
 
 
 
@@ -1616,6 +1679,25 @@ def parse_args():
         action="store_true",
         help="Load the deployed view and build features, then stop immediately before model fitting.",
     )
+    parser.add_argument(
+        "--model-version",
+        default=DEFAULT_MODEL_VERSION,
+        help="Artifact version string (default v2 — unchanged). The task-12 candidate is "
+             "v3: the preflight freshness gate REDs a candidate whose version equals live.",
+    )
+    parser.add_argument(
+        "--min-snapshot-rows",
+        type=int,
+        default=None,
+        help="STRIDE_TRAIN_ODDS_SOURCE=snapshot only: refuse (exit 2) below this many "
+             "snapshot rows. Default: no floor.",
+    )
+    parser.add_argument(
+        "--report-path",
+        default=None,
+        help="Write the run's evidence (CV incl. per-race metrics and fold hygiene, "
+             "ablation, importances, run metadata) as JSON here.",
+    )
     return parser.parse_args()
 
 
@@ -1633,6 +1715,7 @@ def main():
     df_raw = load_training_data()
     if _train_odds_source() == "snapshot":
         df_raw = filter_snapshot_rows(df_raw)
+        enforce_snapshot_floor(df_raw, args.min_snapshot_rows)
 
     n_total = len(df_raw)
     n_winners = int(df_raw["is_winner"].astype(int).sum())
@@ -1705,6 +1788,15 @@ def main():
     )
     print_top_features(final_importance, n=25)
 
+    run_meta = {
+        "version": args.model_version,
+        "odds_source_mode": _train_odds_source(),
+        "n_rows": int(n_total),
+        "n_winners": int(n_winners),
+        "n_features": len(feature_cols),
+        "race_metrics": cv_results.get("race_metrics"),
+        "trained_at": datetime.now().isoformat(),
+    }
     print(f"\n[6] Saving model to {output_model_path} ...")
     save_model(
         xgb_final,
@@ -1715,7 +1807,13 @@ def main():
         cv_results,
         ablation_results,
         output_model_path,
+        version=args.model_version,
+        extra={"odds_source_mode": run_meta["odds_source_mode"],
+               "race_metrics": run_meta["race_metrics"]},
     )
+    if args.report_path:
+        write_report(os.path.abspath(args.report_path), cv_results, ablation_results,
+                     final_importance, run_meta)
 
     elapsed = time.time() - t0
     print("\n" + "=" * 70)
