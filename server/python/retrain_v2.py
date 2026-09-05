@@ -100,6 +100,15 @@ from sklearn.metrics import roc_auc_score, brier_score_loss
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
 
+# Per-race metrics (top-1 hit vs the tip-time favourite, same-race H2H,
+# per-race log-loss) — task-12 step 3. Pure numpy/pandas; see race_metrics.py.
+from race_metrics import (
+    build_race_meta,
+    format_line as format_race_line,
+    per_race_metrics,
+    pool as pool_race_metrics,
+)
+
 
 # Phase 2 sectional feature names and the NaN-preserve contract now live in
 # nan_contract.py — ONE definition shared with the serve path (ml_model.py
@@ -996,10 +1005,19 @@ def run_walk_forward_cv(
     feature_cols: List[str],
     label: str = "full",
     collect_oof_calibrators: bool = False,
+    race_meta: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     Run full walk-forward CV for the given feature set.
     Returns aggregated metrics and per-fold results.
+
+    race_meta (optional, index-aligned with X; race_metrics.build_race_meta):
+    race_key, tip_time_odds, sp_odds, predicted_win_prob. When given, every
+    fold also reports per-race top-1 hit rate against the tip-time favourite
+    (the staging criterion's baseline), the SP favourite as a hindsight
+    diagnostic, the same-race H2H against the stored production probability,
+    and per-race normalised log-loss; the pooled result lands in
+    results["race_metrics"]. Counts are pooled exactly (summed), not averaged.
     """
     splitter = DateWindowSplitter(
         min_train_days=60,
@@ -1020,6 +1038,7 @@ def run_walk_forward_cv(
     fold_results = []
     all_auc = []
     all_brier = []
+    race_folds: List[Dict[str, Any]] = []
 
     # OOF accumulators — only populated when collect_oof_calibrators=True
     oof_xgb, oof_lgb, oof_cb, oof_labels = [], [], [], []
@@ -1076,6 +1095,18 @@ def run_walk_forward_cv(
             "brier": fold_brier,
             "per_model_auc": per_auc,
         }
+        race_line = None
+        if race_meta is not None:
+            rm = race_meta.iloc[test_idx]
+            race = per_race_metrics(
+                ens_proba, y_test.values, rm["race_key"].values,
+                tip_time_odds=rm["tip_time_odds"].values if "tip_time_odds" in rm else None,
+                sp_odds=rm["sp_odds"].values if "sp_odds" in rm else None,
+                stored=rm["predicted_win_prob"].values if "predicted_win_prob" in rm else None,
+            )
+            fold_entry["race"] = race
+            race_folds.append(race)
+            race_line = format_race_line(race)
         fold_results.append(fold_entry)
 
         xgb_auc_str = f"{per_auc.get('xgb', float('nan')):.4f}" if "xgb" in per_auc else "  n/a "
@@ -1090,6 +1121,8 @@ def run_walk_forward_cv(
             f"{auc_str:>7} {brier_str:>7} "
             f"{xgb_auc_str:>9} {lgb_auc_str:>9} {cb_auc_str:>8}"
         )
+        if race_line:
+            print(f"        race: {race_line}")
 
     mean_auc   = float(np.mean(all_auc))   if all_auc   else float("nan")
     mean_brier = float(np.mean(all_brier)) if all_brier else float("nan")
@@ -1101,6 +1134,9 @@ def run_walk_forward_cv(
         f"mean Brier={mean_brier:.4f}  "
         f"folds={len(fold_results)}"
     )
+    race_pooled = pool_race_metrics(race_folds) if race_folds else None
+    if race_pooled is not None:
+        print(f"  [{label}] PER-RACE (pooled): {format_race_line(race_pooled)}")
 
     results = {
         "label": label,
@@ -1109,6 +1145,7 @@ def run_walk_forward_cv(
         "std_auc": std_auc,
         "mean_brier": mean_brier,
         "folds": fold_results,
+        "race_metrics": race_pooled,
     }
 
     if collect_oof_calibrators and oof_labels:
@@ -1129,6 +1166,7 @@ def run_ablation(
     X: pd.DataFrame,
     y: pd.Series,
     dates: pd.Series,
+    race_meta: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     Compare AUC of the full feature set against (a) the set without the
@@ -1148,9 +1186,12 @@ def run_ablation(
     print(f"  Base feature set : {len(base_features)} features (Phase 2 excluded)")
     print(f"  -Phase5 set      : {len(no_p5_features)} features (relative-market trio excluded)")
 
-    results_full = run_walk_forward_cv(X, y, dates, all_features, label="WITH Phase2")
-    results_base = run_walk_forward_cv(X, y, dates, base_features, label="WITHOUT Phase2")
-    results_no_p5 = run_walk_forward_cv(X, y, dates, no_p5_features, label="WITHOUT Phase5")
+    results_full = run_walk_forward_cv(X, y, dates, all_features, label="WITH Phase2",
+                                       race_meta=race_meta)
+    results_base = run_walk_forward_cv(X, y, dates, base_features, label="WITHOUT Phase2",
+                                       race_meta=race_meta)
+    results_no_p5 = run_walk_forward_cv(X, y, dates, no_p5_features, label="WITHOUT Phase5",
+                                        race_meta=race_meta)
 
     delta = results_full["mean_auc"] - results_base["mean_auc"]
     delta_p5 = results_full["mean_auc"] - results_no_p5["mean_auc"]
@@ -1162,6 +1203,11 @@ def run_ablation(
     print(f"    Phase 5 delta       : {delta_p5:+.4f}  "
           f"(Brier full {results_full['mean_brier']:.4f} vs "
           f"-P5 {results_no_p5['mean_brier']:.4f})")
+    for name, res in (("full", results_full), ("-Phase2", results_base),
+                      ("-Phase5", results_no_p5)):
+        rm = res.get("race_metrics")
+        if rm:
+            print(f"    per-race {name:<8}: {format_race_line(rm)}")
 
     return {
         "with_phase2": results_full,
@@ -1288,6 +1334,14 @@ def print_cv_summary(cv_results: Dict[str, Any]):
         aucs = [f["auc"] for f in cv_results["folds"] if not np.isnan(f["auc"])]
         if aucs:
             print(f"  AUC range     : [{min(aucs):.4f}, {max(aucs):.4f}]")
+    rm = cv_results.get("race_metrics")
+    if rm:
+        print("  Per-race (pooled over folds; staging criterion baseline = tip-time favourite):")
+        print(f"    {format_race_line(rm)}")
+        if rm.get("fav_tip_time_coverage") is not None and rm["fav_tip_time_coverage"] < 0.5:
+            print("    NOTE: tip-time odds cover under half the usable races — the "
+                  "tip-time favourite baseline is thin on this window; the SP "
+                  "favourite is hindsight and is not the baseline.")
 
 
 
@@ -1515,14 +1569,22 @@ def main():
         print(f"\n  READY_FOR_MODEL_FIT — dry-run stopped before walk-forward CV ({elapsed:.1f}s)")
         return
 
+    # Per-race context for the CV (task-12 step 3): race identity on the
+    # same key the pace features group by, tip-time and SP odds, the stored
+    # production probability. Never a training input.
+    race_meta = build_race_meta(df_raw).reset_index(drop=True)
+    n_tt = int(np.isfinite(race_meta["tip_time_odds"].to_numpy()).sum())
+    print(f"  Race meta: {race_meta['race_key'].nunique():,} races; "
+          f"tip-time odds on {n_tt:,}/{len(race_meta):,} rows")
+
     print("\n[3] Walk-Forward Temporal Cross-Validation ...")
     print("  Parameters: min_train=60d, purge=14d, test=14d, step=14d")
     cv_results = run_walk_forward_cv(X, y, dates, feature_cols, label="CV-full",
-                                     collect_oof_calibrators=True)
+                                     collect_oof_calibrators=True, race_meta=race_meta)
     print_cv_summary(cv_results)
 
     print("\n[4] Ablation study ...")
-    ablation_results = run_ablation(X, y, dates)
+    ablation_results = run_ablation(X, y, dates, race_meta=race_meta)
 
     print("\n[5] Training final model on ALL data ...")
     oof_calibrators = cv_results.get("oof_calibrators", {})
