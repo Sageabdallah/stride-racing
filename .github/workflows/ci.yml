@@ -78,3 +78,4 @@ jobs:
           python selection_diagnostics.py
           python feature_interactions.py
           python ship_criteria.py
+          python shadow_flip_review.py --self-test
