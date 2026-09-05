@@ -17,6 +17,16 @@ Usage:
   python retrain_preflight.py --staging models/candidates/racing_ensemble_v2_20260801.pkl
   python retrain_preflight.py --staging <pkl> --metrics shadow_metrics.json
   python retrain_preflight.py --staging <pkl> --json
+  python retrain_preflight.py --inputs-only [--json]
+
+--inputs-only runs the gates that do not need a candidate artifact (serve
+liveness of the declared columns, retrain_v2/ml_model lockstep, the parity
+suites, the as-of td profiles, pre-registration). It is what gate_status.py
+gate 5 runs BEFORE any training job: until 2026-09-05 that gate invoked this
+script with no --staging at all, which argparse rejects, so the gate could
+never pass and the daily readout said NOT READY on a structurally impossible
+check. Candidate preflight (--staging) runs once an artifact exists; a gate on
+whether an artifact may be created cannot depend on the artifact.
 
 Exit 1 on any RED. Exit 0 with PEND items means "cleared pending the human
 approvals listed" — not approval.
@@ -28,6 +38,7 @@ import argparse
 import ast
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -118,21 +129,25 @@ def gate_loads(staging: Path):
     return obj, [_row("artifact-loads", GREEN, f"all {len(EXPECTED_KEYS)} expected keys present")]
 
 
-def gate_liveness(staging: Path, code_columns):
-    """Every declared feature trained AND served; no code/pkl drift."""
+def gate_liveness_static(code_columns):
+    """The staging-independent half: every declared column is assigned at
+    serve (no ZERO_AT_SERVE). Reads source, not an artifact."""
     import feature_liveness_audit as fla
     static = fla.audit_static(code_columns)
     zero_at_serve = static["verdict_counts"].get("ZERO_AT_SERVE", 0)
-    pkl = fla.audit_pkl(str(staging), code_columns)
-    in_code_not_in_pkl = pkl.get("in_code_not_in_pkl", [])
-
-    rows = []
     if zero_at_serve:
         names = [r["feature"] for r in static["features"] if r["verdict"] == "ZERO_AT_SERVE"]
-        rows.append(_row("liveness:serve", RED,
-                         f"{zero_at_serve} features trained but never served: {names[:5]}"))
-    else:
-        rows.append(_row("liveness:serve", GREEN, "ZERO_AT_SERVE = 0"))
+        return [_row("liveness:serve", RED,
+                     f"{zero_at_serve} features trained but never served: {names[:5]}")]
+    return [_row("liveness:serve", GREEN, "ZERO_AT_SERVE = 0")]
+
+
+def gate_liveness(staging: Path, code_columns):
+    """Every declared feature trained AND served; no code/pkl drift."""
+    import feature_liveness_audit as fla
+    rows = gate_liveness_static(code_columns)
+    pkl = fla.audit_pkl(str(staging), code_columns)
+    in_code_not_in_pkl = pkl.get("in_code_not_in_pkl", [])
     if in_code_not_in_pkl:
         rows.append(_row("liveness:trained", RED,
                          f"{len(in_code_not_in_pkl)} declared features not in artifact: "
@@ -143,25 +158,35 @@ def gate_liveness(staging: Path, code_columns):
 
 
 def gate_lockstep(staging_obj, retrain_path=None, ml_model_path=None):
+    """staging_obj=None (inputs-only) compares the two source contracts and
+    says so; with a candidate the artifact's stored columns join the check."""
     retrain_path = retrain_path or SCRIPT_DIR / "retrain_v2.py"
     ml_model_path = ml_model_path or SCRIPT_DIR / "ml_model.py"
     retrain_cols = _parse_list_literal(Path(retrain_path), "FEATURE_COLUMNS")
     model_cols = _parse_list_literal(Path(ml_model_path), "FEATURE_COLUMNS")
-    pkl_cols = list(staging_obj.get("feature_columns") or [])
 
     rows = []
     if retrain_cols is None or model_cols is None:
         rows.append(_row("lockstep:columns", RED, "could not parse FEATURE_COLUMNS from source"))
-    elif retrain_cols == model_cols == pkl_cols:
-        rows.append(_row("lockstep:columns", GREEN,
-                         f"retrain_v2 == ml_model == pkl ({len(pkl_cols)} columns, ordered)"))
+    elif staging_obj is None:
+        if retrain_cols == model_cols:
+            rows.append(_row("lockstep:columns", GREEN,
+                             f"retrain_v2 == ml_model ({len(model_cols)} columns, ordered; "
+                             "no candidate artifact to compare)"))
+        else:
+            rows.append(_row("lockstep:columns", RED, "retrain_v2 != ml_model"))
     else:
-        drift = []
-        if retrain_cols != model_cols:
-            drift.append("retrain_v2 != ml_model")
-        if model_cols != pkl_cols:
-            drift.append(f"ml_model ({len(model_cols or [])}) != pkl ({len(pkl_cols)})")
-        rows.append(_row("lockstep:columns", RED, "; ".join(drift)))
+        pkl_cols = list(staging_obj.get("feature_columns") or [])
+        if retrain_cols == model_cols == pkl_cols:
+            rows.append(_row("lockstep:columns", GREEN,
+                             f"retrain_v2 == ml_model == pkl ({len(pkl_cols)} columns, ordered)"))
+        else:
+            drift = []
+            if retrain_cols != model_cols:
+                drift.append("retrain_v2 != ml_model")
+            if model_cols != pkl_cols:
+                drift.append(f"ml_model ({len(model_cols or [])}) != pkl ({len(pkl_cols)})")
+            rows.append(_row("lockstep:columns", RED, "; ".join(drift)))
 
     retrain_np = set(_parse_list_literal(Path(retrain_path), "NAN_PRESERVE_FEATURES") or [])
     model_np = _parse_list_literal(Path(ml_model_path), "NAN_PRESERVE_FEATURES")
@@ -305,6 +330,46 @@ def gate_shadow_metrics(metrics_path: str | None):
     return [_row("shadow-metrics", RED, f"{detail} (SHIP required for promotion)")]
 
 
+# Matches both shapes the pack uses: `**label:** _to be filled in ..._` and
+# `**label: _to be filled in ..._**` (the live 12-preregistration.md wraps the
+# whole phrase in bold). The label is the run of plain words before the colon.
+_PLACEHOLDER = re.compile(r"([A-Za-z][A-Za-z0-9 /()-]{0,60}?):\**\s*_?to be filled in", re.I)
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def unfilled_placeholders(text: str):
+    """Labels of `label: _to be filled in ..._` placeholders that no later
+    line resolves.
+
+    The pre-registration document is append-only once its window opens, so a
+    placeholder is never edited; it is superseded by a later dated entry that
+    names the same label with a concrete date. The most recent declaration
+    governs: a label counts as unfilled only when no line AFTER the
+    placeholder mentions it together with an ISO date. Labels are matched
+    case-insensitively on their words, so "start date" is resolved by
+    "Window start date: 2026-08-02" as well as "start date 2026-08-02".
+    """
+    lines = text.splitlines()
+    unfilled = []
+    for i, line in enumerate(lines):
+        m = _PLACEHOLDER.search(line)
+        if not m:
+            continue
+        label = m.group(1).strip(" *")
+        words = [w for w in re.findall(r"[a-z0-9]+", label.lower())]
+        if not words:
+            continue
+        resolved = False
+        for later in lines[i + 1:]:
+            low = later.lower()
+            if all(w in low for w in words) and _ISO_DATE.search(later):
+                resolved = True
+                break
+        if not resolved:
+            unfilled.append(label)
+    return unfilled
+
+
 def gate_preregistration(prereg_path: Path = PREREG_DOC):
     if not prereg_path.exists():
         return [_row("preregistration", AMBER,
@@ -315,7 +380,16 @@ def gate_preregistration(prereg_path: Path = PREREG_DOC):
     if n:
         return [_row("preregistration", AMBER,
                      f"{n} unresolved [SAGE-APPROVAL] marker(s) in {prereg_path.name}")]
-    return [_row("preregistration", GREEN, f"{prereg_path.name} present, no unresolved markers")]
+    # A resolved marker set is not a registered window: until 2026-09-05 this
+    # gate read GREEN with the window start still "_to be filled in on restart
+    # day_", because it counted markers and never looked at the dates.
+    unfilled = unfilled_placeholders(text)
+    if unfilled:
+        return [_row("preregistration", AMBER,
+                     f"{len(unfilled)} unregistered placeholder(s) in {prereg_path.name}: "
+                     f"{unfilled} — resolve with a dated amendment entry (append-only)")]
+    return [_row("preregistration", GREEN,
+                 f"{prereg_path.name} present, no unresolved markers, no unfilled placeholders")]
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +438,33 @@ def run_preflight(staging: str, metrics: str | None = None,
     return {"board1": board1, "board2": board2}
 
 
+def run_inputs_preflight(prereg_path: Path = PREREG_DOC, parity_test_paths=None,
+                         retrain_path=None, ml_model_path=None):
+    """The gates a retrain's INPUTS must pass before a training job starts.
+
+    No artifact is read: liveness of the declared columns at serve, the two
+    source contracts in lockstep, the parity suites, the as-of td profiles and
+    pre-registration. Everything candidate-specific (artifact keys, pkl
+    column drift, freshness, shadow metrics) belongs to --staging, which runs
+    on the artifact after it exists.
+    """
+    board1, board2 = [], []
+    code_columns = _parse_list_literal(
+        Path(retrain_path) if retrain_path else SCRIPT_DIR / "retrain_v2.py",
+        "FEATURE_COLUMNS")
+    if code_columns is None:
+        board1.append(_row("liveness:serve", RED,
+                           "could not parse FEATURE_COLUMNS from retrain_v2.py"))
+    else:
+        board1 += gate_liveness_static(code_columns)
+    lock_rows, _ = gate_lockstep(None, retrain_path, ml_model_path)
+    board1 += lock_rows
+    board1 += gate_parity_suites(parity_test_paths)
+    board1 += gate_asof_td_profiles(retrain_path)
+    board2 += gate_preregistration(prereg_path)
+    return {"board1": board1, "board2": board2, "mode": "inputs-only"}
+
+
 def render(boards) -> str:
     lines = ["", "=== BOARD 1 — ARTIFACT HYGIENE (any FAIL blocks) ==="]
     for r in boards["board1"]:
@@ -386,12 +487,20 @@ def render(boards) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Retrain promotion preflight gate.")
-    parser.add_argument("--staging", required=True, help="path to the staged pkl candidate")
+    parser.add_argument("--staging", default=None, help="path to the staged pkl candidate")
+    parser.add_argument("--inputs-only", action="store_true",
+                        help="run only the gates that need no candidate artifact "
+                             "(what gate_status gate 5 runs before training)")
     parser.add_argument("--metrics", default=None, help="shadow-metrics JSON (optional)")
     parser.add_argument("--json", action="store_true", help="machine-readable board")
     args = parser.parse_args()
+    if bool(args.staging) == bool(args.inputs_only):
+        parser.error("pass exactly one of --staging <pkl> or --inputs-only")
 
-    boards = run_preflight(args.staging, args.metrics)
+    if args.inputs_only:
+        boards = run_inputs_preflight()
+    else:
+        boards = run_preflight(args.staging, args.metrics)
     if args.json:
         print(json.dumps(boards, indent=2))
     else:

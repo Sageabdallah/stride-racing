@@ -124,3 +124,18 @@ delta summaries.
 Same as the pre-registration: append-only once a shadow window opens. Changing a
 threshold, day-count, or review bar after shadow data exists voids that flag's
 window and restarts its day count.
+
+---
+
+## Note 2026-09-05 — the criteria are now computed, not read by hand
+
+`server/python/shadow_flip_review.py` reads the durable evidence store and
+prints one verdict per criterion above, with every threshold quoted from this
+document next to its constant (5 days, 15% top-3 flip rate, order-of-magnitude
+race outliers; pooled Brier not worse, sums at unity, 5% transition rate, the
+25% single-race sign-off list). Criteria this document assigns to Sage
+(stability trend, the transition matrix, the largest-delta races) are printed
+as REVIEW with the numbers and never auto-passed. `--emit-evidence` writes
+`flip_review_<flag>_<date>.json` to the store; `gate_status.py` gate 3 requires
+that record's PASS, the 5-day count and the flag itself. No threshold, day
+count or review bar changed.
