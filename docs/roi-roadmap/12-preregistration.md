@@ -121,3 +121,48 @@ protocol.
 - Statistics machinery: [02](02-backtest-statistics.md) · Ledger/CLV: [01](01-ledger-clv-net-settlement.md) · Snapshots: [04](04-as-of-odds-snapshot.md)
 - Protocol this operationalises: [09](09-forward-validation-protocol.md) · Retrain it gates: [12](12-retrain-rebaseline.md)
 - Flag flips gated separately: [shadow-flip-criteria.md](shadow-flip-criteria.md)
+
+---
+
+## Amendment 2026-09-05 — window start, staging vs promotion, cross-fitted evaluation (append-only entry)
+
+[SAGE-APPROVAL] confirm this amendment (remove this marker to sign; `retrain_preflight.py` reads the pre-registration AMBER until it is gone)
+
+Written before any v3 candidate exists and before any window metric was
+computed. Nothing above is edited; this entry supersedes by reference.
+
+**1. Window start date: 2026-08-02.** The WINDOW section's placeholder was
+never filled on restart day. The date was, however, already registered
+before any outcome data existed: `docs/project_retrain_gate.md`, committed
+2026-08-02T03:02:08Z at repo head 3324c25 — day zero 2026-08-02, earliest
+window 2026-08-30, recommended 2026-09-13, validation window B 2026-08-02 to
+2026-09-13. This entry records that registered fact by reference; it does not
+choose a date after the fact.
+
+**2. Two criteria for two stages — one contract.** `12-retrain-rebaseline.md`
+step 3 ("new model must beat the favourite baseline and not lose the H2H")
+and the NEW-BEATS-OLD rule above were read as competing promotion rules. They
+govern different stages:
+
+- **Staging criterion (walk-forward CV; decides whether a candidate is staged
+  at all).** On identical purge-gapped folds the candidate must (a) not
+  degrade honest out-of-fold Brier against the legacy arm scored on the same
+  folds, (b) improve per-race top-1 hit rate against the **tip-time
+  favourite** on the same races, and (c) not lose the same-race head-to-head
+  against the stored production probability. The SP favourite is printed as
+  a hindsight diagnostic and is never the baseline: selection criteria use
+  tip-time price ([09](09-forward-validation-protocol.md)); SP is for
+  settlement and CLV. A candidate that fails is a documented negative result
+  (the `rank_model.py` precedent) and never enters parallel scoring.
+- **Promotion rule (live; decides whether a staged candidate replaces
+  production).** Unchanged: NEW-BEATS-OLD above — Brier not degraded on the
+  window, `evaluate_ship_criteria` SHIP on LIVE-GATE, at least 200 bets —
+  read after one week of parallel scoring of the candidate through the
+  `tips-proof` job.
+
+**3. Cross-fitted meta-evaluation.** Any learned combination of the base
+models, and any final-stage calibrator, fitted on out-of-fold predictions is
+evaluated only on folds it was not fitted on (fit on earlier folds, score
+the next). The persisted production object may be fitted on all out-of-fold
+rows; its in-sample Brier is labelled as such and never quoted as
+performance.

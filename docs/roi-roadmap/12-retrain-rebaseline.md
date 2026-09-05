@@ -52,10 +52,15 @@ features (→ [14](14-late-odds-features.md)).
    to final XGB/CatBoost fits using the held-out tail. Keep `DateWindowSplitter`'s
    14-day purge (:695-762) — it is correct.
 3. **Per-race metrics in CV.** `run_walk_forward_cv` output adds, per fold and pooled:
-   per-race top-1 hit rate, SP-favourite baseline hit rate on the same races,
-   same-race H2H vs the stored production model (reuse `rank_model.py`'s harness),
-   and per-race softmax log-loss. **Promotion criterion:** new model must beat the
-   favourite baseline and not lose the H2H. AUC/Brier remain as diagnostics.
+   per-race top-1 hit rate, **tip-time**-favourite baseline hit rate on the same
+   races (SP favourite printed as a hindsight diagnostic only — selection uses
+   tip-time price, [09](09-forward-validation-protocol.md)), same-race H2H vs the
+   stored production model (reuse `rank_model.py`'s harness), and per-race
+   normalised log-loss. **Staging criterion** (this decides which candidate is
+   staged; the live *promotion* rule is [12-preregistration.md](12-preregistration.md)
+   NEW-BEATS-OLD, see its 2026-09-05 amendment): honest OOF Brier not worse on
+   identical folds, top-1 hit rate above the tip-time favourite, H2H not lost.
+   AUC remains a diagnostic.
 4. **Learned, persisted ensemble.** Fit per-category weights or the stacking
    meta-learner on the purge-gapped OOF predictions; persist inside
    `racing_ensemble_v2.pkl` (fix `ml_model.save` :635-645 to include
