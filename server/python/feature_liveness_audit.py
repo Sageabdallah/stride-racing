@@ -15,12 +15,23 @@ script existed, which is exactly why it now exists):
     at train, constant 0 in production. This is worse than dead — the model
     actively misprices with it.
 
-The audit is STATIC (regex + declaration-block masking): it reports where each
-feature name is assigned on each side, with file:line evidence. Static scanning
-can over-count (a name inside a string or comment) but cannot under-count an
-assignment, so ABSENT verdicts are trustworthy; ASSIGNED verdicts cite their
-evidence for a human to spot-check. Optionally, --pkl adds the trained model's
-view: per-feature importances and any code<->artifact column drift.
+The audit is STATIC (regex + declaration-block masking, plus an AST pass for
+loop assignments): it reports where each feature name is assigned on each
+side, with file:line evidence. Static scanning can over-count (a name inside a
+string or comment) but cannot under-count an assignment, so ABSENT verdicts are
+trustworthy; ASSIGNED verdicts cite their evidence for a human to spot-check.
+Optionally, --pkl adds the trained model's view: per-feature importances and
+any code<->artifact column drift.
+
+The AST pass exists because the line regexes could not see
+`for k in SECTIONAL_LIVE_FEATURES: feat[k] = ...` — the exact shape
+serve_features.py uses to plumb the sectional set — so every such feature read
+REFERENCED_ONLY at serve and the z_* tripwire in _self_test fired
+(2026-09-05). Only literal collections count (a tuple/list of string literals,
+inline or a module-level constant in the same file, `+`-concatenated); the
+declaration lists the regex pass masks (FEATURE_COLUMNS ...) are excluded, so
+`for col in FEATURE_COLUMNS: out[col] = np.nan` — a placeholder fill — never
+counts as liveness.
 
 Usage:
   python feature_liveness_audit.py                          # static audit
@@ -31,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -119,6 +131,91 @@ def _referenced(name: str, src: str) -> bool:
     return re.search(rf"[\"']{name}[\"']", src) is not None
 
 
+# The declaration lists the regex pass masks. Iterating one of these and
+# assigning (`for col in FEATURE_COLUMNS: out[col] = np.nan`) is a
+# placeholder fill for every declared name, not evidence that any is live.
+_DECLARATION_NAMES = frozenset(
+    {"FEATURE_COLUMNS", "NAN_PRESERVE_FEATURES", "NAN_PRESERVE",
+     "VIEW_TO_FEATURE_MAP"})
+
+
+def _literal_elems(node: ast.AST, known: Dict[str, List[str]]) -> Optional[List[str]]:
+    """String members of a literal tuple/list, a `+` of them, or a known
+    module-level constant; None for anything computed."""
+    if isinstance(node, (ast.Tuple, ast.List)):
+        if node.elts and all(isinstance(e, ast.Constant) and isinstance(e.value, str)
+                             for e in node.elts):
+            return [e.value for e in node.elts]
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_elems(node.left, known)
+        right = _literal_elems(node.right, known)
+        if left is not None and right is not None:
+            return left + right
+        return None
+    if isinstance(node, ast.Name) and node.id in known:
+        return list(known[node.id])
+    return None
+
+
+def _literal_collections(tree: ast.Module) -> Dict[str, List[str]]:
+    """Module-level `NAME = (<str literals>)` constants, in file order."""
+    out: Dict[str, List[str]] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            elems = _literal_elems(node.value, out)
+            if elems is not None:
+                out[node.targets[0].id] = elems
+    return out
+
+
+def _loop_assignment_evidence(raw_src: str, fname: str) -> Dict[str, List[str]]:
+    """{feature: [evidence]} for `for k in <literal collection>: X[k] = ...`.
+
+    Parses the RAW source (the masked text is not valid Python). The loop's
+    iterable must resolve to string literals — inline, or a same-file
+    module-level constant — and the loop body must assign a subscript keyed
+    by the loop variable. Anything computed (a call, a comprehension, an
+    imported name, `X.loc[mask, k]`) contributes nothing: ABSENT stays
+    trustworthy.
+    """
+    try:
+        tree = ast.parse(raw_src)
+    except SyntaxError:
+        return {}
+    consts = _literal_collections(tree)
+    evidence: Dict[str, List[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
+            continue
+        var = node.target.id
+        if isinstance(node.iter, ast.Name):
+            if node.iter.id in _DECLARATION_NAMES:
+                continue
+            members = consts.get(node.iter.id)
+            desc = node.iter.id
+        else:
+            members = _literal_elems(node.iter, consts)
+            desc = "inline literal"
+        if not members:
+            continue
+        target_name = None
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    if (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Name)
+                            and t.slice.id == var and isinstance(t.value, ast.Name)):
+                        target_name = t.value.id
+        if target_name is None:
+            continue
+        cite = (f"{fname}:{node.lineno}: for {var} in {desc}: "
+                f"{target_name}[{var}] = ... (loop assignment)")
+        for name in members:
+            evidence.setdefault(name, []).append(cite)
+    return evidence
+
+
 def audit_static(feature_columns: Optional[List[str]] = None) -> Dict[str, Any]:
     retrain_raw = _read("retrain_v2.py")
     feats = feature_columns or parse_feature_columns(retrain_raw)
@@ -126,12 +223,15 @@ def audit_static(feature_columns: Optional[List[str]] = None) -> Dict[str, Any]:
 
     train_srcs = {f: _mask_declaration_blocks(_read(f)) for f in TRAIN_FILES}
     serve_srcs = {f: _mask_declaration_blocks(_read(f)) for f in SERVE_FILES}
+    train_loops = {f: _loop_assignment_evidence(_read(f), f) for f in TRAIN_FILES}
+    serve_loops = {f: _loop_assignment_evidence(_read(f), f) for f in SERVE_FILES}
 
     rows = []
     for name in feats:
         t_ev: List[str] = []
         for fname, src in train_srcs.items():
             t_ev += _find_evidence(name, src, fname)
+            t_ev += train_loops[fname].get(name, [])
         # a bare SQL token in the training VIEW is an assignment too — plain
         # view columns (weight_kg, field_size, ...) reach the frame without a
         # quoted python assignment. Restricted to the view file only: in
@@ -157,6 +257,7 @@ def audit_static(feature_columns: Optional[List[str]] = None) -> Dict[str, Any]:
         s_ev: List[str] = []
         for fname, src in serve_srcs.items():
             s_ev += _find_evidence(name, src, fname)
+            s_ev += serve_loops[fname].get(name, [])
         s_ref = any(_referenced(name, s) for s in serve_srcs.values())
 
         train_status = ("ASSIGNED" if t_ev else
@@ -314,6 +415,26 @@ def _self_test() -> None:
     assert _find_evidence("alive_one", src, "f.py"), "subscript assignment detected"
     assert _find_evidence("dict_key_feat", src, "f.py"), "dict-key assignment detected"
     assert not _find_evidence("ghost_feat", src, "f.py"), "a comment mention is not an assignment"
+
+    loop_src = (
+        'FEATURE_COLUMNS = ["a", "loop_feat", "placeholder_only"]\n'
+        'SET_A = ("loop_feat", "other_feat")\n'
+        'SET_B = SET_A + ("third_feat",)\n'
+        'def build(runner):\n'
+        '    feat = {}\n'
+        '    for k in SET_B:\n'
+        '        feat[k] = runner.get(k)\n'
+        '    for k in ["inline_feat"]:\n'
+        '        feat[k] = 0\n'
+        '    for col in FEATURE_COLUMNS:\n'
+        '        feat[col] = None\n'
+        '    for c in [f for f in SET_A]:\n'
+        '        feat[c] = 1\n'
+        '    return feat\n')
+    ev = _loop_assignment_evidence(loop_src, "f.py")
+    assert set(ev) == {"loop_feat", "other_feat", "third_feat", "inline_feat"}, sorted(ev)
+    assert "placeholder_only" not in ev, "iterating FEATURE_COLUMNS is a fill, not liveness"
+    assert "for k in SET_B" in ev["third_feat"][0], ev["third_feat"]
 
     # the audit must reproduce the two proven findings on the real tree.
     # barrier_advantage stays unconditional: nothing plumbs it in any PR.
