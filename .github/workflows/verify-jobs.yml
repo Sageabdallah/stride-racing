@@ -36,6 +36,9 @@ on:
       wait_minutes:
         description: "Minutes to wait for each Fargate task before reading its exit code (1-55, default 20). HARD CEILING 55: the OIDC role session lasts one hour, after which every AWS call in this job fails and the task can no longer be observed from here. A job that runs longer is dispatched and reported STILL RUNNING with its task ARN — it keeps running on ECS and must be tracked by its artifact, not by this workflow."
         default: "20"
+      ensemble_artifact:
+        description: "Optional candidate model filename for tips-proof (e.g. racing_ensemble_v3.pkl), set on the task as STRIDE_ENSEMBLE_ARTIFACT. The proof then scores the card with the candidate and writes tips_<date>_candidate.json — the parallel scoring of project_retrain_gate.md. The file must already be in the models bucket (infra/09b_upload_models.sh); tips-proof refuses otherwise. Production never sets this. Ignored by every other job."
+        default: ""
 
 permissions:
   id-token: write
@@ -75,6 +78,7 @@ jobs:
           IN_LLM_PROVIDER: ${{ inputs.llm_provider }}
           IN_TRACKS: ${{ inputs.tracks }}
           IN_WAIT: ${{ inputs.wait_minutes }}
+          IN_ENSEMBLE_ARTIFACT: ${{ inputs.ensemble_artifact }}
           SUBNET_ID: ${{ vars.AWS_SUBNET_ID }}
           SG_ID: ${{ vars.AWS_SG_ID }}
         run: |
@@ -149,6 +153,11 @@ jobs:
               fi
               if [ -n "$IN_TRACKS" ]; then
                 EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_TRACKS\",\"value\":\"$IN_TRACKS\"}"
+              fi
+              if [ -n "$IN_ENSEMBLE_ARTIFACT" ]; then
+                # Candidate scoring: only tips-proof honours it (and refuses
+                # if the artifact is not staged); production tasks never see it.
+                EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_ENSEMBLE_ARTIFACT\",\"value\":\"$IN_ENSEMBLE_ARTIFACT\"}"
               fi
               OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$EXTRA_ENV]}]}"
               TASK=$(aws ecs run-task --cluster stride \

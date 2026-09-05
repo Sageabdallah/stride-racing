@@ -1,27 +1,66 @@
-# Retrains the v2 ensemble (server/python/retrain_v2.py) on a GitHub-hosted
-# runner with direct access to the Neon database, printing the walk-forward
-# CV and Phase-2 ablation report in the run log — this is where the Phase-5
-# relative-market features get their first real evidence read.
+# Retrains the ensemble (server/python/retrain_v2.py) on a GitHub-hosted
+# runner with direct access to the Neon database and prints the walk-forward
+# CV — per-fold AUC/Brier, per-race top-1 hit rate against the tip-time
+# favourite, fold hygiene — plus the ablation arms, in the run log and as a
+# JSON report uploaded beside the artifact.
 #
-# STAGED, NEVER PROMOTED: the artifact is written to a staging filename and
-# uploaded; the live models/racing_ensemble_v2.pkl on the production box is
-# untouched until a human inspects the CV report and installs the artifact —
-# the same discipline learn_from_results_v2 follows.
+# Two modes, chosen at dispatch:
 #
-# Requires the repository secret DATABASE_URL.
+#   legacy-evidence   the run this workflow has always done: SP-filled odds,
+#                     models/staging_ensemble_v2.pkl, version v2. Evidence
+#                     only — an artifact trained on the closing price can never
+#                     be a candidate (12-preregistration.md).
+#   v3-candidate      the task-12 candidate. STRIDE_TRAIN_ODDS_SOURCE=snapshot
+#                     is FIXED in this file, not an input: a promotable
+#                     artifact must not be able to see SP. Refused below the
+#                     snapshot-row floor (retrain_v2 --min-snapshot-rows) and
+#                     refused when the inputs-only preflight is not fully green
+#                     (project_retrain_gate.md gate 5). Writes
+#                     models/racing_ensemble_v3.pkl, version v3.
+#
+# Before either mode the as-of track-distance profiles are rebuilt from the
+# database (track_profiler.py --buckets): the file is gitignored, and without
+# it retrain_v2 silently falls back to the legacy snapshot computed over
+# post-race data (the N3 leak the preflight gate exists to catch).
+#
+# STAGED, NEVER PROMOTED: artifacts are uploaded as workflow artifacts. The
+# live models/racing_ensemble_v2.pkl is untouched; a candidate reaches a
+# container only when the operator uploads it to the models bucket, and it is
+# scored only by the tips-proof job with STRIDE_ENSEMBLE_ARTIFACT set (the
+# parallel-scoring week). Promotion is a separate human act under the
+# registered rule.
+#
+# Requires the repository secret DATABASE_URL. Inputs reach the shell as
+# environment variables, never interpolated into shell text.
 
 name: retrain-model
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "legacy-evidence (SP-filled odds, evidence only) or v3-candidate (tip-time snapshot odds, the task-12 candidate)"
+        type: choice
+        default: "legacy-evidence"
+        options: ["legacy-evidence", "v3-candidate"]
+      min_snapshot_rows:
+        description: "v3-candidate only: refuse to train below this many snapshot rows (odds_ablation.DEFAULT_MIN_ROWS is 2000)"
+        default: "2000"
+      asof_start_month:
+        description: "First month (YYYY-MM) of the as-of track-distance profile buckets rebuilt before training"
+        default: "2024-12"
 
 permissions:
   contents: read
 
+concurrency:
+  group: retrain-model
+  cancel-in-progress: false
+
 jobs:
   retrain:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -30,11 +69,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install --quiet numpy scipy pandas scikit-learn psycopg2-binary requests xgboost lightgbm catboost
+        run: pip install --quiet numpy scipy pandas scikit-learn psycopg2-binary requests xgboost lightgbm catboost joblib pytest
 
-      - name: Retrain with walk-forward CV + ablation report
+      - name: Build as-of track-distance profiles (N3 guard)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          IN_ASOF_START: ${{ inputs.asof_start_month }}
         run: |
           set -euo pipefail
           if [ -z "${DATABASE_URL}" ]; then
@@ -42,11 +82,74 @@ jobs:
             exit 1
           fi
           cd server/python
-          python retrain_v2.py --output-path models/staging_ensemble_v2.pkl
+          python track_profiler.py --buckets "$IN_ASOF_START" "$(date -u +%Y-%m)"
+          test -s intelligence/track_distance_profiles_asof.json
 
-      - name: Upload staged ensemble artifact
-        if: success()
+      - name: Inputs-only preflight (gate 5)
+        env:
+          IN_MODE: ${{ inputs.mode }}
+        run: |
+          set +e
+          cd server/python
+          python retrain_preflight.py --inputs-only | tee ../../preflight_inputs.txt
+          RC=$?
+          python retrain_preflight.py --inputs-only --json > ../../preflight_inputs.json
+          set -e
+          if [ "$IN_MODE" = "v3-candidate" ] && [ "$RC" -ne 0 ]; then
+            echo "::error::inputs-only preflight is not green — a v3 candidate may not be trained (project_retrain_gate.md gate 5). Read preflight_inputs.txt."
+            exit 1
+          fi
+          if [ "$RC" -ne 0 ]; then
+            echo "::warning::inputs-only preflight is RED; the legacy-evidence run continues because its output is evidence, never a candidate."
+          fi
+
+      - name: Retrain with walk-forward CV + ablation report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          IN_MODE: ${{ inputs.mode }}
+          IN_MIN_ROWS: ${{ inputs.min_snapshot_rows }}
+        run: |
+          set -euo pipefail
+          cd server/python
+          case "$IN_MIN_ROWS" in ''|*[!0-9]*) IN_MIN_ROWS=2000 ;; esac
+          if [ "$IN_MODE" = "v3-candidate" ]; then
+            # Fixed here on purpose: the candidate never sees SP.
+            export STRIDE_TRAIN_ODDS_SOURCE=snapshot
+            python retrain_v2.py \
+              --output-path models/racing_ensemble_v3.pkl \
+              --model-version v3 \
+              --min-snapshot-rows "$((10#$IN_MIN_ROWS))" \
+              --report-path models/racing_ensemble_v3_report.json
+          else
+            python retrain_v2.py \
+              --output-path models/staging_ensemble_v2.pkl \
+              --report-path models/staging_ensemble_v2_report.json
+          fi
+
+      - name: Candidate preflight (report — the live pkl is not on this runner)
+        if: ${{ inputs.mode == 'v3-candidate' }}
+        run: |
+          set +e
+          cd server/python
+          python retrain_preflight.py --staging models/racing_ensemble_v3.pkl --json > models/racing_ensemble_v3_preflight.json
+          python retrain_preflight.py --staging models/racing_ensemble_v3.pkl
+          RC=$?
+          set -e
+          if [ "$RC" -ne 0 ]; then
+            echo "::warning::candidate preflight has RED rows — read the board before uploading the candidate to the models bucket."
+          fi
+
+      - name: Upload staged artifact, report and preflight boards
+        if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
-          name: staged-ensemble-v2
-          path: server/python/models/staging_ensemble_v2.pkl
+          name: retrain-${{ inputs.mode }}-${{ github.run_number }}
+          if-no-files-found: warn
+          path: |
+            server/python/models/staging_ensemble_v2.pkl
+            server/python/models/staging_ensemble_v2_report.json
+            server/python/models/racing_ensemble_v3.pkl
+            server/python/models/racing_ensemble_v3_report.json
+            server/python/models/racing_ensemble_v3_preflight.json
+            preflight_inputs.txt
+            preflight_inputs.json
