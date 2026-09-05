@@ -983,6 +983,71 @@ def _renormalise_field(horses):
           f"({transitions} tier transition(s))", file=sys.stderr)
 
 
+# The LLM's per-horse score is folded in as a re-ranking WITHIN the group it
+# looked at, never as a levy on having been looked at. Weight keeps the 30%
+# authority the original blend intended; the clamp matches the +/-25% band
+# consensus_agent.py already uses for its own multiplier.
+AI_BLEND_WEIGHT = 0.30
+AI_BLEND_CLAMP = (0.75, 1.25)
+
+
+def blend_ai_scores(horses, expected, weight=AI_BLEND_WEIGHT, clamp=AI_BLEND_CLAMP):
+    """Fold ai_score into selectionScore. Returns a record of what it did.
+
+    The formula this replaces was `0.70*s + 0.30*(ai/100)*s`, which factors to
+    `s * (0.70 + 0.003*ai)` — a multiplier that is a shrink everywhere and
+    reaches 1.0 only at ai_score 100. Only the top 6 are sent to the LLM, so
+    every scored horse lost ground to the unscored runners 7+ purely for
+    having been scored. On the 2026-09-05 card that inverted the ranking in 31
+    of the 34 races with 8 or more runners; Eagle Farm R6 and Randwick R2
+    needed ai_score above 98 just to hold position. It has never been visible
+    because the truncation bug means no horse has ever carried an ai_score.
+
+    Centring on the scored cohort's own mean fixes the direction: a horse the
+    LLM rates above its peers goes up, one it rates below goes down, and an
+    LLM that is uniformly generous or uniformly harsh moves nothing. That
+    cancellation is the property that makes it safe to score a subset of a
+    field — the cohort as a whole keeps its place against the runners the LLM
+    never saw.
+
+    Race-atomic. Partial coverage is not partial benefit: blending the four
+    horses the LLM scored re-ranks them against the two it dropped, which is a
+    worse ranking than not blending at all. `expected` is the size of the
+    cohort submitted, and anything short of it applies nothing.
+    """
+    scored = [h for h in horses
+              if isinstance(h.get("ai_score"), (int, float))
+              and not isinstance(h.get("ai_score"), bool)]
+    rec = {"applied": False, "scored": len(scored), "expected": expected,
+           "reason": "", "mean_ai": None, "moved": 0}
+    if not scored:
+        rec["reason"] = "no_ai_scores"
+        return rec
+    if expected and len(scored) != expected:
+        rec["reason"] = "partial_coverage"
+        return rec
+    if not _flag_enabled("STRIDE_AI_BLEND"):
+        # Off by design, and separately from the truncation fix that will make
+        # ai_score land at all. Repairing both at once would turn re-ranking on
+        # the same day the scores first appear, with no run in between that
+        # shows the scores landing and the ranking unchanged.
+        rec["reason"] = "disabled"
+        return rec
+
+    mean_ai = sum(float(h["ai_score"]) for h in scored) / len(scored)
+    lo, hi = clamp
+    for h in scored:
+        mult = min(hi, max(lo, 1.0 + weight * (float(h["ai_score"]) - mean_ai) / 100.0))
+        before = _safe_num(h.get("selectionScore"), 0.0)
+        after = round(before * mult, 2)
+        h["ai_blend_multiplier"] = round(mult, 4)
+        if after != before:
+            rec["moved"] += 1
+        h["selectionScore"] = after
+    rec.update(applied=True, reason="ok", mean_ai=round(mean_ai, 1))
+    return rec
+
+
 def apply_safety_filters(scored_horses, race_class=""):
     """
     Apply graduated favourite preference, class-aware odds caps, and longshot safety.
@@ -2908,14 +2973,14 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                             for k in ("ai_score", "ai_analysis", "ai_key_edge", "ai_risk_factors", "ai_vs_field"):
                                 if k in ai_h:
                                     h[k] = ai_h[k]
-                    for h in horses:
-                        ai_score = h.get("ai_score")
-                        if ai_score is not None:
-                            ai_norm = (ai_score / 100.0) * h.get("selectionScore", 0)
-                            orig = h.get("selectionScore", 0)
-                            h["selectionScore"] = round(0.70 * orig + 0.30 * ai_norm, 2)
-                    scored = sum(1 for h in horses if h.get("ai_score") is not None)
-                    print(f"    LLM post-scoring: {scored} horses scored", file=sys.stderr)
+                    blend = blend_ai_scores(horses, expected=len(top6_sorted))
+                    # Both figures, always: "6 horses scored" alone cannot tell
+                    # a race whose ranking the LLM moved from one where it was
+                    # skipped, and those are different runs.
+                    print(f"    LLM post-scoring: {blend['scored']}/{blend['expected']} "
+                          f"scored, blend={'applied' if blend['applied'] else blend['reason']}"
+                          + (f", mean_ai={blend['mean_ai']}, moved={blend['moved']}"
+                             if blend["applied"] else ""), file=sys.stderr)
 
                     llm_ranking = None
                     llm_tip_type = "win"
