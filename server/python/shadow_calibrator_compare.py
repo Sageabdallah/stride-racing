@@ -226,12 +226,14 @@ def tier_transitions(rows: Sequence[Dict[str, Any]],
                 str(race[0].get("track", "")),
                 str(race[0].get("race_number", "")))
             runners_detail = []
+            race_compared = 0
             for r in race:
                 old_t = base_tiers[r["_row"]]
                 new_t = new_tiers[r["_row"]]
                 if old_t is None or new_t is None:
                     continue
                 n_compared += 1
+                race_compared += 1
                 if old_t != new_t:
                     matrix[f"{old_t}>{new_t}"] = matrix.get(f"{old_t}>{new_t}", 0) + 1
                     runners_detail.append({
@@ -241,7 +243,15 @@ def tier_transitions(rows: Sequence[Dict[str, Any]],
                         "new_tier": new_t,
                     })
             if runners_detail:
+                # n_runners / n_compared per race are what the registered
+                # single-race rule needs ("any single race above 25%
+                # requiring explicit sign-off", shadow-flip-criteria.md):
+                # without a per-race denominator the rule could not be
+                # computed from the evidence files. Additive; the runner
+                # detail is unchanged.
                 races_detail.append({"race_key": [str(k) for k in race_key] if isinstance(race_key, tuple) else str(race_key),
+                                     "n_runners": len(race),
+                                     "n_compared": race_compared,
                                      "transitions": runners_detail})
         pairs[f"{base}__{name}"] = {
             "n_compared": n_compared,
