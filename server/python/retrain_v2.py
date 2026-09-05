@@ -109,6 +109,24 @@ from race_metrics import (
     per_race_metrics,
     pool as pool_race_metrics,
 )
+# Learned, persisted combination of the base learners (task-12 step 4),
+# evaluated cross-fitted next to the equal-mean CV arm and the blend
+# production actually runs. See ensemble_combiner.py.
+from ensemble_combiner import (
+    MIN_PRIOR_FOLDS,
+    MIN_PRIOR_ROWS,
+    EnsembleCombiner,
+    arm_metrics,
+    production_blend,
+)
+
+# The four odds-derived inputs in the current contract (market_odds and the
+# Phase-5 relative-market trio — the same four snapshot_hybrid NaN-preserves).
+# Ablated as a unit to test the market double-count hypothesis
+# (docs/analysis/RESULTS.md §7.5): does the model carry skill without seeing
+# the price at all, and does its edge behave better? market_efficiency_flag is
+# named like a price feature but is computed from class_level — it stays.
+PRICE_FEATURES = ["market_odds", "fair_implied_prob", "odds_rank", "odds_rank_pct"]
 
 
 # Phase 2 sectional feature names and the NaN-preserve contract now live in
@@ -1129,6 +1147,15 @@ def run_walk_forward_cv(
     # OOF accumulators — only populated when collect_oof_calibrators=True
     oof_xgb, oof_lgb, oof_cb, oof_labels = [], [], [], []
 
+    # Cross-fitted combiner arms: raw OOF predictions from folds already
+    # scored, used to fit the combiner that scores the NEXT fold. Never the
+    # fold being scored (pre-registration amendment 2026-09-05 §3).
+    prior_P: List[np.ndarray] = []
+    prior_y: List[np.ndarray] = []
+    prior_folds = 0
+    arm_names = ("legacy_equal_isotonic", "production_hardcoded", "simplex", "logistic")
+    present_models: List[str] = []
+
     for train_idx, test_idx, meta in folds:
         X_train = X.iloc[train_idx]
         y_train = y.iloc[train_idx]
@@ -1190,17 +1217,54 @@ def run_walk_forward_cv(
             "hygiene": hygiene,
         }
         race_line = None
-        if race_meta is not None:
-            rm = race_meta.iloc[test_idx]
-            race = per_race_metrics(
-                ens_proba, y_test.values, rm["race_key"].values,
+        rm = race_meta.iloc[test_idx] if race_meta is not None else None
+
+        def _race(proba):
+            if rm is None:
+                return None
+            return per_race_metrics(
+                proba, y_test.values, rm["race_key"].values,
                 tip_time_odds=rm["tip_time_odds"].values if "tip_time_odds" in rm else None,
                 sp_odds=rm["sp_odds"].values if "sp_odds" in rm else None,
                 stored=rm["predicted_win_prob"].values if "predicted_win_prob" in rm else None,
             )
+
+        if rm is not None:
+            race = _race(ens_proba)
             fold_entry["race"] = race
             race_folds.append(race)
             race_line = format_race_line(race)
+
+        # --- combiner arms on identical rows -------------------------------
+        present_models = [k for k, m in (("xgb", xgb_m), ("lgb", lgb_m), ("cb", cb_m)) if m is not None]
+        P_test = np.column_stack([np.asarray(oof_raw[k], dtype=float) for k in present_models])
+        y_test_arr = y_test.values.astype(int)
+        arms: Dict[str, Any] = {}
+        # (1) the CV's historical arm: equal-weight mean of isotonic-calibrated probs
+        arms["legacy_equal_isotonic"] = ens_proba
+        # (2) what production runs today: hardcoded weights on raw probs, by distance
+        dist = X_test["distance"].values if "distance" in X_test.columns else None
+        arms["production_hardcoded"] = production_blend(P_test, present_models, distances=dist)
+        # (3)(4) learned arms, fitted on PRIOR folds only
+        if prior_folds >= MIN_PRIOR_FOLDS and sum(len(a) for a in prior_y) >= MIN_PRIOR_ROWS:
+            P_prior = np.vstack(prior_P)
+            y_prior = np.concatenate(prior_y)
+            for method in ("simplex", "logistic"):
+                try:
+                    comb = EnsembleCombiner(method, model_names=present_models).fit(P_prior, y_prior)
+                    arms[method] = comb.predict(P_test)
+                except Exception as exc:
+                    print(f"  fold {meta['fold']}: combiner {method} failed: {exc}", file=sys.stderr)
+        fold_arms: Dict[str, Any] = {}
+        for name, proba in arms.items():
+            m = arm_metrics(proba, y_test_arr)
+            fold_arms[name] = {"auc": m["auc"], "brier": m["brier"], "log_loss": m["log_loss"],
+                               "race": _race(proba)}
+        fold_entry["arms"] = fold_arms
+        fold_entry["combiner_fitted_on_prior_folds"] = prior_folds if "simplex" in arms else None
+        prior_P.append(P_test)
+        prior_y.append(y_test_arr)
+        prior_folds += 1
         fold_results.append(fold_entry)
 
         xgb_auc_str = f"{per_auc.get('xgb', float('nan')):.4f}" if "xgb" in per_auc else "  n/a "
@@ -1232,6 +1296,77 @@ def run_walk_forward_cv(
     if race_pooled is not None:
         print(f"  [{label}] PER-RACE (pooled): {format_race_line(race_pooled)}")
 
+    # Arm summary: identical rows, so the deltas are causal reads on the
+    # combination alone. The learned arms exist only on folds with enough
+    # prior OOF to fit on (cross-fitted) — fewer folds than the legacy and
+    # production arms — so every arm is also summarised on exactly those
+    # folds ("same_folds"): that, not the all-folds mean, is the comparison
+    # the STRIDE_LEARNED_BLEND flip criterion reads.
+    all_idx = list(range(len(fold_results)))
+    learned_idx = [i for i in all_idx if "simplex" in fold_results[i].get("arms", {})]
+
+    def _summarise_arm(name: str, idxs: List[int]) -> Optional[Dict[str, Any]]:
+        entries = [fold_results[i]["arms"][name] for i in idxs
+                   if name in fold_results[i].get("arms", {})]
+        if not entries:
+            return None
+        aucs = [e["auc"] for e in entries if not np.isnan(e["auc"])]
+        races = [e["race"] for e in entries if e["race"] is not None]
+        return {
+            "n_folds": len(entries),
+            "mean_auc": float(np.mean(aucs)) if aucs else float("nan"),
+            "mean_brier": float(np.mean([e["brier"] for e in entries])),
+            "race_metrics": pool_race_metrics(races) if races else None,
+        }
+
+    def _arm_line(name: str, s: Dict[str, Any]) -> str:
+        line = (f"    {name:<24} folds {s['n_folds']:>2}  AUC {s['mean_auc']:.4f}"
+                f"  Brier {s['mean_brier']:.4f}")
+        if s["race_metrics"]:
+            line += f"  | {format_race_line(s['race_metrics'])}"
+        return line
+
+    arms_summary: Dict[str, Any] = {}
+    print(f"\n  [{label}] COMBINATION ARMS (same rows; simplex/logistic fitted on PRIOR folds only):")
+    for name in arm_names:
+        summary = _summarise_arm(name, all_idx)
+        if summary is None:
+            continue
+        summary["same_folds"] = _summarise_arm(name, learned_idx)
+        arms_summary[name] = summary
+        print(_arm_line(name, summary))
+    if learned_idx and len(learned_idx) < len(all_idx):
+        print(f"  [{label}] SAME {len(learned_idx)} FOLDS as the learned arms "
+              f"(the flip criterion's comparison):")
+        for name, summary in arms_summary.items():
+            if summary["same_folds"] is not None:
+                print(_arm_line(name, summary["same_folds"]))
+
+    # The persisted combiner: fitted on ALL raw OOF rows (like the OOF
+    # isotonics), in-sample numbers labelled as such.
+    final_combiner = None
+    combiner_report: Optional[Dict[str, Any]] = None
+    if collect_oof_calibrators and oof_labels and present_models:
+        cols = {"xgb": oof_xgb, "lgb": oof_lgb, "cb": oof_cb}
+        y_all = np.asarray(oof_labels, dtype=int)
+        try:
+            if any(len(cols[k]) != len(y_all) for k in present_models):
+                raise ValueError(f"ragged OOF columns {[(k, len(cols[k])) for k in present_models]} "
+                                 f"vs {len(y_all)} labels")
+            P_all = np.column_stack([np.asarray(cols[k], dtype=float) for k in present_models])
+            final_combiner = EnsembleCombiner("simplex", model_names=present_models).fit(P_all, y_all)
+            combiner_report = {
+                "persisted": final_combiner.describe(),
+                "fitted_on": f"all {len(y_all)} raw OOF rows (IN-SAMPLE numbers below are not performance)",
+                "in_sample": {m: arm_metrics(EnsembleCombiner(m, present_models).fit(P_all, y_all).predict(P_all), y_all)
+                              for m in ("equal", "simplex", "logistic")},
+                "cross_fitted_arms": arms_summary,
+            }
+            print(f"  Persisted simplex combiner (all OOF rows, in-sample): weights "
+                  f"{combiner_report['persisted'].get('weights')}")
+        except Exception as exc:
+            print(f"  WARNING: final combiner fit failed: {exc}", file=sys.stderr)
+
     results = {
         "label": label,
         "n_folds": len(fold_results),
@@ -1240,6 +1375,10 @@ def run_walk_forward_cv(
         "mean_brier": mean_brier,
         "folds": fold_results,
         "race_metrics": race_pooled,
+        "arms": arms_summary,
+        "present_models": present_models,
+        "ensemble_combiner": final_combiner,
+        "combiner_report": combiner_report,
     }
 
     if collect_oof_calibrators and oof_labels:
@@ -1275,10 +1414,13 @@ def run_ablation(
     all_features = [c for c in FEATURE_COLUMNS if c in X.columns]
     base_features = [c for c in all_features if c not in PHASE2_FEATURES]
     no_p5_features = [c for c in all_features if c not in PHASE5_FEATURES]
+    no_price_features = [c for c in all_features if c not in PRICE_FEATURES]
 
     print(f"\n  Full feature set : {len(all_features)} features")
     print(f"  Base feature set : {len(base_features)} features (Phase 2 excluded)")
     print(f"  -Phase5 set      : {len(no_p5_features)} features (relative-market trio excluded)")
+    print(f"  -price set       : {len(no_price_features)} features "
+          f"({[c for c in PRICE_FEATURES if c in all_features]} excluded)")
 
     results_full = run_walk_forward_cv(X, y, dates, all_features, label="WITH Phase2",
                                        race_meta=race_meta)
@@ -1286,9 +1428,17 @@ def run_ablation(
                                        race_meta=race_meta)
     results_no_p5 = run_walk_forward_cv(X, y, dates, no_p5_features, label="WITHOUT Phase5",
                                         race_meta=race_meta)
+    # Market double-count arm (RESULTS.md §7.5, 13-race-aware-objective.md
+    # step 4): the model without any price input. Read on per-race hit rate
+    # against the tip-time favourite and on Brier, not AUC alone — AUC will
+    # fall (the price is the strongest cross-race separator); the question is
+    # whether the model's own ordering carries independent skill.
+    results_no_price = run_walk_forward_cv(X, y, dates, no_price_features, label="WITHOUT price",
+                                           race_meta=race_meta)
 
     delta = results_full["mean_auc"] - results_base["mean_auc"]
     delta_p5 = results_full["mean_auc"] - results_no_p5["mean_auc"]
+    delta_price = results_full["mean_auc"] - results_no_price["mean_auc"]
     print("\n  ABLATION RESULT:")
     print(f"    AUC WITH    Phase 2 : {results_full['mean_auc']:.4f}")
     print(f"    AUC WITHOUT Phase 2 : {results_base['mean_auc']:.4f}")
@@ -1297,8 +1447,12 @@ def run_ablation(
     print(f"    Phase 5 delta       : {delta_p5:+.4f}  "
           f"(Brier full {results_full['mean_brier']:.4f} vs "
           f"-P5 {results_no_p5['mean_brier']:.4f})")
+    print(f"    AUC WITHOUT price   : {results_no_price['mean_auc']:.4f}")
+    print(f"    Price delta         : {delta_price:+.4f}  "
+          f"(Brier full {results_full['mean_brier']:.4f} vs "
+          f"-price {results_no_price['mean_brier']:.4f}) — read the per-race line, not the AUC")
     for name, res in (("full", results_full), ("-Phase2", results_base),
-                      ("-Phase5", results_no_p5)):
+                      ("-Phase5", results_no_p5), ("-price", results_no_price)):
         rm = res.get("race_metrics")
         if rm:
             print(f"    per-race {name:<8}: {format_race_line(rm)}")
@@ -1307,8 +1461,10 @@ def run_ablation(
         "with_phase2": results_full,
         "without_phase2": results_base,
         "without_phase5": results_no_p5,
+        "without_price": results_no_price,
         "delta_auc": delta,
         "delta_auc_phase5": delta_p5,
+        "delta_auc_price": delta_price,
     }
 
 
@@ -1451,12 +1607,27 @@ def enforce_snapshot_floor(df: pd.DataFrame, min_rows: Optional[int]) -> int:
     return len(df)
 
 
+def artifact_cv_results(cv_results: Dict[str, Any]) -> Dict[str, Any]:
+    """The copy of cv_results that goes into the artifact: the fitted
+    EnsembleCombiner as its plain state dict (to_state), never as a pickled
+    instance. A class path inside the artifact would make every v3 pickle's
+    load depend on ensemble_combiner.py existing under that name on the
+    loading checkout — and RacingMLModel.load treats any unpickling error as
+    "no model", which would score the day with no ML at all while looking
+    normal. The in-process object is left untouched."""
+    out = dict(cv_results)
+    comb = out.get("ensemble_combiner")
+    out["ensemble_combiner"] = comb.to_state() if hasattr(comb, "to_state") else comb
+    return out
+
+
 def _json_safe(obj: Any) -> Any:
-    """cv_results carries fitted IsotonicRegression objects under
-    oof_calibrators; drop them (the artifact keeps them) so the report is
-    plain JSON."""
+    """cv_results carries fitted objects (IsotonicRegression under
+    oof_calibrators, the EnsembleCombiner under ensemble_combiner); drop them
+    (the artifact keeps them) so the report is plain JSON."""
     if isinstance(obj, dict):
-        return {k: _json_safe(v) for k, v in obj.items() if k != "oof_calibrators"}
+        return {k: _json_safe(v) for k, v in obj.items()
+                if k not in ("oof_calibrators", "ensemble_combiner")}
     if isinstance(obj, (list, tuple)):
         return [_json_safe(v) for v in obj]
     if isinstance(obj, (np.floating, np.integer)):
@@ -1798,18 +1969,23 @@ def main():
         "trained_at": datetime.now().isoformat(),
     }
     print(f"\n[6] Saving model to {output_model_path} ...")
+    cv_for_artifact = artifact_cv_results(cv_results)
     save_model(
         xgb_final,
         lgb_final,
         cb_final,
         feature_cols,
         final_importance,
-        cv_results,
+        cv_for_artifact,
         ablation_results,
         output_model_path,
         version=args.model_version,
         extra={"odds_source_mode": run_meta["odds_source_mode"],
-               "race_metrics": run_meta["race_metrics"]},
+               "race_metrics": run_meta["race_metrics"],
+               # Learned combiner as a plain state dict, fitted on all raw
+               # OOF rows; served only under STRIDE_LEARNED_BLEND (default off).
+               "ensemble_combiner": cv_for_artifact.get("ensemble_combiner"),
+               "combiner_report": cv_results.get("combiner_report")},
     )
     if args.report_path:
         write_report(os.path.abspath(args.report_path), cv_results, ablation_results,
@@ -1830,6 +2006,17 @@ def main():
         print(f"  AUC delta (Phase 5 impact) : {abl['delta_auc_phase5']:+.4f}")
         print(f"    WITH Phase 5    : {abl['with_phase2']['mean_auc']:.4f}")
         print(f"    WITHOUT Phase 5 : {abl['without_phase5']['mean_auc']:.4f}")
+    if "delta_auc_price" in abl:
+        print(f"  AUC delta (price inputs)   : {abl['delta_auc_price']:+.4f}  (judge on per-race hit)")
+        for name in ("with_phase2", "without_price"):
+            rm = abl[name].get("race_metrics")
+            if rm:
+                print(f"    {name:<15}: {format_race_line(rm)}")
+    arms = cv_results.get("arms") or {}
+    if arms:
+        print("  Combination arms (same rows; learned arms cross-fitted):")
+        for name, a in arms.items():
+            print(f"    {name:<24} AUC {a['mean_auc']:.4f}  Brier {a['mean_brier']:.4f}  folds {a['n_folds']}")
     print(f"  Model saved to  : {output_model_path}")
     print()
 
