@@ -27,7 +27,7 @@ GATE_NAMES = [
 
 def _gate_script(name):
     """The step body from its `- name:` line to the next step's."""
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     start = text.index(name)
     rest = text[start:]
     nxt = re.search(r"\n      - name: ", rest)
@@ -35,7 +35,7 @@ def _gate_script(name):
 
 
 def test_all_three_gates_exist():
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     for name in GATE_NAMES:
         assert name in text, f"gate step missing or renamed: {name}"
 

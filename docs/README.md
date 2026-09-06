@@ -28,7 +28,7 @@ source read of the ~150 Python modules (~72k lines) in this repo.
 | [`decision-learning/`](decision-learning/README.md) | The plan for the decision layer: phases 0–10, global rules, execution protocol, the status register |
 | [`roi-roadmap/`](roi-roadmap/README.md) | The sequenced ROI/strike-rate task pack, its evidence base and progress tracker |
 | [`validation/`](validation/registry.md) | The forward-validation registry — pre-registered windows, and the record of one being invalidated |
-| [`analysis/`](analysis/SYSTEM_MAP.md) | The 2026-07 research pass: system map, academic findings, improvement report, implementation plan, results |
+| [`analysis/`](analysis/SYSTEM_MAP.md) | The 2026-07 research pass: system map, academic findings, improvement report, implementation plan, results; and the [2026-09-06 audit verification](analysis/AUDIT_VERIFICATION_2026-09-06.md) |
 | [`research/`](research/FEATURE_PROVENANCE.md) | Feature provenance and liveness, task-12 feature decisions, the winner-pattern proof run |
 | [`phase-minus-1/`](phase-minus-1/ARCHITECTURE_STABILISATION.md) | The architecture-stabilisation record that precedes Phase 0 |
 

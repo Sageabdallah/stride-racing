@@ -104,16 +104,36 @@ The README's "27 folds, 30,226 temporal predictions" comes from this machinery:
    notes this closes "the leak where X_cal is used for both early stopping and
    calibration fitting" — calibration never sees data the model was tuned on.
 
-**Integration note:** `RacingMLModel.predict_proba` (`ml_model.py:552-585`) calls
-the base models' `predict_proba` directly and does not apply the embedded
-`_isotonic` calibrators — only retrain_v2's own `predict_ensemble` uses them.
-This is deliberately left as-is (and now documented with an inline comment at the
-stacking branch): calibration of the final output is handled downstream by the
-tips pipeline's `ProbabilityCalibrator`, which was fitted against the *current*
-inference output. Switching per-model isotonic on at inference without refitting
-the downstream calibrator would double-calibrate and distort the validated
-probability scale. If per-model calibration at inference is ever wanted, refit
-`isotonic_calibrator.pkl` on the new output in the same change.
+**Integration note (corrected 2026-09-06, audit finding H1):**
+`RacingMLModel.predict_proba` calls the base models' `predict_proba` directly and,
+by default, does **not** apply the embedded `_isotonic` calibrators — only
+retrain_v2's own `predict_ensemble` uses them. The earlier justification here —
+that the tips pipeline's `ProbabilityCalibrator` "calibrates the final output" so
+applying both would double-calibrate — was wrong about where that calibrator
+sits: `calibrate_and_score` applies it to the **Monte-Carlo** win percentage
+*before* `mlPredictedProb` is blended in (docs/09 §1 steps 1–2), so the ML arm
+is calibrated by nobody. The base models are trained with `scale_pos_weight=9`,
+`is_unbalance` and `auto_class_weights="Balanced"`, so their raw output is a
+class-weight-inflated score (odds ×~9: a true 10% runner reads ≈50%), and that is
+what the 20–40% blend weight consumes.
+
+Two things changed:
+
+- `retrain_v2.save_model` now persists the three OOF calibrators explicitly under
+  `oof_calibrators`. Attaching them as `model._isotonic` only ever survived
+  pickling for XGBoost and LightGBM — CatBoost's `__getstate__` drops foreign
+  attributes — so existing artifacts carry two of the three.
+- `STRIDE_ML_APPLY_ISOTONIC=true` (default **off**, byte-identical) makes
+  `predict_components` pass each base model through its calibrator before the
+  weighted average, and only when a calibrator exists for **every** base model
+  present; otherwise it says so once on stderr and serves raw.
+  `RacingMLModel.serve_calibration_status()` reports which case applies.
+
+Flipping the flag re-levels every published probability (the pipeline blend and
+mc_api's `predict_adjustment` multiplier both consume this output), so it is a
+shadow-week A/B like every other `STRIDE_*` probability change — not a direct
+switch — and the downstream thresholds tuned against the inflated numbers must be
+re-read in the same exercise.
 
 ---
 

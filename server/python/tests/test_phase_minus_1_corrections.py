@@ -56,7 +56,7 @@ def test_no_bet_status_cannot_insert_primary_pick_fallback(monkeypatch):
     import run_tips_pipeline as pipeline
 
     connection = _SelectionConnection()
-    monkeypatch.setattr(pipeline, "db_connect", lambda: connection)
+    monkeypatch.setattr(pipeline, "db_connect", lambda **_kw: connection)
     pipeline.store_selections_in_db([{
         "track": "Randwick",
         "race_number": 1,

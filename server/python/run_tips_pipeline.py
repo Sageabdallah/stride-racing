@@ -380,13 +380,38 @@ def get_db_url():
     return os.environ.get("DATABASE_URL", "")
 
 
-def db_connect(max_retries=3):
-    """Connect to PostgreSQL with exponential backoff."""
+def _unpooled_psycopg2_connect():
+    """``psycopg2.connect`` with mc_api's shared-connection pool peeled off.
+
+    mc_api — loaded in-process by run_mc_simulation — replaces
+    ``psycopg2.connect`` for the whole process with a wrapper that hands out
+    one long-lived AUTOCOMMIT connection per DSN and ignores ``close()``.
+    That is right for its per-runner enrichment reads and wrong for a writer
+    that needs a transaction: under autocommit every statement is final and
+    ``rollback()`` is a no-op (audit 2026-09-06 H2). The wrapper publishes the
+    real driver function as ``__wrapped__``; before mc_api is loaded there is
+    nothing to peel and this returns ``psycopg2.connect`` itself.
+    """
     import psycopg2
+    connect = psycopg2.connect
+    while getattr(connect, "__wrapped__", None) is not None:
+        connect = connect.__wrapped__
+    return connect
+
+
+def db_connect(max_retries=3, transactional=False):
+    """Connect to PostgreSQL with exponential backoff.
+
+    ``transactional=True`` returns a private connection (never the mc_api
+    pool) with psycopg2's default autocommit=False, so ``commit()`` and
+    ``rollback()`` mean what they say and ``close()`` really closes it.
+    """
+    import psycopg2
+    connect = _unpooled_psycopg2_connect() if transactional else psycopg2.connect
     last_err = None
     for attempt in range(max_retries):
         try:
-            conn = psycopg2.connect(
+            conn = connect(
                 get_db_url(),
                 connect_timeout=5,
             )
@@ -453,6 +478,24 @@ def run_mc_simulation(race_input):
 def _flag_enabled(name):
     """Env-flag convention: default OFF unless explicitly true/1/yes."""
     return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
+
+
+_ML_SERVE_CALIBRATION_LOGGED = False
+
+
+def _log_ml_serve_calibration_once(ml):
+    """One stderr line per run saying whether the ML ensemble is being served
+    raw or through its OOF isotonic calibrators (STRIDE_ML_APPLY_ISOTONIC,
+    audit 2026-09-06 H1) — the runtime proof the shadow-week A/B reads."""
+    global _ML_SERVE_CALIBRATION_LOGGED
+    if _ML_SERVE_CALIBRATION_LOGGED:
+        return
+    _ML_SERVE_CALIBRATION_LOGGED = True
+    try:
+        status = ml.serve_calibration_status()
+    except Exception as exc:  # never let a log line take the pipeline down
+        status = {"error": str(exc)}
+    print(f"    [ML] serve calibration: {json.dumps(status, sort_keys=True)}", file=sys.stderr)
 
 
 def calculate_overround(runners):
@@ -694,6 +737,123 @@ def calculate_intelligence_adjustment(h):
     return multiplier, bonus
 
 
+def _context_multipliers(h):
+    """(fitness_mult, bias_mult, jockey_mult) for one runner — docs/09 §1 step 4.
+
+    Flag OFF is today's exact expression for each multiplier, and today's
+    expressions are inert or on the wrong scale (audit 2026-09-06 H3/H4;
+    docs/analysis SYSTEM_MAP §7b, IMPLEMENTATION_PLAN T20):
+
+    * fitness reads a top-level ``fitnessReadinessScore`` that no producer
+      writes — mc_api nests it under ``fitnessData`` on a 0–1 scale — so the
+      default 50 pins fitness_mult at 1.00 for every runner;
+    * bias divides ``trackBiasPoints`` (a points total, −18…+49: barrier
+      −10…+15, pace −8…+12, jockey 0…+12, trainer 0…+10) by 100 as if it were
+      0–100, so a neutral runner (0 pts) gets ×0.95 and the best possible
+      (+49) ×0.999 — the documented ±5% band is realised as a uniform ~5%
+      shrink with a 0.5% tilt, and a runner mc_api did not score (no key)
+      is the only one that gets ×1.00;
+    * jockey reads ``jockey_momentum_adjustment``, an mc_api *feature* that
+      never reached the result dict, so jockey_mult is 1.00 always. The
+      signal is not absent from the published probability, though: mc_api
+      folds the same feature into ``calculate_sophisticated_adjustment``,
+      which carries 22% of ``combined_adjustment``, which scales the MC win
+      probability this wrapper receives. The jockey flag below is therefore
+      a second, multiplicative application of an already-applied signal —
+      its A/B measures that marginal doubling, not an introduction.
+
+    Each flag repairs one multiplier so its effect is attributable in the A/B
+    (all default OFF):
+
+    * ``STRIDE_CTX_MULT_FITNESS`` — read ``fitnessData.fitnessReadinessScore``
+      (0–1): ``0.95 + score × 0.10``; absent ⇒ 1.0.
+    * ``STRIDE_CTX_MULT_BIAS`` — ``1.0 + clamp(points, ±25) / 25 × 0.05``:
+      neutral (0 pts) ×1.00, ``track_fit`` "excellent" (≥ 25) ×1.05, −25 or
+      worse ×0.95; absent ⇒ 1.0.
+    * ``STRIDE_CTX_MULT_JOCKEY`` — read ``jockeyMomentumAdjustment`` (published
+      by mc_api since this change), clamped 0.85–1.20; absent ⇒ 1.0. Second
+      application of a signal mc_api already applied upstream (see above).
+
+    Never raises; a malformed input yields that multiplier's neutral value.
+    """
+    def _num(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    if _flag_enabled("STRIDE_CTX_MULT_FITNESS"):
+        fitness_data = h.get("fitnessData")
+        score = fitness_data.get("fitnessReadinessScore") if isinstance(fitness_data, dict) else None
+        score = _num(score, None)
+        fitness_mult = 0.95 + max(0.0, min(1.0, score)) * 0.10 if score is not None else 1.0
+    else:
+        fitness = _num(h.get("fitnessReadinessScore", 50), 50.0)
+        fitness_mult = 0.95 + (fitness / 100.0) * 0.10
+
+    if _flag_enabled("STRIDE_CTX_MULT_BIAS"):
+        pts = _num(h.get("trackBiasPoints"), None) if "trackBiasPoints" in h else None
+        bias_mult = 1.0 + (max(-25.0, min(25.0, pts)) / 25.0) * 0.05 if pts is not None else 1.0
+    else:
+        bias_pts = _num(h.get("trackBiasPoints", 50), 50.0)
+        bias_mult = 0.95 + (bias_pts / 100.0) * 0.10
+
+    if _flag_enabled("STRIDE_CTX_MULT_JOCKEY"):
+        jockey_mult = _num(h.get("jockeyMomentumAdjustment"), 1.0)
+    else:
+        jockey_mult = _num(h.get("jockey_momentum_adjustment", 1.0), 1.0)
+    jockey_mult = max(0.85, min(1.20, jockey_mult))
+
+    return fitness_mult, bias_mult, jockey_mult
+
+
+_CTX_MULT_FLAGS = ("STRIDE_CTX_MULT_FITNESS", "STRIDE_CTX_MULT_BIAS", "STRIDE_CTX_MULT_JOCKEY")
+
+
+def _ctx_mult_summary(rows):
+    """Realised min/mean/max of each context multiplier over a set of runners,
+    plus which repair flags were on (STRIDE_CTX_MULT_DIAG).
+
+    This is the durable form: the cloud handler relays only the last 4000
+    chars of the pipeline's stderr, so a per-race [CTX_MULT] line does not
+    survive a cloud run — the same lesson as the book verdict. With the flag
+    on, run_tips writes this dict into the artifact under
+    races[].context_multipliers and summary.context_multipliers.
+    """
+    out = {"n": len(rows), "flags": [f for f in _CTX_MULT_FLAGS if _flag_enabled(f)]}
+    for idx, name in enumerate(("fitness", "bias", "jockey")):
+        vals = [float(r[idx]) for r in rows]
+        out[name] = ({
+            "min": round(min(vals), 4),
+            "mean": round(sum(vals) / len(vals), 4),
+            "max": round(max(vals), 4),
+        } if vals else None)
+    return out
+
+
+def _ctx_mult_record_for(horses):
+    """(summary, rows) for one race's scored runners. _context_multipliers is a
+    pure function of the runner dict and the flags, so recomputing it here
+    gives exactly what calibrate_and_score applied, without stashing anything
+    on the runner dicts (which ride into the artifact under _mc_data)."""
+    rows = [_context_multipliers(h) for h in horses]
+    return _ctx_mult_summary(rows), rows
+
+
+def _ctx_mult_diag_line(rows, label="CTX_MULT"):
+    """One stderr line: realised min/mean/max of each multiplier. Per race
+    under [CTX_MULT]; for the whole card under [CTX_MULT_SUMMARY], which sits
+    near the end of stderr and so survives the handler's tail."""
+    if not rows:
+        return f"[{label}] no runners"
+    s = _ctx_mult_summary(rows)
+    parts = [
+        f"{name}={s[name]['min']:.3f}/{s[name]['mean']:.3f}/{s[name]['max']:.3f}"
+        for name in ("fitness", "bias", "jockey")
+    ]
+    return f"[{label}] n={s['n']} min/mean/max " + " ".join(parts) + f" flags={','.join(s['flags']) or 'none'}"
+
+
 def calibrate_and_score(horses, overround, race_class=""):
     """
     Apply market-anchored calibration and composite selection score.
@@ -842,6 +1002,7 @@ def calibrate_and_score(horses, overround, race_class=""):
     raw_probs = [h.get("rawModelProb", 0) for h in horses]
     mc_spread = (max(raw_probs) - min(raw_probs)) if len(raw_probs) > 1 else 0
     mc_is_flat = mc_spread < 6.0
+    _ctx_rows = []
     if mc_is_flat and len(horses) > 1:
         print(f"    [MC_FLAT] Spread {mc_spread:.1f}pp — preserving MC spine and reducing wrapper overfit", file=sys.stderr)
 
@@ -855,12 +1016,8 @@ def calibrate_and_score(horses, overround, race_class=""):
             odds = 0.0
         mc_score_norm = h.get("_mcSelectionScoreNorm", 0.0)
 
-        fitness = h.get("fitnessReadinessScore", 50)
-        fitness_mult = 0.95 + (fitness / 100.0) * 0.10
-        bias_pts = h.get("trackBiasPoints", 50)
-        bias_mult = 0.95 + (bias_pts / 100.0) * 0.10
-        jockey_mult = h.get("jockey_momentum_adjustment", 1.0)
-        jockey_mult = max(0.85, min(1.20, jockey_mult))
+        fitness_mult, bias_mult, jockey_mult = _context_multipliers(h)
+        _ctx_rows.append((fitness_mult, bias_mult, jockey_mult))
 
         context_mult = fitness_mult * bias_mult * jockey_mult
         adjusted_raw = raw * context_mult
@@ -921,6 +1078,9 @@ def calibrate_and_score(horses, overround, race_class=""):
         record_stage(_stages, "market_context_probability", h["winPercentage"] / 100.0)
         record_stage(_stages, "selection_score", h["selectionScore"])
         h["predictionStages"] = _stages
+
+    if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+        print("    " + _ctx_mult_diag_line(_ctx_rows), file=sys.stderr)
 
     # Gradient flat MC penalty (2A) — based on confidence gap, not binary
     if mc_is_flat:
@@ -1676,9 +1836,25 @@ def persist_selection_ledger(race_tips, date_str):
 
 
 def store_selections_in_db(race_tips, date_str):
-    """Insert top picks into the selections table with full enrichment data."""
+    """Insert top picks into the selections table with full enrichment data.
+
+    One transaction: deactivate the date+track's previous picks, insert the
+    new ones, commit. A pick whose INSERT fails is skipped via a savepoint —
+    the deactivation and the other picks stand — and any failure the
+    savepoint cannot contain rolls the whole store back, so the table is
+    either the previous card or the new card, never a mix.
+
+    History (audit 2026-09-06 H2): this ran on the mc_api pool's autocommit
+    connection, where the per-pick ``conn.rollback()`` was a no-op and a crash
+    mid-insert left the old picks deactivated beside a partial new set. On a
+    real transaction that same per-pick rollback would have discarded the
+    deactivation and every earlier insert, then committed the remainder on
+    top of the still-active old picks — the duplicate-active state the
+    deactivation exists to prevent. Hence the private connection and the
+    savepoints.
+    """
     try:
-        conn = db_connect()
+        conn = db_connect(transactional=True)
         cur = conn.cursor()
     except Exception as e:
         print(f"  [DB] Cannot store selections: {e}", file=sys.stderr)
@@ -1762,6 +1938,7 @@ def store_selections_in_db(race_tips, date_str):
                     unique_explanations.append(ex)
 
             try:
+                cur.execute("SAVEPOINT stride_pick")
                 cur.execute("""
                     INSERT INTO selections (
                         track, race_number, race_name, race_date, distance,
@@ -1998,16 +2175,52 @@ def store_selections_in_db(race_tips, date_str):
                     "v106": pick.get("tipsters_polled"),
                     "v107": pick.get("independent_source_rate"),
                 })
+                cur.execute("RELEASE SAVEPOINT stride_pick")
                 inserted += 1
             except Exception as e:
                 print(f"  [DB] Insert failed for {pick.get('horse')}: {e}", file=sys.stderr)
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
+                    # Discard this pick only; the deactivation and the picks
+                    # already inserted stay in the open transaction.
+                    cur.execute("ROLLBACK TO SAVEPOINT stride_pick")
+                except Exception as sp_err:
+                    # The transaction itself is unusable (connection gone,
+                    # savepoint refused): nothing partial may land.
+                    print(
+                        f"  [DB] Selection store ABORTED for {date_str}: "
+                        f"transaction unrecoverable after failed insert "
+                        f"({sp_err}) — previous selections left as they were",
+                        file=sys.stderr,
+                    )
+                    try:
+                        conn.rollback()
+                        cur.close()
+                        conn.close()
+                    except Exception:
+                        pass
+                    return
 
     try:
         conn.commit()
+    except Exception as commit_err:
+        # A commit that fails is the whole store failing; saying "Stored N"
+        # here would be the silent no-op this function used to commit.
+        print(
+            f"  [DB] Selection store ABORTED for {date_str}: commit failed "
+            f"({commit_err}) — previous selections left as they were",
+            file=sys.stderr,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+        return
+    try:
         cur.close()
         conn.close()
     except Exception:
@@ -2592,6 +2805,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
     total_llm_time = 0
     book_scored_races = 0
     book_incoherent_races = 0
+    ctx_mult_day_rows = []   # STRIDE_CTX_MULT_DIAG: every scored runner's multipliers
     book_corrupt_races = 0
 
     for meet in racecard:
@@ -2731,6 +2945,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 from ml_model import RacingMLModel
                 _ml = RacingMLModel()
                 if _ml.is_trained:
+                    _log_ml_serve_calibration_once(_ml)
                     import pandas as _pd
                     # Task 03: single shared feature builder (serve_features.py) —
                     # one assembly used by BOTH inference paths. NaN-preserve
@@ -2884,6 +3099,11 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     "reasons": book_verdict["reasons"],
                 }), file=sys.stderr)
             horses = calibrate_and_score(horses, overround, race_class=race_class)
+
+            ctx_mult_record = None
+            if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+                ctx_mult_record, _ctx_rows = _ctx_mult_record_for(horses)
+                ctx_mult_day_rows.extend(_ctx_rows)
 
             llm_tip_type = "win"
             llm_winner = ""
@@ -3386,6 +3606,12 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     "corrupt": book_verdict["corrupt"],
                     "reasons": book_verdict["reasons"],
                 }
+            # Same reasoning, same home: the realised context-multiplier
+            # distribution (audit 2026-09-06 H3/H4) is only proof if it
+            # outlives the task's filesystem. Gated: the artifact schema is
+            # unchanged until the flag is on.
+            if ctx_mult_record is not None:
+                all_race_tips[-1]["context_multipliers"] = ctx_mult_record
           except Exception as _race_err:
             _rn = int(race.get("race_number", 0) or 0)
             print(f"  [RACE_ERROR] {track} R{_rn} failed: {_race_err}", file=sys.stderr)
@@ -3428,6 +3654,10 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                   f"price source is broken; every stake on this card "
                   f"deserves suspicion", file=sys.stderr)
 
+    if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+        print("  " + _ctx_mult_diag_line(ctx_mult_day_rows, label="CTX_MULT_SUMMARY"),
+              file=sys.stderr)
+
     # Final risk decisions happen before any aggregate, export contract, DB
     # write or ledger row is derived from the races.
     try:
@@ -3446,6 +3676,8 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
         db_time=round(total_db_time, 1),
         llm_time=round(total_llm_time, 1),
     )
+    if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+        day_summary["context_multipliers"] = _ctx_mult_summary(ctx_mult_day_rows)
     high_count = day_summary["high_confidence"]
     pos_edge = day_summary["positive_edge"]
     total_units = day_summary["total_units"]

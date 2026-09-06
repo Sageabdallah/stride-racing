@@ -154,3 +154,41 @@ class TestBestPricePolicy:
         runner = {"odds": [{"win_odds": 3.2}, {"win_odds": 3.8},
                            {"win_odds": 3.5}]}
         assert extract_odds(runner) == 3.8
+
+
+class TestExposureCapRanksByNetEv:
+    """Audit 2026-09-06 M6: bet_pick never carries expected_value in
+    production (build_export_pick emits win_pct / odds / edge_pct), so the
+    cap fell back to edge_pct — which at equal EV prefers the shorter price —
+    while promising net EV. The fixtures above set the key that production
+    does not; these use the keys it does."""
+
+    @staticmethod
+    def _race(track, horse, win_pct, odds, edge_pct):
+        return {"track": track, "bet_pick": {
+            "horse": horse, "should_bet": True,
+            "win_pct": win_pct, "odds": odds, "edge_pct": edge_pct}}
+
+    def test_net_ev_is_the_ledger_quantity(self, monkeypatch):
+        monkeypatch.setenv("STRIDE_COMMISSION_RATE", "0.08")
+        pick = {"win_pct": 25.0, "odds": 5.0, "edge_pct": 2.0}
+        # 0.25 * 4 * 0.92 - 0.75
+        assert abs(sc._net_ev(pick) - (0.25 * 4.0 * 0.92 - 0.75)) < 1e-12
+
+    def test_explicit_expected_value_still_wins(self):
+        assert sc._net_ev({"expected_value": 0.3, "win_pct": 1.0, "odds": 1.5}) == 0.3
+
+    def test_no_usable_price_falls_back_to_edge(self):
+        assert sc._net_ev({"edge_pct": 2.5}) == 2.5
+        assert sc._net_ev({"win_pct": 20.0, "odds": 1.0, "edge_pct": 2.5}) == 2.5
+        assert sc._net_ev({}) == 0.0
+
+    def test_cap_keeps_the_higher_ev_bet_not_the_higher_edge(self, monkeypatch):
+        monkeypatch.setenv("STRIDE_COMMISSION_RATE", "0.0")
+        # A: short price, big edge, small EV.   B: long price, small edge, big EV.
+        a = self._race("T", "A", win_pct=55.0, odds=1.6, edge_pct=6.0)   # EV = 0.55*1.6-1 = -0.12
+        b = self._race("T", "B", win_pct=12.0, odds=12.0, edge_pct=2.0)  # EV = 0.12*12-1 = +0.44
+        kept, demoted = sc.enforce_exposure_caps([a, b], max_per_day=1, max_per_track=99)
+        assert (kept, demoted) == (1, 1)
+        assert a.get("refused_bet_pick", {}).get("horse") == "A", "edge-ranking would have kept A"
+        assert "refused_bet_pick" not in b

@@ -867,7 +867,19 @@ def job_consensus_agent() -> dict:
     return {"last_success_date": _today()}
 
 
+# The realised context-multiplier distribution (audit 2026-09-06 H3/H4) is
+# the runtime proof docs/analysis SYSTEM_MAP §9 Q3 said only a run could
+# give. One stderr line per race would not survive this handler's 4000-char
+# tail, so with the flag on run_tips_pipeline also records it in the artifact
+# — races[].context_multipliers and summary.context_multipliers in
+# tips_<date>.json, which _sync_up relays. It changes no probability and
+# costs nothing, so the cloud tips jobs default it on; an explicit "false"
+# in the task environment or the stride/prod secret still wins (setdefault).
+CTX_MULT_DIAG_FLAG = "STRIDE_CTX_MULT_DIAG"
+
+
 def job_tips_pipeline() -> dict:
+    os.environ.setdefault(CTX_MULT_DIAG_FLAG, "true")
     _sync_down("server/python/intelligence")
     if _require_racecard("tips-pipeline") == "quiet":
         # No card means no races to tip, so tips_<date>.json is never written
@@ -1030,6 +1042,7 @@ def job_tips_proof() -> dict:
                 f"first.")
         suffix = "candidate"
         print(f"[tips-proof] candidate artifact {cpath} — output suffix '{suffix}'")
+    os.environ.setdefault(CTX_MULT_DIAG_FLAG, "true")   # diagnostic only, see above
     if _tips_prepare() == "quiet":
         return {"last_success_date": _today(), "quiet_day": True}
     # run_tips_pipeline has always taken tracks positionally; this job simply

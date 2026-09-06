@@ -1570,10 +1570,23 @@ def save_model(
     freshness gate REDs a candidate whose version equals the live artifact's,
     so no output of this trainer could pass it while production runs v2;
     the task-12 candidate is written as "v3". Default unchanged."""
+    # The OOF isotonic calibrators ride on the boosters as ``_isotonic`` for
+    # predict_ensemble above, but CatBoost's __getstate__ serialises only its
+    # own params and model blob, so that attribute does not survive pickling:
+    # an artifact carried the XGBoost and LightGBM calibrators and silently
+    # lost the CatBoost one (audit 2026-09-06 H1). Persist them explicitly so
+    # the serve side (ml_model.RacingMLModel.load) sees a complete set or
+    # knows it does not.
+    oof_calibrators = {
+        key: getattr(model, "_isotonic", None)
+        for key, model in (("xgb", xgb_model), ("lgb", lgb_model), ("cb", cb_model))
+        if model is not None and getattr(model, "_isotonic", None) is not None
+    }
     payload = {
         "xgb_model": xgb_model,
         "lgb_model": lgb_model,
         "cb_model": cb_model,
+        "oof_calibrators": oof_calibrators,
         "feature_columns": feature_cols,
         "feature_importance": importance,
         "cv_results": cv_results,
@@ -1586,6 +1599,7 @@ def save_model(
     with open(output_path, "wb") as fh:
         pickle.dump(payload, fh)
     print(f"\n  Model saved to: {output_path}  (version {version})")
+    print(f"  OOF calibrators persisted: {sorted(oof_calibrators) or 'none'}")
 
 
 def enforce_snapshot_floor(df: pd.DataFrame, min_rows: Optional[int]) -> int:

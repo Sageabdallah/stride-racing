@@ -203,3 +203,40 @@ def test_final_model_stops_early_on_the_last_ten_percent(retrain):
     if cb_m is not None:
         assert cb_m.get_best_iteration() is not None
     assert set(imp) == set(FEATS)
+
+
+def test_tail_calibrators_survive_save_and_serve(retrain, tmp_path, monkeypatch):
+    """Exercise the fold -> explicit payload -> serve contract with real trees.
+
+    CI can have only LightGBM; a full ML environment verifies all three,
+    including CatBoost's loss of the attached attribute during pickling.
+    """
+    import pickle
+    from ml_model import RacingMLModel
+
+    monkeypatch.setenv("STRIDE_ML_APPLY_ISOTONIC", "true")
+    monkeypatch.setenv("STRIDE_LEARNED_BLEND", "false")
+    tr, te = _split(_frame())
+    xgb, lgb, cb, _, oof = retrain.train_single_fold(
+        tr[FEATS], tr["is_winner"], te[FEATS], te["is_winner"], FEATS,
+        dates_train=tr["race_date"])
+    assert oof["hygiene"]["isotonic_on"] == "tail"
+    models = {k: m for k, m in (("xgb", xgb), ("lgb", lgb), ("cb", cb)) if m is not None}
+    assert models
+    path = tmp_path / "tail.pkl"
+    retrain.save_model(xgb, lgb, cb, FEATS, {}, {}, {}, str(path), version="v3")
+    with path.open("rb") as fh:
+        payload = pickle.load(fh)
+    assert set(payload["oof_calibrators"]) == set(models)
+    if all((retrain.HAS_XGB, retrain.HAS_LGB, retrain.HAS_CB)):
+        assert set(payload["oof_calibrators"]) == {"xgb", "lgb", "cb"}
+    if cb is not None:
+        assert not hasattr(payload["cb_model"], "_isotonic")
+    loaded = RacingMLModel(model_path=str(path))
+    assert loaded.is_trained and loaded.serve_calibration_status()["applied"]
+    out = loaded.predict_components(te[FEATS])
+    assert out["method"] == "weighted_average+isotonic"
+    for key, slot in (("xgb", "xgb"), ("lgb", "lightgbm"), ("cb", "catboost")):
+        if key in models:
+            expected = models[key]._isotonic.transform(np.asarray(oof[key]))
+            assert np.array_equal(out[slot], expected)

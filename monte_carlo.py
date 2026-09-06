@@ -532,8 +532,8 @@ class MonteCarloEngine:
                 p_top3=round(p_top3[i], 4), p_top4=round(p_top4[i], 4),
                 p_win_ci_lower=round(ci_lowers[i], 4), p_win_ci_upper=round(ci_uppers[i], 4),
                 fair_odds_win=round(fair_odds, 2), market_odds=market_odds,
-                value_edge=round(value_edge, 4) if value_edge else None,
-                overlay_percent=round(overlay_pct, 2) if overlay_pct else None,
+                value_edge=round(value_edge, 4) if value_edge is not None else None,
+                overlay_percent=round(overlay_pct, 2) if overlay_pct is not None else None,
                 kelly_fraction=round(kelly_frac, 4), recommended_stake=round(stake, 4),
                 stake_reason=reason,
                 mean_performance=round(performances[:, i].mean(), 3),
@@ -558,7 +558,8 @@ class MonteCarloEngine:
         )
     
     def simulate_meeting(self, races, n_sims=None, seed=None, with_exotics=False):
-        return [self.simulate_race(race, n_sims, seed + i if seed else None, with_exotics)
+        # ``if seed`` made seed=0 nondeterministic (audit 2026-09-06 L6).
+        return [self.simulate_race(race, n_sims, seed + i if seed is not None else None, with_exotics)
                 for i, race in enumerate(races)]
     
     def _calculate_base_params(self, race, dist_bucket, is_wet, is_heavy, is_firm, is_synthetic, is_maiden):

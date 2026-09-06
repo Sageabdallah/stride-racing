@@ -232,7 +232,7 @@ def test_production_slot_is_untouched(handler):
 # ---------------------------------------------------------------- workflows
 
 def _run_block(path: Path, step_name: str):
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     start = text.index(f"- name: {step_name}")
     tail = text.find("\n      - name:", start + 10)
     block = text[start:] if tail == -1 else text[start:tail]
@@ -244,7 +244,7 @@ def _run_block(path: Path, step_name: str):
 
 
 def test_verify_jobs_can_pass_a_candidate_to_tips_proof():
-    text = VERIFY_JOBS.read_text()
+    text = VERIFY_JOBS.read_text(encoding="utf-8")
     assert re.search(r"^\s+ensemble_artifact:\n\s+description:", text, re.M)
     body, env = _run_block(VERIFY_JOBS, "Run each job and report")
     assert "IN_ENSEMBLE_ARTIFACT" in env
@@ -253,7 +253,7 @@ def test_verify_jobs_can_pass_a_candidate_to_tips_proof():
 
 
 def test_retrain_workflow_fixes_snapshot_odds_for_the_candidate():
-    text = RETRAIN_WF.read_text()
+    text = RETRAIN_WF.read_text(encoding="utf-8")
     assert re.search(r"^\s+mode:\n\s+description:", text, re.M)
     assert 'options: ["legacy-evidence", "v3-candidate"]' in text
     assert 'default: "legacy-evidence"' in text, "a careless dispatch must not produce a candidate"
@@ -269,7 +269,7 @@ def test_retrain_workflow_fixes_snapshot_odds_for_the_candidate():
 
 
 def test_retrain_workflow_builds_asof_profiles_and_gates_on_inputs_preflight():
-    text = RETRAIN_WF.read_text()
+    text = RETRAIN_WF.read_text(encoding="utf-8")
     prof_body, _ = _run_block(RETRAIN_WF, "Build as-of track-distance profiles (N3 guard)")
     assert "track_profiler.py --buckets" in prof_body
     assert "test -s intelligence/track_distance_profiles_asof.json" in prof_body
