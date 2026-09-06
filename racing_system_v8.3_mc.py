@@ -339,11 +339,28 @@ def dynamic_kelly_stake(prob, odds, confidence_level):
     return kelly_stake(prob, odds, fraction, MAX_KELLY_STAKE)
 
 
+# Two-sided normal quantile for the interval's only shipped alpha, kept as the
+# literal the engine has always used so ci_lower/ci_upper are byte-identical;
+# statistics.NormalDist gives 1.6448536269514715 for the same 0.95, which is
+# 7e-16 away and enough to move a rounded bound once in a blue moon.
+_WILSON_Z_ALPHA_010 = 1.6448536269514722
+
+
 def wilson_interval(successes, n, alpha=0.10):
-    """Wilson score interval for a Bernoulli proportion."""
+    """Wilson score interval for a Bernoulli proportion.
+
+    ``alpha`` is the two-sided miss probability (0.10 -> 90% interval). It was
+    accepted and ignored — z was hard-coded for 0.10 whatever the caller
+    passed (audit 2026-09-06 L2). Every in-tree caller passes
+    MC_SIM_LIMITS['ci_alpha'] == 0.10 and gets the unchanged literal.
+    """
     if n == 0:
         return (0.0, 0.0)
-    z = 1.6448536269514722  # approx for 90% (two-sided)
+    if abs(alpha - 0.10) < 1e-12:
+        z = _WILSON_Z_ALPHA_010
+    else:
+        from statistics import NormalDist
+        z = NormalDist().inv_cdf(1.0 - alpha / 2.0)
     phat = successes / n
     denom = 1 + z ** 2 / n
     centre = phat + z ** 2 / (2 * n)
@@ -1764,7 +1781,7 @@ class RacingModel:
                 'model_odds': round(1 / model_prob, 2) if model_prob > 0 else 100,
                 'market_odds': runner.sp,
                 'sp': runner.sp,
-                'value_edge': round(value_edge, 2) if value_edge else None,
+                'value_edge': round(value_edge, 2) if value_edge is not None else None,
                 'bias_adj': round(adj * 100, 1),
                 'ev': round(ev, 4) if ev is not None else None,
                 'kelly': round(kelly_stake(model_prob, runner.sp) * 100, 2) if runner.sp > 1 else 0,
@@ -2100,6 +2117,12 @@ def mc_compute_staking(candidate, risk_mode, base_unit, bankroll, daily_remainin
         status = 'LIMIT'
     if daily_remaining <= 0 or track_remaining <= 0:
         status = 'LIMIT'
+    if status == 'LIMIT':
+        # A capped-out tip carries no money. The Kelly overlay above lifted
+        # ``stake`` off a units count the caps had already zeroed, so LIMIT
+        # went out with a positive stake and kelly_pct (audit 2026-09-06 M4).
+        stake = 0
+        kelly_pct = 0.0
     
     return {
         'units': units,
