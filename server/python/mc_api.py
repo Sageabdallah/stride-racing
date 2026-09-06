@@ -666,7 +666,7 @@ class _SharedDbConnection:
 _REAL_PSYCOPG2_CONNECT = None
 if PSYCOPG2_AVAILABLE:
     _REAL_PSYCOPG2_CONNECT = psycopg2.connect
-    while hasattr(_REAL_PSYCOPG2_CONNECT, "__wrapped__"):
+    while getattr(_REAL_PSYCOPG2_CONNECT, "__wrapped__", None) is not None:
         _REAL_PSYCOPG2_CONNECT = _REAL_PSYCOPG2_CONNECT.__wrapped__
 _DB_CONNECTIONS = {}
 

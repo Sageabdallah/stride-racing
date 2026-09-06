@@ -394,7 +394,7 @@ def _unpooled_psycopg2_connect():
     """
     import psycopg2
     connect = psycopg2.connect
-    while hasattr(connect, "__wrapped__"):
+    while getattr(connect, "__wrapped__", None) is not None:
         connect = connect.__wrapped__
     return connect
 
