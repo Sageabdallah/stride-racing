@@ -118,3 +118,40 @@ class TestDiagLine:
         monkeypatch.setenv("STRIDE_CTX_MULT_BIAS", "true")
         assert pipeline._ctx_mult_diag_line([(1, 1, 1)]).endswith("flags=STRIDE_CTX_MULT_BIAS")
         assert pipeline._ctx_mult_diag_line([]) == "[CTX_MULT] no runners"
+
+
+class TestArtifactRecord:
+    """The durable form of the diag: the cloud handler keeps only the last
+    4000 chars of stderr, so the per-race numbers go into the artifact."""
+
+    def test_summary_shape(self, monkeypatch):
+        s = pipeline._ctx_mult_summary([(0.95, 1.0, 1.0), (1.05, 1.0, 1.2)])
+        assert s == {
+            "n": 2, "flags": [],
+            "fitness": {"min": 0.95, "mean": 1.0, "max": 1.05},
+            "bias": {"min": 1.0, "mean": 1.0, "max": 1.0},
+            "jockey": {"min": 1.0, "mean": 1.1, "max": 1.2},
+        }
+        monkeypatch.setenv("STRIDE_CTX_MULT_BIAS", "true")
+        assert pipeline._ctx_mult_summary([(1, 1, 1)])["flags"] == ["STRIDE_CTX_MULT_BIAS"]
+
+    def test_empty_race_is_explicit_not_an_error(self):
+        s = pipeline._ctx_mult_summary([])
+        assert s["n"] == 0 and s["fitness"] is None and s["bias"] is None and s["jockey"] is None
+
+    def test_record_recomputes_exactly_what_scoring_applied(self):
+        horses = [_mc_horse(points=25, readiness=1.0, jockey=1.15),
+                  _mc_horse(points=-18, readiness=0.0, jockey=0.9), {}]
+        summary, rows = pipeline._ctx_mult_record_for(horses)
+        assert rows == [pipeline._context_multipliers(h) for h in horses]
+        # flags off: fitness and jockey inert, bias is the /100 shrink
+        assert summary["fitness"] == {"min": 1.0, "mean": 1.0, "max": 1.0}
+        assert summary["jockey"] == {"min": 1.0, "mean": 1.0, "max": 1.0}
+        assert summary["bias"]["min"] == pytest.approx(0.932)
+        assert summary["bias"]["max"] == pytest.approx(1.0)      # the unscored runner
+        assert summary["n"] == 3 and summary["flags"] == []
+
+    def test_summary_line_labels_the_card(self):
+        line = pipeline._ctx_mult_diag_line([(1, 1, 1)], label="CTX_MULT_SUMMARY")
+        assert line.startswith("[CTX_MULT_SUMMARY] n=1 ")
+        assert pipeline._ctx_mult_diag_line([], label="CTX_MULT_SUMMARY") == "[CTX_MULT_SUMMARY] no runners"

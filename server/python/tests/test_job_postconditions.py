@@ -1159,3 +1159,40 @@ def test_panel_proof_fails_when_no_marker_was_printed_at_all(handler,
     with pytest.raises(RuntimeError) as e:
         handler.job_panel_proof()
     assert "no PANEL_STAGED marker" in str(e.value)
+
+
+# ------------------------------------------------- context-multiplier diag
+
+def test_tips_pipeline_defaults_the_ctx_mult_diag_on(handler, monkeypatch, tmp_path):
+    """The realised context-multiplier distribution is recorded into the
+    artifact under STRIDE_CTX_MULT_DIAG; the cloud tips job turns it on
+    unless the environment says otherwise (audit 2026-09-06 H3/H4)."""
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    os.makedirs(tmp_path / "racecards")
+    (tmp_path / "racecards" / f"tips_{handler._today()}.json").write_text("{}")
+    monkeypatch.delenv("STRIDE_CTX_MULT_DIAG", raising=False)
+    handler.job_tips_pipeline()
+    assert os.environ.get("STRIDE_CTX_MULT_DIAG") == "true"
+
+
+def test_tips_pipeline_respects_an_explicit_ctx_mult_diag_off(handler, monkeypatch, tmp_path):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    os.makedirs(tmp_path / "racecards")
+    (tmp_path / "racecards" / f"tips_{handler._today()}.json").write_text("{}")
+    monkeypatch.setenv("STRIDE_CTX_MULT_DIAG", "false")
+    handler.job_tips_pipeline()
+    assert os.environ.get("STRIDE_CTX_MULT_DIAG") == "false"
+
+
+def test_tips_proof_defaults_the_ctx_mult_diag_on(handler, monkeypatch):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_tips_prepare", lambda: "quiet")
+    monkeypatch.delenv("STRIDE_CTX_MULT_DIAG", raising=False)
+    out = handler.job_tips_proof()
+    assert out.get("quiet_day") is True
+    assert os.environ.get("STRIDE_CTX_MULT_DIAG") == "true"
+    # the proof's write switches are untouched by the addition
+    assert os.environ.get("STRIDE_LEDGER_WRITE") == "false"
+    assert os.environ.get("STRIDE_MC_AUDIT_WRITE") == "false"
