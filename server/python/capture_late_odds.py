@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -313,37 +314,185 @@ def _watch_pid_path(date_str: str) -> Path:
     return Path(__file__).resolve().parent / "logs" / f"late_odds_{date_str}.pid"
 
 
+# --- watcher identity -------------------------------------------------------
+#
+# A pidfile holding only a pid answers "is there any process with this
+# number", not "is the watcher that wrote this file still running". Pids are
+# recycled. A crashed watcher leaves its file behind, and once the OS hands
+# that number to an unrelated process the day's capture never starts: exit 0,
+# nothing written (issue #168, the silent no-op class). So the file carries a
+# second line, the start time of the process that wrote it on the platform's
+# own clock. Two processes can share a pid across time; they cannot share a
+# start time.
+
+_WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_WIN_STILL_ACTIVE = 259
+_WIN_ERROR_ACCESS_DENIED = 5
+
+
+def _win_kernel32():
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetExitCodeProcess.restype = wintypes.BOOL
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.GetProcessTimes.restype = wintypes.BOOL
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return ctypes, wintypes, k32
+
+
+def _win_process_state(pid: int):
+    """(exists, start_token) for ``pid`` through the Win32 API.
+
+    ``os.kill(pid, 0)`` is not a liveness probe on Windows. Zero is
+    CTRL_C_EVENT; when GenerateConsoleCtrlEvent cannot deliver it, CPython's
+    os_kill_impl falls through to OpenProcess + TerminateProcess
+    (Modules/posixmodule.c). Probing a live watcher that way interrupts or
+    kills the process the probe was meant to find.
+    """
+    ctypes, wintypes, k32 = _win_kernel32()
+    handle = k32.OpenProcess(_WIN_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # Access denied: it exists, we just cannot read it. Anything else
+        # (invalid parameter is the usual one): no such process.
+        return ctypes.get_last_error() == _WIN_ERROR_ACCESS_DENIED, None
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True, None
+        if code.value != _WIN_STILL_ACTIVE:
+            return False, None
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not k32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+            return True, None
+        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        return True, f"win-filetime:{created}"
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _win_pid_listed(pid: int) -> bool:
+    """Last resort if the Win32 calls fail: tasklist, matched on the pid as a
+    whole token so the (localised) prose around it does not matter."""
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                         capture_output=True, text=True, timeout=10)
+    return any(tok == str(pid) for tok in out.stdout.split())
+
+
+def _linux_start_token(pid: int) -> str:
+    with open(f"/proc/{pid}/stat", "rb") as fh:
+        stat = fh.read().decode("ascii", "replace")
+    # comm (field 2) may hold spaces or parentheses, so split after the LAST
+    # ')' — what remains starts at field 3; starttime is field 22, in clock
+    # ticks since boot, fixed for the life of the process.
+    fields = stat[stat.rindex(")") + 2:].split()
+    return f"linux-starttime:{fields[19]}"
+
+
+def _ps_start_token(pid: int) -> Optional[str]:
+    # macOS and the BSDs: ps prints the start time, nothing for a dead pid.
+    out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                         capture_output=True, text=True, timeout=5)
+    text = " ".join(out.stdout.split())
+    return f"ps-lstart:{text}" if text else None
+
+
+def _posix_start_token(pid: int) -> Optional[str]:
+    if sys.platform.startswith("linux"):
+        return _linux_start_token(pid)
+    return _ps_start_token(pid)
+
+
+def _start_token(pid: int) -> Optional[str]:
+    """An identity for this incarnation of ``pid``: an opaque string that is
+    stable for the life of one process and differs across pid reuse. None
+    when the process is gone or the platform cannot say — never a verdict."""
+    try:
+        if sys.platform == "win32":
+            return _win_process_state(pid)[1]
+        return _posix_start_token(pid)
+    except Exception:
+        return None
+
+
+def _pid_exists(pid: int) -> bool:
+    """Does any process with this number exist right now? Read-only on every
+    platform: never a signal that could reach the process being asked about."""
+    if sys.platform == "win32":
+        try:
+            return _win_process_state(pid)[0]
+        except Exception:
+            try:
+                return _win_pid_listed(pid)
+            except Exception:
+                return True  # cannot tell: treat the lock as held, as before
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # not ours, but definitely there
+        return True
+    except OSError:
+        return False
+
+
+def _lock_holder_alive(pid: int, recorded_token: Optional[str]) -> bool:
+    """Is the watcher that wrote (pid, token) still running?
+
+    Existence of the pid is necessary. The token can only ever downgrade an
+    "exists" verdict: when both sides are known and differ, the number lives
+    on but the watcher that wrote it does not. With no token on either side
+    (a pre-#168 pidfile, or a platform that cannot say) the answer is the old
+    one, so nothing gets reclaimed on less evidence than before.
+    """
+    if not _pid_exists(pid):
+        return False
+    live_token = _start_token(pid)
+    if recorded_token and live_token and live_token != recorded_token:
+        return False
+    return True
+
+
+def _read_lock(pid_path: Path):
+    """(pid, start_token) from the pidfile; (None, None) when absent or corrupt."""
+    try:
+        lines = pid_path.read_text().splitlines()
+        pid = int(lines[0].strip())
+    except (FileNotFoundError, ValueError, IndexError, OSError):
+        return None, None
+    token = lines[1].strip() if len(lines) > 1 and lines[1].strip() else None
+    return pid, token
+
+
+def _write_lock(pid_path: Path, pid: int, token: Optional[str]) -> None:
+    # Line 1 stays the bare pid so `head -1 <pidfile>` still names the process
+    # to stop (DEPLOY_RUNBOOK); the start token rides on line 2.
+    pid_path.write_text(f"{pid}\n" + (f"{token}\n" if token else ""))
+
+
 def acquire_watch_lock(date_str: str) -> bool:
     """One watcher per date, whichever path launched it.
 
     The tips pipeline self-launches a watcher and run_full_pipeline launches
     one too; whichever starts second must no-op rather than double-poll the
     market API all day. A pidfile with a liveness probe is enough here — a
-    stale file from a crashed watcher is reclaimed, a live one wins.
+    stale file from a crashed watcher is reclaimed, a live one wins. "Live"
+    means the process that wrote the file, not merely its pid number: see
+    _lock_holder_alive.
     """
     pid_path = _watch_pid_path(date_str)
-    existing = None
-    try:
-        existing = int(pid_path.read_text().strip())
-    except (FileNotFoundError, ValueError, OSError):
-        pass  # no lock, or corrupt — reclaim
-    if existing is not None:
-        try:
-            os.kill(existing, 0)
-            alive = True
-        except ProcessLookupError:
-            alive = False
-        except PermissionError:  # not ours, but definitely alive
-            alive = True
-        except OSError:
-            alive = False
-        if alive:
-            print(f"[LATE_ODDS][watch] another watcher (pid {existing}) already "
-                  f"covers {date_str} — exiting", file=sys.stderr)
-            return False
+    existing, recorded_token = _read_lock(pid_path)
+    if existing is not None and _lock_holder_alive(existing, recorded_token):
+        print(f"[LATE_ODDS][watch] another watcher (pid {existing}) already "
+              f"covers {date_str} — exiting", file=sys.stderr)
+        return False
     try:
         pid_path.parent.mkdir(parents=True, exist_ok=True)
-        pid_path.write_text(str(os.getpid()))
+        _write_lock(pid_path, os.getpid(), _start_token(os.getpid()))
     except OSError as e:  # the lock is best-effort; capturing beats crashing
         print(f"[LATE_ODDS][watch] could not write pidfile (continuing): {e}",
               file=sys.stderr)
@@ -351,12 +500,18 @@ def acquire_watch_lock(date_str: str) -> bool:
 
 
 def release_watch_lock(date_str: str) -> None:
-    """Remove our pidfile; never remove another live watcher's lock."""
+    """Remove our pidfile; never remove another watcher's lock — not even one
+    written under our own pid by an earlier incarnation of it."""
     pid_path = _watch_pid_path(date_str)
+    pid, recorded_token = _read_lock(pid_path)
+    if pid != os.getpid():
+        return
+    own_token = _start_token(os.getpid())
+    if recorded_token and own_token and recorded_token != own_token:
+        return
     try:
-        if int(pid_path.read_text().strip()) == os.getpid():
-            pid_path.unlink()
-    except (FileNotFoundError, ValueError, OSError):
+        pid_path.unlink()
+    except OSError:
         pass
 
 
