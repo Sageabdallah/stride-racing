@@ -31,7 +31,7 @@ ESCALATIONS = {
 
 def _steps():
     """Split the job into its steps, keyed by step name."""
-    text = WATCH.read_text()
+    text = WATCH.read_text(encoding="utf-8")
     chunks = re.split(r"^      - name: ", text, flags=re.M)[1:]
     return {c.split("\n", 1)[0].strip(): c for c in chunks}
 
