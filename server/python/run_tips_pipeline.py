@@ -480,6 +480,24 @@ def _flag_enabled(name):
     return os.environ.get(name, "false").strip().lower() in ("true", "1", "yes")
 
 
+_ML_SERVE_CALIBRATION_LOGGED = False
+
+
+def _log_ml_serve_calibration_once(ml):
+    """One stderr line per run saying whether the ML ensemble is being served
+    raw or through its OOF isotonic calibrators (STRIDE_ML_APPLY_ISOTONIC,
+    audit 2026-09-06 H1) — the runtime proof the shadow-week A/B reads."""
+    global _ML_SERVE_CALIBRATION_LOGGED
+    if _ML_SERVE_CALIBRATION_LOGGED:
+        return
+    _ML_SERVE_CALIBRATION_LOGGED = True
+    try:
+        status = ml.serve_calibration_status()
+    except Exception as exc:  # never let a log line take the pipeline down
+        status = {"error": str(exc)}
+    print(f"    [ML] serve calibration: {json.dumps(status, sort_keys=True)}", file=sys.stderr)
+
+
 def calculate_overround(runners):
     total_implied = 0
     valid = 0
@@ -2809,6 +2827,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                 from ml_model import RacingMLModel
                 _ml = RacingMLModel()
                 if _ml.is_trained:
+                    _log_ml_serve_calibration_once(_ml)
                     import pandas as _pd
                     # Task 03: single shared feature builder (serve_features.py) —
                     # one assembly used by BOTH inference paths. NaN-preserve

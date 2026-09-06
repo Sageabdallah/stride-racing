@@ -57,6 +57,16 @@ except ImportError:
 from nan_contract import NAN_PRESERVE_SET
 
 
+def _ml_apply_isotonic_enabled() -> bool:
+    """STRIDE_ML_APPLY_ISOTONIC (default OFF) — when on, predict_components
+    passes each base model's raw probability through the out-of-fold isotonic
+    calibrator retrain_v2 fitted for it before the weighted average. Off =
+    exact legacy behaviour: raw predict_proba, which for boosters trained
+    with scale_pos_weight=9 / is_unbalance / auto_class_weights="Balanced"
+    is a class-weight-inflated number, not a probability."""
+    return os.environ.get("STRIDE_ML_APPLY_ISOTONIC", "false").strip().lower() in ("true", "1", "yes")
+
+
 def _serve_nan_contract_enabled() -> bool:
     """STRIDE_SERVE_NAN_CONTRACT (default OFF) — when on, prepare_features
     passes NaN through for the contract columns instead of zero-filling them,
@@ -171,6 +181,10 @@ class RacingMLModel:
         self.is_trained = False
         self.feature_importance = {}
         self.training_stats = {}
+        # Per-model OOF isotonic calibrators the artifact carries, keyed
+        # xgb / lgb / cb (see _collect_oof_calibrators).
+        self.oof_calibrators = {}
+        self._isotonic_notice_printed = False
         
         os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
         
@@ -544,7 +558,28 @@ class RacingMLModel:
         lgb_pred = self.lgb_model.predict_proba(X_scaled)[:, 1] if self.lgb_model else np.zeros(len(X_scaled))
         cat_pred = self.catboost_model.predict_proba(X_scaled)[:, 1] if self.catboost_model else np.zeros(len(X_scaled))
         
-        # Try stacking meta-learner first. NB: retrain_v2 artifacts carry per-model _isotonic calibrators that are deliberately NOT applied here — pipeline-level isotonic (ProbabilityCalibrator in run_tips_pipeline.calibrate_and_score) calibrates the final output, and applying both layers would double-calibrate.
+        # Calibration at serve (audit 2026-09-06 H1). retrain_v2 fits one
+        # out-of-fold isotonic calibrator per base model and the artifact
+        # carries them, but this path served raw predict_proba. The comment
+        # that used to justify that — "pipeline-level isotonic calibrates the
+        # final output, applying both would double-calibrate" — was wrong
+        # about where the pipeline's calibrator sits: run_tips_pipeline.
+        # calibrate_and_score applies ProbabilityCalibrator to the MONTE-CARLO
+        # winPercentage *before* blending mlPredictedProb in, so the ML arm
+        # is calibrated by nobody. Boosters trained with scale_pos_weight=9 /
+        # is_unbalance / auto_class_weights="Balanced" emit class-weight-
+        # inflated scores (odds x~9: a true 10% runner reads ~50%), and that
+        # is what the 20-40% ML blend weight consumes. Applying the OOF
+        # calibrators re-levels every published probability, so it ships
+        # behind STRIDE_ML_APPLY_ISOTONIC (default OFF, byte-identical) for a
+        # shadow-week A/B, and only when the artifact carries a calibrator
+        # for every base model present (see _serve_isotonic_applies). Both
+        # consumers move together when it flips: the pipeline blend and
+        # mc_api's predict_adjustment multiplier.
+        #
+        # Stacking / double-calibrator branches below are unreachable on a
+        # loaded artifact — neither save() nor retrain_v2.save_model persists
+        # them — and are left as they are.
         if hasattr(self, 'stacking_learner') and self.stacking_learner is not None and self.stacking_learner.is_fitted:
             try:
                 ensemble = self.stacking_learner.predict(xgb_pred, lgb_pred, cat_pred)
@@ -577,10 +612,80 @@ class RacingMLModel:
             except Exception:
                 pass
         
+        method = "weighted_average"
+        if self._serve_isotonic_applies():
+            xgb_pred = self._calibrate_component("xgb", xgb_pred)
+            lgb_pred = self._calibrate_component("lgb", lgb_pred)
+            cat_pred = self._calibrate_component("cb", cat_pred)
+            method = "weighted_average+isotonic"
         ensemble = (xgb_pred * weights['xgb'] + lgb_pred * weights['lgb'] + cat_pred * weights['cat'])
         return {"xgb": xgb_pred, "lightgbm": lgb_pred,
                 "catboost": cat_pred, "ensemble": ensemble,
-                "method": "weighted_average", "weights": weights}
+                "method": method, "weights": weights}
+
+    # ---- serve-time isotonic calibration (STRIDE_ML_APPLY_ISOTONIC) ----
+
+    _CALIBRATOR_SLOTS = (("xgb", "xgb_model"), ("lgb", "lgb_model"), ("cb", "catboost_model"))
+
+    def _collect_oof_calibrators(self, model_data):
+        """Per-model OOF isotonic calibrators the artifact carries, keyed
+        xgb / lgb / cb.
+
+        The explicit ``oof_calibrators`` payload key (retrain_v2.save_model
+        since 2026-09) wins; otherwise the ``_isotonic`` attribute retrain_v2
+        sets on each booster — which survives pickling for XGBoost and
+        LightGBM but not CatBoost, so an older artifact yields a partial set.
+        """
+        payload = model_data.get("oof_calibrators")
+        payload = payload if isinstance(payload, dict) else {}
+        found = {}
+        for key, attr in self._CALIBRATOR_SLOTS:
+            cal = payload.get(key)
+            if cal is None:
+                cal = getattr(getattr(self, attr, None), "_isotonic", None)
+            if cal is not None and hasattr(cal, "transform"):
+                found[key] = cal
+        return found
+
+    def serve_calibration_status(self):
+        """What serve-time calibration would do right now, for logs/tests."""
+        present = [key for key, attr in self._CALIBRATOR_SLOTS if getattr(self, attr, None) is not None]
+        have = [key for key in present if key in (self.oof_calibrators or {})]
+        missing = [key for key in present if key not in have]
+        enabled = _ml_apply_isotonic_enabled()
+        complete = bool(present) and not missing
+        return {
+            "enabled": enabled,
+            "models_present": present,
+            "calibrators_present": have,
+            "calibrators_missing": missing,
+            "complete": complete,
+            "applied": enabled and complete,
+        }
+
+    def _serve_isotonic_applies(self):
+        status = self.serve_calibration_status()
+        if status["enabled"] and not status["applied"] and not self._isotonic_notice_printed:
+            import sys
+            print(
+                "[ML] STRIDE_ML_APPLY_ISOTONIC=true but the artifact carries "
+                f"calibrators for {status['calibrators_present'] or 'none'} of "
+                f"{status['models_present']} — serving RAW probabilities. "
+                "Retrain with retrain_v2 (save_model persists all three).",
+                file=sys.stderr,
+            )
+            self._isotonic_notice_printed = True
+        return status["applied"]
+
+    def _calibrate_component(self, key, raw):
+        """Calibrated scores for one base model; an absent model (zeros, no
+        calibrator — completeness is judged over models present) passes
+        through untouched."""
+        raw = np.asarray(raw, dtype=float)
+        cal = (self.oof_calibrators or {}).get(key)
+        if raw.size == 0 or cal is None:
+            return raw
+        return np.asarray(cal.transform(raw), dtype=float)
 
     def predict_proba(self, X: pd.DataFrame, distance_m: int = None) -> np.ndarray:
         """Get ensemble probability predictions with dynamic weighting."""
@@ -667,6 +772,7 @@ class RacingMLModel:
             saved_cols = model_data.get('feature_columns')
             if saved_cols and isinstance(saved_cols, list):
                 self._trained_feature_columns = saved_cols
+            self.oof_calibrators = self._collect_oof_calibrators(model_data)
             return True
         except Exception as e:
             print(f"Failed to load model: {e}")
