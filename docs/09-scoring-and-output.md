@@ -43,8 +43,24 @@ Per runner, in order:
    market-tethered. Artifacts carry a stage tag; a mismatched artifact is
    refused. Default behaviour without the flag/model is byte-identical.
    See [Hit-rate research](12-hit-rate-research.md).
-4. **Context multipliers.** Fitness readiness and track-bias points each map
-   0–100 → ×0.95–1.05; jockey momentum ×0.85–1.20.
+4. **Context multipliers.** Documented intent: fitness readiness and track-bias
+   points each map to ×0.95–1.05; jockey momentum ×0.85–1.20. **As shipped
+   (default flags) none of the three does that** — verified 2026-09-06, audit
+   H3/H4, first recorded in `docs/analysis/SYSTEM_MAP.md §7b`: the fitness read
+   looks for a top-level `fitnessReadinessScore` that mc_api only publishes
+   nested under `fitnessData` (0–1 scale) ⇒ ×1.00 always; `trackBiasPoints` is
+   a −18…+49 points total fed into a `/100` map built for 0–100 ⇒ every scored
+   runner lands in ×0.95–1.00, a uniform shrink with a 0.5% tilt; the jockey
+   read names an mc_api *feature* that never reached the result ⇒ ×1.00 always
+   (the same feature does reach the probability upstream, through mc_api's
+   `calculate_sophisticated_adjustment` at 22% of `combined_adjustment`, so the
+   jockey flag is a second application of it, not an introduction).
+   `_context_multipliers` repairs each one behind its own default-off flag —
+   `STRIDE_CTX_MULT_FITNESS`, `STRIDE_CTX_MULT_BIAS`, `STRIDE_CTX_MULT_JOCKEY`
+   — so each effect is attributable in a paired A/B, and
+   `STRIDE_CTX_MULT_DIAG=true` prints the realised min/mean/max per race. Flags
+   off is today's exact arithmetic, not "no multiplier": every downstream
+   raw-probability threshold was tuned against the ~5% shrink.
 5. **Selection score.** Two independent signals — the probability estimate and the
    market disagreement:
    `prob_score = 0.70 × adjusted_calib + 0.30 × clamp(edge, ±10)`

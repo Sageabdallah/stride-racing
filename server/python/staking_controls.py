@@ -16,6 +16,8 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from decision_contract import demote_active_bet
+from portfolio_risk import ev_at_price
+from selection_ledger import default_commission_rate
 
 STARTING_BANKROLL_UNITS = 100.0
 
@@ -139,11 +141,31 @@ def apply_drawdown_breaker(race_tips: List[Dict[str, Any]],
 
 
 def _net_ev(pick: Dict[str, Any]) -> float:
+    """Net EV per unit at the quoted price, commission on winnings — the same
+    quantity the ledger books (selection_ledger.build_ledger_row).
+
+    An explicit ``expected_value`` is honoured. No pipeline producer supplies
+    one (build_export_pick emits win_pct / odds / edge_pct), so the old
+    fallback ranked the day by edge_pct while the cap's docstring promised
+    net EV — and at equal EV, edge prefers the shorter price (audit
+    2026-09-06 M6). edge_pct remains the last resort for a pick with no
+    usable price.
+    """
     ev = pick.get("expected_value")
-    if ev is None:
-        ev = pick.get("edge_pct", 0)
+    if ev is not None:
+        try:
+            return float(ev)
+        except (TypeError, ValueError):
+            return 0.0
     try:
-        return float(ev or 0.0)
+        win_pct = float(pick.get("win_pct"))
+        odds = float(pick.get("odds"))
+    except (TypeError, ValueError):
+        win_pct, odds = None, None
+    if win_pct is not None and odds is not None and odds > 1.0:
+        return ev_at_price(win_pct / 100.0, odds, default_commission_rate())
+    try:
+        return float(pick.get("edge_pct", 0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
 

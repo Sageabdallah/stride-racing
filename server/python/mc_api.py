@@ -595,10 +595,35 @@ except ImportError:
 
 
 class _SharedDbConnection:
-    """Thin wrapper that keeps the hot-path DB connection alive across calls."""
+    """Thin wrapper that keeps the hot-path DB connection alive across calls.
+
+    The wrapped connection is AUTOCOMMIT: every statement is final on the
+    wire, which is what the per-runner enrichment reads want (one hot
+    connection per DSN instead of one TCP+TLS handshake per runner), and
+    ``close()`` is a no-op so the pool survives callers that close what they
+    open. Two consequences were silent until the 2026-09-06 audit (H2):
+
+    * attribute writes landed on the wrapper, so ``conn.autocommit = False``
+      changed nothing on the wire while the caller believed it had a
+      transaction. ``__setattr__`` now forwards to the real connection — a
+      caller that flips shared state owns restoring it;
+    * ``with conn:`` neither committed nor rolled back. It now mirrors
+      psycopg2 (commit on clean exit, rollback on exception); both are no-ops
+      while autocommit is on, so pooled reads are byte-identical.
+
+    A writer that needs a real transaction should not use the pool at all:
+    the installed ``psycopg2.connect`` publishes the original function as
+    ``__wrapped__`` (see run_tips_pipeline.db_connect(transactional=True)).
+    """
 
     def __init__(self, conn):
-        self._conn = conn
+        object.__setattr__(self, "_conn", conn)
+
+    def __setattr__(self, name, value):
+        if name == "_conn":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
 
     def cursor(self, *args, **kwargs):
         return self._conn.cursor(*args, **kwargs)
@@ -613,6 +638,10 @@ class _SharedDbConnection:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
         return False
 
     @property
@@ -630,7 +659,15 @@ class _SharedDbConnection:
         return getattr(self._conn, name)
 
 
-_REAL_PSYCOPG2_CONNECT = psycopg2.connect if PSYCOPG2_AVAILABLE else None
+# The genuine driver function, peeled off any pool wrapper already installed
+# (this module is exec'd twice in a pipeline process: once by
+# run_tips_pipeline.run_mc_simulation via spec_from_file_location and once by
+# whatever imports it by name), so a second install never pools the pool.
+_REAL_PSYCOPG2_CONNECT = None
+if PSYCOPG2_AVAILABLE:
+    _REAL_PSYCOPG2_CONNECT = psycopg2.connect
+    while getattr(_REAL_PSYCOPG2_CONNECT, "__wrapped__", None) is not None:
+        _REAL_PSYCOPG2_CONNECT = _REAL_PSYCOPG2_CONNECT.__wrapped__
 _DB_CONNECTIONS = {}
 
 
@@ -679,6 +716,12 @@ def _shared_psycopg2_connect(*args, **kwargs):
     _DB_CONNECTIONS[cache_key] = wrapped
     return wrapped
 
+
+# Publish the real driver function on the wrapper so a caller that needs a
+# private, transactional connection can opt out of the pool without knowing
+# this module exists (functools.wraps is deliberately not used: the install
+# guard below keys on the wrapper's own __name__).
+_shared_psycopg2_connect.__wrapped__ = _REAL_PSYCOPG2_CONNECT
 
 if PSYCOPG2_AVAILABLE and getattr(psycopg2.connect, "__name__", "") != "_shared_psycopg2_connect":
     psycopg2.connect = _shared_psycopg2_connect
@@ -7735,6 +7778,15 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 'headToHead': enhanced_factors.get('head_to_head', {}),
                 'enhancedExplanations': enhanced_factors.get('explanations', []),
                 'trackBiasPoints': track_bias_data.get('total_points', 0),
+                # The wrapper's jockey context multiplier read a feature-dict
+                # key that never reached this result, so it was 1.0 for every
+                # runner (SYSTEM_MAP §7b.2). Surfaced here, additive; read by
+                # run_tips_pipeline._context_multipliers under
+                # STRIDE_CTX_MULT_JOCKEY. NB the same feature already scales
+                # this runner's probability through
+                # calculate_sophisticated_adjustment (22% of
+                # combined_adjustment); that flag is a second application.
+                'jockeyMomentumAdjustment': enhanced_features.get('jockey_momentum_adjustment', 1.0),
                 'trackBiasFit': track_bias_data.get('track_fit', 'neutral'),
                 'trackBiasBreakdown': track_bias_data.get('breakdown', {}),
                 'trackBiasDescriptions': track_bias_data.get('descriptions', {}),
