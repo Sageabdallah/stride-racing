@@ -177,7 +177,7 @@ class RacingMLModel:
         self.xgb_model = None
         self.lgb_model = None
         self.catboost_model = None
-        self.scaler = StandardScaler()
+        self.scaler = self._default_scaler()
         self.is_trained = False
         self.feature_importance = {}
         self.training_stats = {}
@@ -191,6 +191,17 @@ class RacingMLModel:
         if os.path.exists(self.model_path):
             self.load()
     
+    @staticmethod
+    def _default_scaler():
+        """A fresh StandardScaler when sklearn is importable, else None. Tree
+        models do not need scaling — predict_components falls back to the raw
+        matrix whenever the scaler is absent or unfitted."""
+        try:
+            from sklearn.preprocessing import StandardScaler as _StandardScaler
+        except ImportError:
+            return None
+        return _StandardScaler()
+
     def prepare_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare feature matrix from raw data."""
         # Use model's trained feature list if available, else fall back to FEATURE_COLUMNS
@@ -762,7 +773,13 @@ class RacingMLModel:
             self.lgb_model = model_data.get('lgb_model')
             # Handle both key names (retrain_v2 uses 'cb_model', ml_model uses 'catboost_model')
             self.catboost_model = model_data.get('catboost_model') or model_data.get('cb_model')
-            self.scaler = model_data.get('scaler', StandardScaler())
+            # retrain_v2 payloads carry no scaler; the default must not depend
+            # on the xgboost/catboost import block above having succeeded
+            # (CI runs without them, and the name StandardScaler is only bound
+            # when that whole block imports).
+            self.scaler = model_data.get('scaler')
+            if self.scaler is None:
+                self.scaler = self._default_scaler()
             self.feature_importance = model_data.get('feature_importance', {})
             self.training_stats = model_data.get('training_stats', model_data.get('cv_results', {}))
             # Mark as trained if at least one model loaded
