@@ -255,7 +255,18 @@ def gate_parity_suites(test_paths=None):
             continue
         import io
         import contextlib
-        import pytest
+        try:
+            import pytest
+        except ImportError:
+            # The stride-preflight task imports this module from the Fargate
+            # image; requirements.txt lists pytest since 2026-09-06. Until it
+            # did, this import raised and gate 5 read "unreadable preflight
+            # output" every morning. Absence is a visible row, never a crash.
+            rows.append(_row(f"parity:{name}", AMBER,
+                             "pytest is not installed on this runtime — the suite "
+                             "could not be executed (requirements.txt lists it; "
+                             "rebuild the image)"))
+            continue
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             code = pytest.main([str(path), "-q", "--no-header"])

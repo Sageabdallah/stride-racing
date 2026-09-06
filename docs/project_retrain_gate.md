@@ -66,3 +66,37 @@ the retrain plan against the code:
   cannot depend on the artifact training would produce.
 
 The registered dates above are untouched.
+
+## Clarification 2026-09-06 (dates unchanged; gate mechanics only)
+
+Auditing the 2026-09-05 repair against the code found that both repaired
+gates could still pass, or be bypassed, on something other than the thing
+they name:
+
+- **Gate 3** read whichever review record sorted last and trusted its
+  verdict alone: not which flag it was about, not how many clean days it
+  was computed on (the store's filename count stood in, and that count
+  includes empty and unreadable files), and not whether evidence had
+  arrived since. A PASS emitted once stayed authoritative forever. It now
+  requires, per stream, a record about that flag, computed by
+  `shadow_flip_review.py` on at least 5 **clean** days, and no older than
+  the newest evidence file for its stream — a day written after the review
+  may be the dirty day that restarts the count, so it invalidates the PASS
+  until the review is re-run. The reviewer, for its part, now exits
+  non-zero when `--emit-evidence` wrote no durable record, and reads the
+  per-race transition detail the day files carry, so the single-race
+  sign-off rule is computed on the evidence rather than passed over it.
+- **Gate 5** is enforced twice: by `gate_status.py` for the daily readout,
+  and by the `retrain-model` workflow before a `v3-candidate` run. The
+  workflow's refusal captured the exit status of `tee`, not of the
+  preflight (GitHub's default shell has no `pipefail`), so it could never
+  fire; and the preflight's own exit code is 1 on RED only, so an unsigned
+  `[SAGE-APPROVAL]` marker (AMBER) would not have refused either. The
+  workflow now hands its JSON board to `gate_status.py --preflight-board`,
+  the same every-row-GREEN rule the gate applies, and a test executes the
+  step under the shell GitHub uses. The Fargate image also lacked
+  `pytest`, which the parity gate runs in-process, so the scheduled
+  preflight could only report an unreadable board; `requirements.txt`
+  lists it now and a missing runner is an explicit AMBER row.
+
+The registered dates above are untouched.

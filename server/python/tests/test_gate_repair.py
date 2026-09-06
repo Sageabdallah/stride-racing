@@ -12,6 +12,7 @@ and the "most recent declaration governs" placeholder rule.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import types
@@ -166,14 +167,25 @@ def local_store(tmp_path, monkeypatch):
 
 
 def _days(store, stem, n):
+    """n day files, 2026-08-10 onward. Content is irrelevant to gate 3 now:
+    it reads the reviewer's clean-day count, not the store's filename count."""
     for i in range(n):
         store.put_evidence(f"{stem}_2026-08-{10 + i:02d}.json", "[]")
 
 
-def _reviews(verdict_serve="PASS", verdict_renorm="PASS"):
+def _record(which, verdict="PASS", n_clean=5, flag=None):
+    """What shadow_flip_review.run_review emits: verdict, the flag it is
+    about, and the clean-day count it was computed on."""
     import shadow_flip_review as sfr
-    sfr.emit_review("serve", {"auto_verdict": verdict_serve, "flag": "x"}, on=date(2026, 9, 5))
-    sfr.emit_review("renorm", {"auto_verdict": verdict_renorm, "flag": "y"}, on=date(2026, 9, 5))
+    return {"auto_verdict": verdict, "flag": flag or sfr.FLAG_NAMES[which],
+            "n_days": n_clean, "n_clean_days": n_clean}
+
+
+def _reviews(verdict_serve="PASS", verdict_renorm="PASS", n_clean=5,
+             on=date(2026, 9, 5), flag_serve=None, flag_renorm=None):
+    import shadow_flip_review as sfr
+    sfr.emit_review("serve", _record("serve", verdict_serve, n_clean, flag_serve), on=on)
+    sfr.emit_review("renorm", _record("renorm", verdict_renorm, n_clean, flag_renorm), on=on)
 
 
 def test_gate3_flags_alone_no_longer_pass(local_store, monkeypatch):
@@ -181,7 +193,7 @@ def test_gate3_flags_alone_no_longer_pass(local_store, monkeypatch):
     monkeypatch.setenv("STRIDE_RENORMALISE_FIELD", "true")
     g = gs.gate3_shadow_flips()
     assert g["ok"] is False
-    assert "0/5" in g["detail"] and "NONE" in g["detail"]
+    assert "serve=NONE" in g["detail"] and "renorm=NONE" in g["detail"]
 
 
 def test_gate3_needs_days_reviews_and_flags(local_store, monkeypatch):
@@ -196,7 +208,50 @@ def test_gate3_needs_days_reviews_and_flags(local_store, monkeypatch):
     _reviews()
     g = gs.gate3_shadow_flips()
     assert g["ok"] is True, g["detail"]
-    assert "serve=PASS, renorm=PASS" in g["detail"]
+    assert "serve=PASS@2026-09-05 on 5 clean days" in g["detail"]
+    assert "renorm=PASS@2026-09-05 on 5 clean days" in g["detail"]
+
+
+def test_gate3_a_pass_record_is_bound_to_the_flag_it_is_about(local_store, monkeypatch):
+    """Until 2026-09-06 a record's verdict was read without its flag: the
+    renorm record could be a copy of the serve one."""
+    _days(local_store, "serve_liveness_shadow", 5)
+    _days(local_store, "calibrator_shadow", 5)
+    monkeypatch.setenv("STRIDE_SERVE_LIVE_FEATURES", "true")
+    monkeypatch.setenv("STRIDE_RENORMALISE_FIELD", "true")
+    _reviews(flag_renorm="STRIDE_SERVE_LIVE_FEATURES")
+    g = gs.gate3_shadow_flips()
+    assert g["ok"] is False and "record is about 'STRIDE_SERVE_LIVE_FEATURES', not STRIDE_RENORMALISE_FIELD" in g["detail"]
+
+
+def test_gate3_reads_the_reviewers_clean_day_count_not_the_file_count(local_store, monkeypatch):
+    """Six files in the store, but the reviewer found only four clean days
+    (empty or runner-less files do not count): not enough."""
+    _days(local_store, "serve_liveness_shadow", 6)
+    _days(local_store, "calibrator_shadow", 6)
+    monkeypatch.setenv("STRIDE_SERVE_LIVE_FEATURES", "true")
+    monkeypatch.setenv("STRIDE_RENORMALISE_FIELD", "true")
+    _reviews(n_clean=4)
+    g = gs.gate3_shadow_flips()
+    assert g["ok"] is False and "computed on 4 clean day(s) < 5" in g["detail"]
+
+
+def test_gate3_later_evidence_invalidates_an_earlier_pass(local_store, monkeypatch):
+    """A PASS emitted on the 14th; a day file for the 15th arrives (it may be
+    the dirty day that restarts the count). The record is stale until the
+    review is re-run on the whole store."""
+    _days(local_store, "serve_liveness_shadow", 5)          # 08-10 .. 08-14
+    _days(local_store, "calibrator_shadow", 5)
+    monkeypatch.setenv("STRIDE_SERVE_LIVE_FEATURES", "true")
+    monkeypatch.setenv("STRIDE_RENORMALISE_FIELD", "true")
+    _reviews(on=date(2026, 8, 14))
+    assert gs.gate3_shadow_flips()["ok"] is True
+    local_store.put_evidence("serve_liveness_shadow_2026-08-15.json", "[]")
+    g = gs.gate3_shadow_flips()
+    assert g["ok"] is False
+    assert "STALE: record 2026-08-14 predates evidence 2026-08-15" in g["detail"]
+    _reviews(on=date(2026, 8, 15))
+    assert gs.gate3_shadow_flips()["ok"] is True
 
     monkeypatch.setenv("STRIDE_RENORMALISE_FIELD", "false")
     assert gs.gate3_shadow_flips()["ok"] is False
@@ -217,9 +272,11 @@ def test_gate3_too_few_days_blocks_even_with_pass_reviews(local_store, monkeypat
     _days(local_store, "calibrator_shadow", 5)
     monkeypatch.setenv("STRIDE_SERVE_LIVE_FEATURES", "true")
     monkeypatch.setenv("STRIDE_RENORMALISE_FIELD", "true")
-    _reviews()
+    import shadow_flip_review as sfr
+    sfr.emit_review("serve", _record("serve", n_clean=4), on=date(2026, 9, 5))
+    sfr.emit_review("renorm", _record("renorm", n_clean=5), on=date(2026, 9, 5))
     g = gs.gate3_shadow_flips()
-    assert g["ok"] is False and "4/5" in g["detail"]
+    assert g["ok"] is False and "computed on 4 clean day(s) < 5" in g["detail"]
 
 
 # ------------------------------------------------------------- gate 5
@@ -267,6 +324,62 @@ def test_gate5_unreadable_output_is_a_named_wait(monkeypatch):
         stdout="usage: retrain_preflight.py [-h] --staging STAGING", stderr="", returncode=2))
     g = gs.gate5_preflight()
     assert g["ok"] is False and "unreadable preflight output" in g["detail"]
+
+
+def test_preflight_board_verdict_is_every_row_green():
+    """One rule for gate 5 and for the retrain-model workflow's refusal:
+    ok only when every row is GREEN. AMBER blocks, RED blocks, and an empty
+    board — a preflight that evaluated nothing — is not green either."""
+    green = {"board1": [{"name": "a", "status": "GREEN", "detail": ""}],
+             "board2": [{"name": "b", "status": "GREEN", "detail": ""}]}
+    assert gs.preflight_board_verdict(green) == (True, "2 gate(s) all GREEN")
+    amber = {"board1": [{"name": "a", "status": "GREEN", "detail": ""}],
+             "board2": [{"name": "preregistration", "status": "AMBER", "detail": ""}]}
+    ok, detail = gs.preflight_board_verdict(amber)
+    assert ok is False and detail == "preregistration=AMBER"
+    ok, detail = gs.preflight_board_verdict({"board1": [], "board2": []})
+    assert ok is False and "empty" in detail
+    with pytest.raises((KeyError, TypeError)):
+        gs.preflight_board_verdict({"mode": "inputs-only"})
+
+
+def test_preflight_board_cli_exits_nonzero_unless_fully_green(tmp_path, capsys):
+    """`gate_status.py --preflight-board FILE` is what the workflow runs on the
+    JSON it wrote; it must never need a database and must fail closed on a
+    file it cannot read."""
+    board = tmp_path / "b.json"
+    board.write_text(json.dumps({"board1": [{"name": "a", "status": "GREEN", "detail": ""}],
+                                 "board2": []}), encoding="utf-8")
+    assert gs._preflight_board_cli(str(board)) == 0
+    board.write_text(json.dumps({"board1": [{"name": "a", "status": "RED", "detail": ""}],
+                                 "board2": []}), encoding="utf-8")
+    assert gs._preflight_board_cli(str(board)) == 1
+    assert "a=RED" in capsys.readouterr().out
+    board.write_text("not json", encoding="utf-8")
+    assert gs._preflight_board_cli(str(board)) == 1
+    assert gs._preflight_board_cli(str(tmp_path / "absent.json")) == 1
+    proc = subprocess.run([sys.executable, str(SERVER_PYTHON / "gate_status.py"),
+                           "--preflight-board", str(board)],
+                          capture_output=True, text=True, env={**os.environ, "DATABASE_URL": ""})
+    assert proc.returncode == 1 and "unreadable" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_parity_gate_without_pytest_is_a_named_amber_row(monkeypatch, tmp_path):
+    """The Fargate image is built from requirements.txt. Before pytest was
+    listed there, gate_parity_suites raised ImportError inside the scheduled
+    preflight and gate 5 read 'unreadable preflight output' every morning.
+    Missing runner = visible AMBER row, and the dependency is pinned in the
+    file the image is built from."""
+    suite = tmp_path / "test_feature_parity.py"
+    suite.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    paths = {name: str(suite) for name in rp.PARITY_TESTS}
+    monkeypatch.setitem(sys.modules, "pytest", None)   # `import pytest` -> ImportError
+    rows = rp.gate_parity_suites(paths)
+    assert rows and all(r["status"] == rp.AMBER for r in rows)
+    assert all("pytest is not installed" in r["detail"] for r in rows)
+    requirements = (SERVER_PYTHON.parents[1] / "requirements.txt").read_text(encoding="utf-8")
+    assert re.search(r"^pytest\b", requirements, re.M), \
+        "the image that runs gate 5 daily must carry the runner the gate needs"
 
 
 def test_gate5_against_the_real_script_parses(monkeypatch):

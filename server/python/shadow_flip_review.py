@@ -198,10 +198,13 @@ def review_serve_liveness(days: Dict[str, Any]) -> Dict[str, Any]:
     criteria = [_days_criterion(per_day)]
 
     # #2 "No day errored to legacy." The store can show a missing, empty or
-    # unreadable day. It cannot show a single race whose live path raised and
-    # fell back — that is a stderr line ("[FEATURES] shadow log write failed")
-    # on the task, and the race is simply absent from the file. Said here so
-    # the PASS is read for what it is.
+    # unreadable day. It cannot show a single runner whose live path raised
+    # and fell back — run_tips_pipeline drops that runner from the shadow
+    # entries and prints "[FEATURES] shadow score failed for <horse>" to the
+    # task's stderr; the day file is written without it and reads clean.
+    # ("[FEATURES] shadow log write failed" is the other failure, the store
+    # write itself, and that one does leave a missing or partial file.)
+    # Said here so the PASS is read for what it is.
     dirty = [d for d in per_day if d["dirty"]]
     criteria.append(_c(
         "no_errored_day",
@@ -209,9 +212,11 @@ def review_serve_liveness(days: Dict[str, Any]) -> Dict[str, Any]:
         (f"{len(dirty)} dirty day(s): "
          + "; ".join(f"{d['date']}: {d['reason']}" for d in dirty)
          if dirty else "every day file in the store parsed and carried scored runners"),
-        limitation=("a race whose live path raised is absent from its day file "
+        limitation=("a runner whose live path raised is absent from its day file "
                     "and visible only in that task's stderr; check the "
-                    "'[FEATURES] shadow log write failed' line count per day"),
+                    "'[FEATURES] shadow score failed' line count per day (the "
+                    "'shadow log write failed' line is a store-write failure, "
+                    "which this criterion does see as a dirty day)"),
         dirty_days=[d["date"] for d in dirty],
     ))
 
@@ -299,7 +304,7 @@ def summarise_renorm_day(d: str, payload: Any) -> Dict[str, Any]:
     info: Dict[str, Any] = {"date": d, "dirty": False, "reason": None,
                             "n_rows": 0, "n_races": 0, "brier_current": None,
                             "brier_renormalised": None, "sums_within_tolerance": None,
-                            "n_compared": 0, "n_transitions": 0}
+                            "n_compared": 0, "n_transitions": 0, "races": []}
     day = payload.get("day") if isinstance(payload, dict) else None
     if not isinstance(day, dict):
         info.update(dirty=True, reason="day file missing, unreadable or without a 'day' report")
@@ -316,7 +321,11 @@ def summarise_renorm_day(d: str, payload: Any) -> Dict[str, Any]:
                 brier_current=cur.get("brier"), brier_renormalised=ren.get("brier"),
                 sums_within_tolerance=(ren.get("race_sums") or {}).get("within_tolerance"),
                 n_compared=int(pair.get("n_compared") or 0),
-                n_transitions=int(pair.get("n_transitions") or 0))
+                n_transitions=int(pair.get("n_transitions") or 0),
+                # Per-race detail (n_runners / n_compared / transitions) is
+                # in every day file the daily job writes; the single-race
+                # rule reads it whether or not a pooled file exists.
+                races=[r for r in (pair.get("races") or []) if isinstance(r, dict)])
     return info
 
 
@@ -366,15 +375,20 @@ def review_renormalisation(days: Dict[str, Any], pooled: Any) -> Dict[str, Any]:
     # #3 tier transitions: aggregate rate, then the single-race rule.
     pair = ((pooled or {}).get("tier_transitions") or {}).get("pairs", {}).get(RENORM_PAIR) \
         if isinstance(pooled, dict) else None
+    day_races = [r for d in clean for r in d.get("races") or []]
     if pair and pair.get("n_compared"):
         n_cmp, n_tr = int(pair["n_compared"]), int(pair["n_transitions"])
         tr_source = "pooled"
-        races_detail = pair.get("races") or []
+        # The pooled file's own per-race list when it carries one; otherwise
+        # the day files' — a race that moved more than a quarter of its
+        # field sits in the day file that recorded it, and until 2026-09-06
+        # this branch discarded that detail and PASSed the rule on it.
+        races_detail = pair.get("races") or day_races
     else:
         n_cmp = sum(d["n_compared"] for d in clean)
         n_tr = sum(d["n_transitions"] for d in clean)
         tr_source = "sum of day files"
-        races_detail = []
+        races_detail = day_races
     if n_cmp == 0:
         criteria.append(_c("transition_rate", WAIT, "no runner had a computable tier in both variants"))
     else:
@@ -494,7 +508,13 @@ def latest_review(which: str, list_dates=None, fetch=None) -> Optional[Dict[str,
     dates = list_dates(stem)
     if not dates:
         return None
-    return _load_json(fetch(f"{stem}_{dates[-1]}.json"))
+    record = _load_json(fetch(f"{stem}_{dates[-1]}.json"))
+    if isinstance(record, dict):
+        # The filename date is the record's date of computation — what gate 3
+        # compares against the newest evidence file to know whether the
+        # review has seen everything in the store.
+        record["record_date"] = dates[-1]
+    return record
 
 
 def render(report: Dict[str, Any]) -> str:
@@ -728,7 +748,32 @@ def main() -> int:
                 print(render(r))
                 if r.get("emitted"):
                     print(f"  review record: {r['emitted'].get('s3') or r['emitted'].get('local')}")
+    # put_evidence never raises, so a record that reached neither the bucket
+    # (when one is configured — the durable copy gate 3 reads on Fargate) nor
+    # the local directory used to print "review record: None" and exit on the
+    # verdict alone: an operator was told the PASS was recorded when nothing
+    # was. That is its own failure, distinct from the verdict's exit 1.
+    unwritten = [w for w in which if _record_not_durable(reports[w].get("emitted"))]
+    if unwritten:
+        for w in unwritten:
+            out = reports[w]["emitted"]
+            print(f"ERROR: review record for {FLAG_NAMES[w]} was NOT written durably — "
+                  f"local: {out.get('local') or out.get('local_error') or 'not written'}; "
+                  f"s3: {out.get('s3') or out.get('s3_error') or 'no bucket configured'}",
+                  file=sys.stderr)
+        return 2
     return 0 if all(r["auto_verdict"] == PASS for r in reports.values()) else 1
+
+
+def _record_not_durable(emitted: Optional[Dict[str, Any]]) -> bool:
+    """True when an --emit-evidence write did not reach the store gate 3
+    reads: the bucket when one is configured, the local directory otherwise.
+    None (nothing was emitted, e.g. the store was unreadable) is not a write
+    failure — that case already reports WAIT."""
+    if emitted is None:
+        return False
+    from evidence_store import bucket
+    return not (emitted.get("s3") if bucket() else emitted.get("local"))
 
 
 if __name__ == "__main__":

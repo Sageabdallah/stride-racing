@@ -125,6 +125,9 @@ def test_dirty_day_limitation_is_stated():
     rep = sfr.review_serve_liveness({"2026-08-10": _day(rng)})
     c = {x["criterion"]: x for x in rep["criteria"]}["no_errored_day"]
     assert "stderr" in c["limitation"]
+    # the line to count is the per-runner live-path failure run_tips_pipeline
+    # prints, not the store-write failure (which does dirty the day file)
+    assert "shadow score failed" in c["limitation"]
 
 
 # ------------------------------------------------------------- renormalisation
@@ -212,6 +215,40 @@ def test_renorm_single_race_proxy_for_legacy_evidence_without_field_sizes():
     assert "n_runners" in c["detail"]
 
 
+def test_single_race_rule_reads_per_race_detail_from_the_day_files():
+    """Every day file the daily job writes carries per-race n_runners /
+    n_compared / transitions. Until 2026-09-06 the reviewer read only the
+    pair totals from day files and emptied the race list when the pooled
+    file was absent or carried none — so a race that moved half its field
+    sat in the evidence and the single-race rule PASSed over it."""
+    days, pooled = _renorm_fixture()
+    hot = {"race_key": ["2026-08-12", "Randwick", "5"], "n_runners": 8, "n_compared": 8,
+           "transitions": [{}, {}, {}, {}]}                         # 50% of the field
+    cold = {"race_key": ["2026-08-12", "Randwick", "6"], "n_runners": 8, "n_compared": 8,
+            "transitions": [{}]}                                     # 12.5%
+    days["2026-08-12"]["day"]["tier_transitions"]["pairs"][sfr.RENORM_PAIR]["races"] = [hot, cold]
+
+    # no pooled file at all
+    c = {x["criterion"]: x for x in sfr.review_renormalisation(days, None)["criteria"]}["single_race_signoff"]
+    assert c["status"] == sfr.REVIEW and [r["race_key"] for r in c["races"]] == [hot["race_key"]]
+    assert not c["proxy_used"]
+
+    # pooled file present but without a per-race list: the day files' detail is read
+    c = {x["criterion"]: x for x in sfr.review_renormalisation(days, pooled)["criteria"]}["single_race_signoff"]
+    assert c["status"] == sfr.REVIEW and [r["race_key"] for r in c["races"]] == [hot["race_key"]]
+
+    # a pooled file that carries its own per-race list is the registered source
+    pooled["tier_transitions"]["pairs"][sfr.RENORM_PAIR]["races"] = [cold]
+    c = {x["criterion"]: x for x in sfr.review_renormalisation(days, pooled)["criteria"]}["single_race_signoff"]
+    assert c["status"] == sfr.PASS and c["races"] == []
+
+    # a dirty day's detail is not read (it is not part of the window)
+    pooled["tier_transitions"]["pairs"][sfr.RENORM_PAIR]["races"] = []
+    days["2026-08-12"]["day"]["status"] = "no_data"
+    c = {x["criterion"]: x for x in sfr.review_renormalisation(days, pooled)["criteria"]}["single_race_signoff"]
+    assert c["status"] == sfr.PASS
+
+
 def test_renorm_dirty_day_detection():
     assert sfr.summarise_renorm_day("d", None)["dirty"]
     assert sfr.summarise_renorm_day("d", {"date": "d", "day": {"status": "no_data", "n_rows": 0}})["dirty"]
@@ -264,6 +301,40 @@ def test_cli_exit_code_reflects_verdict(local_store, capsys):
     assert sfr.main() == 1
     out = capsys.readouterr().out
     assert "AUTO VERDICT: WAIT" in out and "STRIDE_SERVE_LIVE_FEATURES" in out
+
+
+def test_emit_evidence_exit_is_two_when_the_record_was_not_written(local_store, monkeypatch, capsys):
+    """put_evidence never raises. Until 2026-09-06 a record that reached
+    neither the bucket nor the local directory printed 'review record: None'
+    and the CLI exited on the verdict alone — success reported, nothing
+    recorded. Evidence first: the verdict still prints; then the failure."""
+    rng = np.random.default_rng(10)
+    for i in range(5):
+        local_store.put_evidence(f"{sfr.SERVE_STEM}_2026-08-1{i}.json", json.dumps(_day(rng)))
+    monkeypatch.setattr(sys, "argv", ["shadow_flip_review.py", "--flag", "serve", "--emit-evidence"])
+    assert sfr.main() == 0
+    assert sfr.latest_review("serve")["auto_verdict"] == sfr.PASS
+
+    def failing_put(filename, text):
+        return {"local": None, "local_error": "[Errno 30] Read-only file system",
+                "s3": None, "s3_error": None}
+
+    monkeypatch.setattr(local_store, "put_evidence", failing_put)
+    assert sfr.main() == 2
+    captured = capsys.readouterr()
+    assert "AUTO VERDICT: PASS" in captured.out
+    assert "NOT written durably" in captured.err and "Read-only file system" in captured.err
+
+
+def test_record_durability_is_the_bucket_copy_when_a_bucket_is_configured(monkeypatch):
+    monkeypatch.delenv("STRIDE_EVIDENCE_BUCKET", raising=False)
+    assert sfr._record_not_durable(None) is False, "nothing emitted is not a write failure"
+    assert sfr._record_not_durable({"local": "/tmp/x.json", "s3": None}) is False
+    assert sfr._record_not_durable({"local": None, "local_error": "boom", "s3": None}) is True
+    monkeypatch.setenv("STRIDE_EVIDENCE_BUCKET", "stride-evidence")
+    # on Fargate the local copy dies with the task; only the S3 copy is the record gate 3 reads
+    assert sfr._record_not_durable({"local": "/tmp/x.json", "s3": None, "s3_error": "AccessDenied"}) is True
+    assert sfr._record_not_durable({"local": "/tmp/x.json", "s3": "s3://stride-evidence/x"}) is False
 
 
 def test_self_test_runs():
