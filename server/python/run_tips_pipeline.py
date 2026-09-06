@@ -754,7 +754,13 @@ def _context_multipliers(h):
       shrink with a 0.5% tilt, and a runner mc_api did not score (no key)
       is the only one that gets ×1.00;
     * jockey reads ``jockey_momentum_adjustment``, an mc_api *feature* that
-      never reached the result dict, so jockey_mult is 1.00 always.
+      never reached the result dict, so jockey_mult is 1.00 always. The
+      signal is not absent from the published probability, though: mc_api
+      folds the same feature into ``calculate_sophisticated_adjustment``,
+      which carries 22% of ``combined_adjustment``, which scales the MC win
+      probability this wrapper receives. The jockey flag below is therefore
+      a second, multiplicative application of an already-applied signal —
+      its A/B measures that marginal doubling, not an introduction.
 
     Each flag repairs one multiplier so its effect is attributable in the A/B
     (all default OFF):
@@ -765,7 +771,8 @@ def _context_multipliers(h):
       neutral (0 pts) ×1.00, ``track_fit`` "excellent" (≥ 25) ×1.05, −25 or
       worse ×0.95; absent ⇒ 1.0.
     * ``STRIDE_CTX_MULT_JOCKEY`` — read ``jockeyMomentumAdjustment`` (published
-      by mc_api since this change), clamped 0.85–1.20; absent ⇒ 1.0.
+      by mc_api since this change), clamped 0.85–1.20; absent ⇒ 1.0. Second
+      application of a signal mc_api already applied upstream (see above).
 
     Never raises; a malformed input yields that multiplier's neutral value.
     """

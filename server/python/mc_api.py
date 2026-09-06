@@ -7782,7 +7782,10 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 # key that never reached this result, so it was 1.0 for every
                 # runner (SYSTEM_MAP §7b.2). Surfaced here, additive; read by
                 # run_tips_pipeline._context_multipliers under
-                # STRIDE_CTX_MULT_JOCKEY.
+                # STRIDE_CTX_MULT_JOCKEY. NB the same feature already scales
+                # this runner's probability through
+                # calculate_sophisticated_adjustment (22% of
+                # combined_adjustment); that flag is a second application.
                 'jockeyMomentumAdjustment': enhanced_features.get('jockey_momentum_adjustment', 1.0),
                 'trackBiasFit': track_bias_data.get('track_fit', 'neutral'),
                 'trackBiasBreakdown': track_bias_data.get('breakdown', {}),
