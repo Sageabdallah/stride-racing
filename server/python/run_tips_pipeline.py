@@ -737,6 +737,85 @@ def calculate_intelligence_adjustment(h):
     return multiplier, bonus
 
 
+def _context_multipliers(h):
+    """(fitness_mult, bias_mult, jockey_mult) for one runner — docs/09 §1 step 4.
+
+    Flag OFF is today's exact expression for each multiplier, and today's
+    expressions are inert or on the wrong scale (audit 2026-09-06 H3/H4;
+    docs/analysis SYSTEM_MAP §7b, IMPLEMENTATION_PLAN T20):
+
+    * fitness reads a top-level ``fitnessReadinessScore`` that no producer
+      writes — mc_api nests it under ``fitnessData`` on a 0–1 scale — so the
+      default 50 pins fitness_mult at 1.00 for every runner;
+    * bias divides ``trackBiasPoints`` (a points total, −18…+49: barrier
+      −10…+15, pace −8…+12, jockey 0…+12, trainer 0…+10) by 100 as if it were
+      0–100, so a neutral runner (0 pts) gets ×0.95 and the best possible
+      (+49) ×0.999 — the documented ±5% band is realised as a uniform ~5%
+      shrink with a 0.5% tilt, and a runner mc_api did not score (no key)
+      is the only one that gets ×1.00;
+    * jockey reads ``jockey_momentum_adjustment``, an mc_api *feature* that
+      never reached the result dict, so jockey_mult is 1.00 always.
+
+    Each flag repairs one multiplier so its effect is attributable in the A/B
+    (all default OFF):
+
+    * ``STRIDE_CTX_MULT_FITNESS`` — read ``fitnessData.fitnessReadinessScore``
+      (0–1): ``0.95 + score × 0.10``; absent ⇒ 1.0.
+    * ``STRIDE_CTX_MULT_BIAS`` — ``1.0 + clamp(points, ±25) / 25 × 0.05``:
+      neutral (0 pts) ×1.00, ``track_fit`` "excellent" (≥ 25) ×1.05, −25 or
+      worse ×0.95; absent ⇒ 1.0.
+    * ``STRIDE_CTX_MULT_JOCKEY`` — read ``jockeyMomentumAdjustment`` (published
+      by mc_api since this change), clamped 0.85–1.20; absent ⇒ 1.0.
+
+    Never raises; a malformed input yields that multiplier's neutral value.
+    """
+    def _num(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    if _flag_enabled("STRIDE_CTX_MULT_FITNESS"):
+        fitness_data = h.get("fitnessData")
+        score = fitness_data.get("fitnessReadinessScore") if isinstance(fitness_data, dict) else None
+        score = _num(score, None)
+        fitness_mult = 0.95 + max(0.0, min(1.0, score)) * 0.10 if score is not None else 1.0
+    else:
+        fitness = _num(h.get("fitnessReadinessScore", 50), 50.0)
+        fitness_mult = 0.95 + (fitness / 100.0) * 0.10
+
+    if _flag_enabled("STRIDE_CTX_MULT_BIAS"):
+        pts = _num(h.get("trackBiasPoints"), None) if "trackBiasPoints" in h else None
+        bias_mult = 1.0 + (max(-25.0, min(25.0, pts)) / 25.0) * 0.05 if pts is not None else 1.0
+    else:
+        bias_pts = _num(h.get("trackBiasPoints", 50), 50.0)
+        bias_mult = 0.95 + (bias_pts / 100.0) * 0.10
+
+    if _flag_enabled("STRIDE_CTX_MULT_JOCKEY"):
+        jockey_mult = _num(h.get("jockeyMomentumAdjustment"), 1.0)
+    else:
+        jockey_mult = _num(h.get("jockey_momentum_adjustment", 1.0), 1.0)
+    jockey_mult = max(0.85, min(1.20, jockey_mult))
+
+    return fitness_mult, bias_mult, jockey_mult
+
+
+def _ctx_mult_diag_line(rows):
+    """One [CTX_MULT] line per race: realised min/mean/max of each multiplier
+    (STRIDE_CTX_MULT_DIAG). The runtime proof that the multipliers do what
+    the docs say — grep inference is not."""
+    if not rows:
+        return "[CTX_MULT] no runners"
+    parts = []
+    for idx, name in enumerate(("fitness", "bias", "jockey")):
+        vals = [r[idx] for r in rows]
+        parts.append(f"{name}={min(vals):.3f}/{sum(vals) / len(vals):.3f}/{max(vals):.3f}")
+    flags = ",".join(
+        f for f in ("STRIDE_CTX_MULT_FITNESS", "STRIDE_CTX_MULT_BIAS", "STRIDE_CTX_MULT_JOCKEY")
+        if _flag_enabled(f)) or "none"
+    return f"[CTX_MULT] n={len(rows)} min/mean/max " + " ".join(parts) + f" flags={flags}"
+
+
 def calibrate_and_score(horses, overround, race_class=""):
     """
     Apply market-anchored calibration and composite selection score.
@@ -885,6 +964,7 @@ def calibrate_and_score(horses, overround, race_class=""):
     raw_probs = [h.get("rawModelProb", 0) for h in horses]
     mc_spread = (max(raw_probs) - min(raw_probs)) if len(raw_probs) > 1 else 0
     mc_is_flat = mc_spread < 6.0
+    _ctx_rows = []
     if mc_is_flat and len(horses) > 1:
         print(f"    [MC_FLAT] Spread {mc_spread:.1f}pp — preserving MC spine and reducing wrapper overfit", file=sys.stderr)
 
@@ -898,12 +978,8 @@ def calibrate_and_score(horses, overround, race_class=""):
             odds = 0.0
         mc_score_norm = h.get("_mcSelectionScoreNorm", 0.0)
 
-        fitness = h.get("fitnessReadinessScore", 50)
-        fitness_mult = 0.95 + (fitness / 100.0) * 0.10
-        bias_pts = h.get("trackBiasPoints", 50)
-        bias_mult = 0.95 + (bias_pts / 100.0) * 0.10
-        jockey_mult = h.get("jockey_momentum_adjustment", 1.0)
-        jockey_mult = max(0.85, min(1.20, jockey_mult))
+        fitness_mult, bias_mult, jockey_mult = _context_multipliers(h)
+        _ctx_rows.append((fitness_mult, bias_mult, jockey_mult))
 
         context_mult = fitness_mult * bias_mult * jockey_mult
         adjusted_raw = raw * context_mult
@@ -964,6 +1040,9 @@ def calibrate_and_score(horses, overround, race_class=""):
         record_stage(_stages, "market_context_probability", h["winPercentage"] / 100.0)
         record_stage(_stages, "selection_score", h["selectionScore"])
         h["predictionStages"] = _stages
+
+    if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+        print("    " + _ctx_mult_diag_line(_ctx_rows), file=sys.stderr)
 
     # Gradient flat MC penalty (2A) — based on confidence gap, not binary
     if mc_is_flat:

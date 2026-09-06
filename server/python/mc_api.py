@@ -7778,6 +7778,12 @@ def run_simulation(race, runners, mc_sims=10000, seed=42):
                 'headToHead': enhanced_factors.get('head_to_head', {}),
                 'enhancedExplanations': enhanced_factors.get('explanations', []),
                 'trackBiasPoints': track_bias_data.get('total_points', 0),
+                # The wrapper's jockey context multiplier read a feature-dict
+                # key that never reached this result, so it was 1.0 for every
+                # runner (SYSTEM_MAP §7b.2). Surfaced here, additive; read by
+                # run_tips_pipeline._context_multipliers under
+                # STRIDE_CTX_MULT_JOCKEY.
+                'jockeyMomentumAdjustment': enhanced_features.get('jockey_momentum_adjustment', 1.0),
                 'trackBiasFit': track_bias_data.get('track_fit', 'neutral'),
                 'trackBiasBreakdown': track_bias_data.get('breakdown', {}),
                 'trackBiasDescriptions': track_bias_data.get('descriptions', {}),
