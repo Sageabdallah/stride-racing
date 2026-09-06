@@ -60,7 +60,16 @@ Notable mechanics inside `mc_api.py`:
   `MC_ENABLE_JOCKEY_EFFICIENCY` (the tips pipeline defaults both to `false` for
   full-card runs, `run_tips_pipeline.py:79-98`).
 - **DB connection sharing.** One hot psycopg2 connection per DSN, installed by
-  monkey-patching `psycopg2.connect` (`mc_api.py:539-626`), 15 s statement timeout.
+  monkey-patching `psycopg2.connect` (`_SharedDbConnection` /
+  `_shared_psycopg2_connect` in `mc_api.py`), 15 s statement timeout. The pooled
+  connection is **autocommit** and ignores `close()` — right for the per-runner
+  enrichment reads, wrong for a writer that needs a transaction. Because the
+  patch is process-wide, every `psycopg2.connect` call made after mc_api loads
+  gets the pool, including the tips pipeline's own `db_connect()`. The wrapper
+  therefore publishes the real driver function as `__wrapped__`, and
+  `run_tips_pipeline.db_connect(transactional=True)` peels the pool off for
+  `store_selections_in_db`, which runs deactivate-then-insert as one
+  transaction with a savepoint per pick (audit 2026-09-06, H2).
 - All logging goes to **stderr**; stdout is reserved for the JSON result.
 - Top pick is flagged `isConfidentSelection` when win% ≥ 18, margin over 2nd ≥ 5 pts
   and EV ≥ 0 (`mc_api.py:7634`).

@@ -380,13 +380,38 @@ def get_db_url():
     return os.environ.get("DATABASE_URL", "")
 
 
-def db_connect(max_retries=3):
-    """Connect to PostgreSQL with exponential backoff."""
+def _unpooled_psycopg2_connect():
+    """``psycopg2.connect`` with mc_api's shared-connection pool peeled off.
+
+    mc_api — loaded in-process by run_mc_simulation — replaces
+    ``psycopg2.connect`` for the whole process with a wrapper that hands out
+    one long-lived AUTOCOMMIT connection per DSN and ignores ``close()``.
+    That is right for its per-runner enrichment reads and wrong for a writer
+    that needs a transaction: under autocommit every statement is final and
+    ``rollback()`` is a no-op (audit 2026-09-06 H2). The wrapper publishes the
+    real driver function as ``__wrapped__``; before mc_api is loaded there is
+    nothing to peel and this returns ``psycopg2.connect`` itself.
+    """
     import psycopg2
+    connect = psycopg2.connect
+    while hasattr(connect, "__wrapped__"):
+        connect = connect.__wrapped__
+    return connect
+
+
+def db_connect(max_retries=3, transactional=False):
+    """Connect to PostgreSQL with exponential backoff.
+
+    ``transactional=True`` returns a private connection (never the mc_api
+    pool) with psycopg2's default autocommit=False, so ``commit()`` and
+    ``rollback()`` mean what they say and ``close()`` really closes it.
+    """
+    import psycopg2
+    connect = _unpooled_psycopg2_connect() if transactional else psycopg2.connect
     last_err = None
     for attempt in range(max_retries):
         try:
-            conn = psycopg2.connect(
+            conn = connect(
                 get_db_url(),
                 connect_timeout=5,
             )
@@ -1676,9 +1701,25 @@ def persist_selection_ledger(race_tips, date_str):
 
 
 def store_selections_in_db(race_tips, date_str):
-    """Insert top picks into the selections table with full enrichment data."""
+    """Insert top picks into the selections table with full enrichment data.
+
+    One transaction: deactivate the date+track's previous picks, insert the
+    new ones, commit. A pick whose INSERT fails is skipped via a savepoint —
+    the deactivation and the other picks stand — and any failure the
+    savepoint cannot contain rolls the whole store back, so the table is
+    either the previous card or the new card, never a mix.
+
+    History (audit 2026-09-06 H2): this ran on the mc_api pool's autocommit
+    connection, where the per-pick ``conn.rollback()`` was a no-op and a crash
+    mid-insert left the old picks deactivated beside a partial new set. On a
+    real transaction that same per-pick rollback would have discarded the
+    deactivation and every earlier insert, then committed the remainder on
+    top of the still-active old picks — the duplicate-active state the
+    deactivation exists to prevent. Hence the private connection and the
+    savepoints.
+    """
     try:
-        conn = db_connect()
+        conn = db_connect(transactional=True)
         cur = conn.cursor()
     except Exception as e:
         print(f"  [DB] Cannot store selections: {e}", file=sys.stderr)
@@ -1762,6 +1803,7 @@ def store_selections_in_db(race_tips, date_str):
                     unique_explanations.append(ex)
 
             try:
+                cur.execute("SAVEPOINT stride_pick")
                 cur.execute("""
                     INSERT INTO selections (
                         track, race_number, race_name, race_date, distance,
@@ -1998,16 +2040,52 @@ def store_selections_in_db(race_tips, date_str):
                     "v106": pick.get("tipsters_polled"),
                     "v107": pick.get("independent_source_rate"),
                 })
+                cur.execute("RELEASE SAVEPOINT stride_pick")
                 inserted += 1
             except Exception as e:
                 print(f"  [DB] Insert failed for {pick.get('horse')}: {e}", file=sys.stderr)
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
+                    # Discard this pick only; the deactivation and the picks
+                    # already inserted stay in the open transaction.
+                    cur.execute("ROLLBACK TO SAVEPOINT stride_pick")
+                except Exception as sp_err:
+                    # The transaction itself is unusable (connection gone,
+                    # savepoint refused): nothing partial may land.
+                    print(
+                        f"  [DB] Selection store ABORTED for {date_str}: "
+                        f"transaction unrecoverable after failed insert "
+                        f"({sp_err}) — previous selections left as they were",
+                        file=sys.stderr,
+                    )
+                    try:
+                        conn.rollback()
+                        cur.close()
+                        conn.close()
+                    except Exception:
+                        pass
+                    return
 
     try:
         conn.commit()
+    except Exception as commit_err:
+        # A commit that fails is the whole store failing; saying "Stored N"
+        # here would be the silent no-op this function used to commit.
+        print(
+            f"  [DB] Selection store ABORTED for {date_str}: commit failed "
+            f"({commit_err}) — previous selections left as they were",
+            file=sys.stderr,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+        return
+    try:
         cur.close()
         conn.close()
     except Exception:
