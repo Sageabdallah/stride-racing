@@ -807,20 +807,51 @@ def _context_multipliers(h):
     return fitness_mult, bias_mult, jockey_mult
 
 
-def _ctx_mult_diag_line(rows):
-    """One [CTX_MULT] line per race: realised min/mean/max of each multiplier
-    (STRIDE_CTX_MULT_DIAG). The runtime proof that the multipliers do what
-    the docs say — grep inference is not."""
-    if not rows:
-        return "[CTX_MULT] no runners"
-    parts = []
+_CTX_MULT_FLAGS = ("STRIDE_CTX_MULT_FITNESS", "STRIDE_CTX_MULT_BIAS", "STRIDE_CTX_MULT_JOCKEY")
+
+
+def _ctx_mult_summary(rows):
+    """Realised min/mean/max of each context multiplier over a set of runners,
+    plus which repair flags were on (STRIDE_CTX_MULT_DIAG).
+
+    This is the durable form: the cloud handler relays only the last 4000
+    chars of the pipeline's stderr, so a per-race [CTX_MULT] line does not
+    survive a cloud run — the same lesson as the book verdict. With the flag
+    on, run_tips writes this dict into the artifact under
+    races[].context_multipliers and summary.context_multipliers.
+    """
+    out = {"n": len(rows), "flags": [f for f in _CTX_MULT_FLAGS if _flag_enabled(f)]}
     for idx, name in enumerate(("fitness", "bias", "jockey")):
-        vals = [r[idx] for r in rows]
-        parts.append(f"{name}={min(vals):.3f}/{sum(vals) / len(vals):.3f}/{max(vals):.3f}")
-    flags = ",".join(
-        f for f in ("STRIDE_CTX_MULT_FITNESS", "STRIDE_CTX_MULT_BIAS", "STRIDE_CTX_MULT_JOCKEY")
-        if _flag_enabled(f)) or "none"
-    return f"[CTX_MULT] n={len(rows)} min/mean/max " + " ".join(parts) + f" flags={flags}"
+        vals = [float(r[idx]) for r in rows]
+        out[name] = ({
+            "min": round(min(vals), 4),
+            "mean": round(sum(vals) / len(vals), 4),
+            "max": round(max(vals), 4),
+        } if vals else None)
+    return out
+
+
+def _ctx_mult_record_for(horses):
+    """(summary, rows) for one race's scored runners. _context_multipliers is a
+    pure function of the runner dict and the flags, so recomputing it here
+    gives exactly what calibrate_and_score applied, without stashing anything
+    on the runner dicts (which ride into the artifact under _mc_data)."""
+    rows = [_context_multipliers(h) for h in horses]
+    return _ctx_mult_summary(rows), rows
+
+
+def _ctx_mult_diag_line(rows, label="CTX_MULT"):
+    """One stderr line: realised min/mean/max of each multiplier. Per race
+    under [CTX_MULT]; for the whole card under [CTX_MULT_SUMMARY], which sits
+    near the end of stderr and so survives the handler's tail."""
+    if not rows:
+        return f"[{label}] no runners"
+    s = _ctx_mult_summary(rows)
+    parts = [
+        f"{name}={s[name]['min']:.3f}/{s[name]['mean']:.3f}/{s[name]['max']:.3f}"
+        for name in ("fitness", "bias", "jockey")
+    ]
+    return f"[{label}] n={s['n']} min/mean/max " + " ".join(parts) + f" flags={','.join(s['flags']) or 'none'}"
 
 
 def calibrate_and_score(horses, overround, race_class=""):
@@ -2774,6 +2805,7 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
     total_llm_time = 0
     book_scored_races = 0
     book_incoherent_races = 0
+    ctx_mult_day_rows = []   # STRIDE_CTX_MULT_DIAG: every scored runner's multipliers
     book_corrupt_races = 0
 
     for meet in racecard:
@@ -3067,6 +3099,11 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     "reasons": book_verdict["reasons"],
                 }), file=sys.stderr)
             horses = calibrate_and_score(horses, overround, race_class=race_class)
+
+            ctx_mult_record = None
+            if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+                ctx_mult_record, _ctx_rows = _ctx_mult_record_for(horses)
+                ctx_mult_day_rows.extend(_ctx_rows)
 
             llm_tip_type = "win"
             llm_winner = ""
@@ -3569,6 +3606,12 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                     "corrupt": book_verdict["corrupt"],
                     "reasons": book_verdict["reasons"],
                 }
+            # Same reasoning, same home: the realised context-multiplier
+            # distribution (audit 2026-09-06 H3/H4) is only proof if it
+            # outlives the task's filesystem. Gated: the artifact schema is
+            # unchanged until the flag is on.
+            if ctx_mult_record is not None:
+                all_race_tips[-1]["context_multipliers"] = ctx_mult_record
           except Exception as _race_err:
             _rn = int(race.get("race_number", 0) or 0)
             print(f"  [RACE_ERROR] {track} R{_rn} failed: {_race_err}", file=sys.stderr)
@@ -3611,6 +3654,10 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
                   f"price source is broken; every stake on this card "
                   f"deserves suspicion", file=sys.stderr)
 
+    if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+        print("  " + _ctx_mult_diag_line(ctx_mult_day_rows, label="CTX_MULT_SUMMARY"),
+              file=sys.stderr)
+
     # Final risk decisions happen before any aggregate, export contract, DB
     # write or ledger row is derived from the races.
     try:
@@ -3629,6 +3676,8 @@ def run_tips(date_str, track_filter=None, output_path=None, store_in_db=True):
         db_time=round(total_db_time, 1),
         llm_time=round(total_llm_time, 1),
     )
+    if _flag_enabled("STRIDE_CTX_MULT_DIAG"):
+        day_summary["context_multipliers"] = _ctx_mult_summary(ctx_mult_day_rows)
     high_count = day_summary["high_confidence"]
     pos_edge = day_summary["positive_edge"]
     total_units = day_summary["total_units"]

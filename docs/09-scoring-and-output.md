@@ -58,8 +58,11 @@ Per runner, in order:
    `_context_multipliers` repairs each one behind its own default-off flag —
    `STRIDE_CTX_MULT_FITNESS`, `STRIDE_CTX_MULT_BIAS`, `STRIDE_CTX_MULT_JOCKEY`
    — so each effect is attributable in a paired A/B, and
-   `STRIDE_CTX_MULT_DIAG=true` prints the realised min/mean/max per race. Flags
-   off is today's exact arithmetic, not "no multiplier": every downstream
+   `STRIDE_CTX_MULT_DIAG=true` prints the realised min/mean/max per race and
+   records the same numbers in the artifact (`races[].context_multipliers`,
+   `summary.context_multipliers`), where they outlive the cloud handler's
+   4000-char stderr tail; the cloud tips jobs default it on. Flags off is
+   today's exact arithmetic, not "no multiplier": every downstream
    raw-probability threshold was tuned against the ~5% shrink.
 5. **Selection score.** Two independent signals — the probability estimate and the
    market disagreement:
