@@ -508,29 +508,176 @@ class TestWiring:
         # subsequent day's capture.
         import subprocess as sp
         monkeypatch.setattr(late, "_watch_pid_path", lambda d: tmp_path / f"{d}.pid")
+        pid_path = tmp_path / "2026-07-28.pid"
 
         assert late.acquire_watch_lock("2026-07-28") is True
-        assert (tmp_path / "2026-07-28.pid").read_text() == str(os.getpid())
+        lines = pid_path.read_text().splitlines()
+        assert lines[0] == str(os.getpid()), "line 1 stays the bare pid (runbook: head -1)"
+        assert lines[1:] == [t for t in [late._start_token(os.getpid())] if t]
         # our own live pid holds the lock — a second acquire must refuse
         assert late.acquire_watch_lock("2026-07-28") is False
 
-        # a dead pid is stale — reclaim
-        proc = sp.Popen([sys.executable, "-c", "pass"])
-        proc.wait()
-        (tmp_path / "2026-07-28.pid").write_text(str(proc.pid))
+        # A live process that wrote the file holds the lock. Its start token
+        # is captured while it is alive, so the reclaim check below cannot be
+        # fooled if the OS has already handed its pid to someone else by the
+        # time we probe (#168 — the same mechanism as the Windows flake).
+        proc = sp.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            token = late._start_token(proc.pid)
+            assert late._pid_exists(proc.pid) is True
+            pid_path.write_text(f"{proc.pid}\n{token or ''}\n")
+            assert late.acquire_watch_lock("2026-07-28") is False
+        finally:
+            proc.kill()
+            proc.wait()
+        # a dead pid is stale — reclaim (pid gone, or reused under another token)
+        pid_path.write_text(f"{proc.pid}\n{token or ''}\n")
         assert late.acquire_watch_lock("2026-07-28") is True
 
         # corrupt pidfile is stale — reclaim
-        (tmp_path / "2026-07-28.pid").write_text("not-a-pid")
+        pid_path.write_text("not-a-pid")
         assert late.acquire_watch_lock("2026-07-28") is True
 
         # release removes only our own lock
         late.release_watch_lock("2026-07-28")
-        assert not (tmp_path / "2026-07-28.pid").exists()
-        (tmp_path / "2026-07-28.pid").write_text("12345")
+        assert not pid_path.exists()
+        pid_path.write_text("12345")
         late.release_watch_lock("2026-07-28")
-        assert (tmp_path / "2026-07-28.pid").exists(), \
-            "must never remove another watcher's lock"
+        assert pid_path.exists(), "must never remove another watcher's lock"
+
+    def test_watch_lock_reclaims_a_reused_pid(self, tmp_path, monkeypatch):
+        # #168: "is there any process with this number" is not "is the watcher
+        # that wrote this file still running". Our own pid is as alive as a pid
+        # gets; a file claiming it under a different start time was written by
+        # a process that no longer exists, and must be reclaimed.
+        monkeypatch.setattr(late, "_watch_pid_path", lambda d: tmp_path / f"{d}.pid")
+        pid_path = tmp_path / "2026-07-28.pid"
+        own = late._start_token(os.getpid())
+        if own is None:
+            pytest.skip("this platform cannot identify a process incarnation")
+        pid_path.write_text(f"{os.getpid()}\ntest-other-incarnation\n")
+        assert late.acquire_watch_lock("2026-07-28") is True
+        assert pid_path.read_text().splitlines() == [str(os.getpid()), own]
+
+    def test_watch_lock_without_token_keeps_the_old_answer(self, tmp_path, monkeypatch):
+        # A pre-#168 pidfile carries no token. Nothing is reclaimed on less
+        # evidence than before: a live pid still holds the lock.
+        monkeypatch.setattr(late, "_watch_pid_path", lambda d: tmp_path / f"{d}.pid")
+        (tmp_path / "2026-07-28.pid").write_text(str(os.getpid()))
+        assert late.acquire_watch_lock("2026-07-28") is False
+
+    def test_release_never_removes_another_incarnations_lock(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(late, "_watch_pid_path", lambda d: tmp_path / f"{d}.pid")
+        pid_path = tmp_path / "2026-07-28.pid"
+        own = late._start_token(os.getpid())
+        if own is None:
+            pytest.skip("this platform cannot identify a process incarnation")
+        pid_path.write_text(f"{os.getpid()}\ntest-other-incarnation\n")
+        late.release_watch_lock("2026-07-28")
+        assert pid_path.exists(), "same pid, different start time: not our lock"
+        pid_path.write_text(f"{os.getpid()}\n{own}\n")
+        late.release_watch_lock("2026-07-28")
+        assert not pid_path.exists()
+
+    def test_start_token_identifies_an_incarnation(self):
+        import subprocess as sp
+        own = late._start_token(os.getpid())
+        if own is None:
+            pytest.skip("this platform cannot identify a process incarnation")
+        assert own == late._start_token(os.getpid()), "stable for the life of a process"
+        proc = sp.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            child = late._start_token(proc.pid)
+            assert child is not None and child != own
+        finally:
+            proc.kill()
+            proc.wait()
+        # gone, or reused by a process with a different start time
+        assert (not late._pid_exists(proc.pid)) or late._start_token(proc.pid) != child
+
+    def test_ps_start_token_branch(self):
+        # The macOS/BSD branch, exercised here because procps answers the same
+        # ps invocation: a token for a live pid, None for a dead one.
+        if sys.platform == "win32":
+            pytest.skip("no ps on Windows")
+        import subprocess as sp
+        own = late._ps_start_token(os.getpid())
+        assert own and own.startswith("ps-lstart:")
+        proc = sp.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        gone = late._ps_start_token(proc.pid)
+        assert gone is None or gone != own
+
+
+    def test_win_process_state_control_flow(self, monkeypatch):
+        # The Win32 path cannot run here, so its decisions are pinned against
+        # a fake kernel32: no such process -> gone; access denied -> exists,
+        # identity unknown; exited -> gone; live -> exists with a start token
+        # built from the creation FILETIME; and the handle is always closed.
+        class FakeDword:
+            def __init__(self): self.value = 0
+        class FakeFiletime:
+            def __init__(self): self.dwLowDateTime = 0; self.dwHighDateTime = 0
+        class FakeCtypes:
+            def __init__(self, err): self._err = err
+            def byref(self, obj): return obj
+            def get_last_error(self): return self._err
+        class FakeWintypes:
+            DWORD = FakeDword
+            FILETIME = FakeFiletime
+        class FakeK32:
+            def __init__(self, handle, exit_code=259, times_ok=True):
+                self._handle, self._exit, self._times_ok = handle, exit_code, times_ok
+                self.closed = []
+            def OpenProcess(self, access, inherit, pid):
+                assert access == late._WIN_PROCESS_QUERY_LIMITED_INFORMATION and inherit is False
+                return self._handle
+            def GetExitCodeProcess(self, handle, code):
+                code.value = self._exit
+                return 1
+            def GetProcessTimes(self, handle, c, e, k, u):
+                if not self._times_ok:
+                    return 0
+                c.dwLowDateTime, c.dwHighDateTime = 0x0000BEEF, 0x00000001
+                return 1
+            def CloseHandle(self, handle):
+                self.closed.append(handle)
+
+        def wire(k32, err=0):
+            monkeypatch.setattr(late, "_win_kernel32", lambda: (FakeCtypes(err), FakeWintypes, k32))
+            return k32
+
+        wire(FakeK32(handle=0), err=87)            # ERROR_INVALID_PARAMETER: no such process
+        assert late._win_process_state(4242) == (False, None)
+        wire(FakeK32(handle=0), err=late._WIN_ERROR_ACCESS_DENIED)
+        assert late._win_process_state(4242) == (True, None)
+        k32 = wire(FakeK32(handle=77, exit_code=0))   # exited with code 0
+        assert late._win_process_state(4242) == (False, None) and k32.closed == [77]
+        k32 = wire(FakeK32(handle=78))                # STILL_ACTIVE
+        assert late._win_process_state(4242) == (True, f"win-filetime:{(1 << 32) | 0xBEEF}")
+        assert k32.closed == [78]
+        k32 = wire(FakeK32(handle=79, times_ok=False))
+        assert late._win_process_state(4242) == (True, None) and k32.closed == [79]
+
+    def test_windows_probe_never_signals(self, monkeypatch):
+        # On Windows os.kill(pid, 0) is CTRL_C_EVENT with a TerminateProcess
+        # fallback (CPython os_kill_impl), so the probe must not reach os.kill
+        # at all; when the Win32 calls fail it falls back to tasklist, and
+        # when that fails too it treats the lock as held.
+        monkeypatch.setattr(late.sys, "platform", "win32")
+        monkeypatch.setattr(late.os, "kill", lambda *a: pytest.fail("os.kill must not be called on win32"))
+        monkeypatch.setattr(late, "_win_process_state", lambda pid: (True, "win-filetime:1"))
+        assert late._pid_exists(1) is True and late._start_token(1) == "win-filetime:1"
+        monkeypatch.setattr(late, "_win_process_state", lambda pid: (False, None))
+        assert late._pid_exists(1) is False and late._start_token(1) is None
+
+        def boom(pid): raise OSError("no kernel32 here")
+        monkeypatch.setattr(late, "_win_process_state", boom)
+        monkeypatch.setattr(late, "_win_pid_listed", lambda pid: pid == 1)
+        assert late._pid_exists(1) is True and late._pid_exists(2) is False
+        assert late._start_token(1) is None
+        monkeypatch.setattr(late, "_win_pid_listed", boom)
+        assert late._pid_exists(1) is True, "cannot tell: the lock is treated as held"
 
 
 class TestDeriveSourceApi:

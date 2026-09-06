@@ -103,7 +103,9 @@ within the stack:
 
 - Model: `cp models/backups/<BACKUP>.pkl models/racing_ensemble_v2.pkl`
 - Watcher: `STRIDE_SKIP_ODDS_WATCH=true` skips the launch;
-  `kill $(cat server/python/logs/late_odds_<date>.pid)` stops a running one.
+  `kill $(head -1 server/python/logs/late_odds_<date>.pid)` stops a running one
+  (line 1 is the pid; line 2 is that process's start time, which is how a
+  reused pid is told apart from a live watcher).
 - Ledger: `STRIDE_LEDGER_WRITE=false` stops writes; settle passes are
   idempotent (sp/pnl predicate) so re-runs are safe.
 - Migrations are append-only/idempotent; none drops or rewrites existing data.
