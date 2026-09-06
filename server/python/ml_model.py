@@ -2,19 +2,28 @@
 import os
 import json
 import pickle
+import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 
+# scikit-learn is a base dependency of this tree (retrain_v2 and the
+# calibration modules import it unguarded; the CI runner installs it). Until
+# 2026-09-05 these four imports sat inside the booster try-block below, so a
+# missing xgboost, catboost or optuna left StandardScaler unbound and
+# RacingMLModel() raised NameError in __init__ instead of degrading to
+# is_trained=False — on the CI runner, which installs none of the three,
+# the wrapper could not be constructed at all.
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
+from sklearn.calibration import CalibratedClassifierCV
+
 try:
     import xgboost as xgb
     import lightgbm as lgb
     from catboost import CatBoostClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
-    from sklearn.calibration import CalibratedClassifierCV
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     ML_AVAILABLE = True
@@ -72,6 +81,15 @@ def _serve_nan_contract_enabled() -> bool:
     passes NaN through for the contract columns instead of zero-filling them,
     matching what the trees were trained on. Off = exact legacy behaviour."""
     return os.environ.get("STRIDE_SERVE_NAN_CONTRACT", "false").strip().lower() in ("true", "1", "yes")
+
+
+def _learned_blend_enabled() -> bool:
+    """STRIDE_LEARNED_BLEND (default OFF) — when on AND the loaded artifact
+    carries a fitted ensemble_combiner (retrain_v2 v3 artifacts do), the base
+    predictions are combined by that persisted, OOF-fitted combiner instead of
+    the hardcoded seed weights in _model_performance. Off = byte-identical
+    legacy blend, whatever the artifact carries."""
+    return os.environ.get("STRIDE_LEARNED_BLEND", "false").strip().lower() in ("true", "1", "yes")
 
 
 class RacingMLModel:
@@ -170,10 +188,37 @@ class RacingMLModel:
         'jockey_wet_residual',
     ]
     
+    # Candidate-artifact override. Production never sets it: the stable slot
+    # stays models/racing_ensemble_v2.pkl (infra/jobs/handler.py
+    # REQUIRED_MODEL_ARTIFACTS, the release manifest). The tips-proof job sets
+    # it to score a day with a staged candidate (models/racing_ensemble_v3.pkl)
+    # and write nothing — that is the "one week parallel scoring" of
+    # docs/project_retrain_gate.md. A bare filename resolves under models/;
+    # an absolute path is used as is. Announced on stderr whenever it is
+    # honoured, and loudly when the file is missing: without the artifact the
+    # wrapper degrades to is_trained=False and a proof would score with no ML
+    # at all while looking like a candidate run.
+    ARTIFACT_OVERRIDE_ENV = "STRIDE_ENSEMBLE_ARTIFACT"
+    DEFAULT_ARTIFACT = "racing_ensemble_v2.pkl"
+
+    @classmethod
+    def resolve_artifact_path(cls, model_path: str = None) -> str:
+        models_dir = os.path.join(os.path.dirname(__file__), "models")
+        if model_path:
+            return model_path
+        override = os.environ.get(cls.ARTIFACT_OVERRIDE_ENV, "").strip()
+        if not override:
+            return os.path.join(models_dir, cls.DEFAULT_ARTIFACT)
+        path = override if os.path.isabs(override) else os.path.join(models_dir, override)
+        exists = os.path.exists(path)
+        print(f"[ML] artifact override {cls.ARTIFACT_OVERRIDE_ENV}={override!r} -> {path} "
+              f"(exists: {exists})" + ("" if exists else
+              " — WARNING: missing; the wrapper will report is_trained=False and the run "
+              "will score WITHOUT the candidate"), file=sys.stderr)
+        return path
+
     def __init__(self, model_path: str = None):
-        self.model_path = model_path or os.path.join(
-            os.path.dirname(__file__), 'models', 'racing_ensemble_v2.pkl'
-        )
+        self.model_path = self.resolve_artifact_path(model_path)
         self.xgb_model = None
         self.lgb_model = None
         self.catboost_model = None
@@ -193,14 +238,10 @@ class RacingMLModel:
     
     @staticmethod
     def _default_scaler():
-        """A fresh StandardScaler when sklearn is importable, else None. Tree
-        models do not need scaling — predict_components falls back to the raw
-        matrix whenever the scaler is absent or unfitted."""
-        try:
-            from sklearn.preprocessing import StandardScaler as _StandardScaler
-        except ImportError:
-            return None
-        return _StandardScaler()
+        """Fresh scaler from sklearn, independent of optional booster imports.
+        Tree artifacts omit it; prediction uses the raw matrix when unfitted.
+        """
+        return StandardScaler()
 
     def prepare_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare feature matrix from raw data."""
@@ -568,7 +609,43 @@ class RacingMLModel:
         xgb_pred = self.xgb_model.predict_proba(X_scaled)[:, 1] if self.xgb_model else np.zeros(len(X_scaled))
         lgb_pred = self.lgb_model.predict_proba(X_scaled)[:, 1] if self.lgb_model else np.zeros(len(X_scaled))
         cat_pred = self.catboost_model.predict_proba(X_scaled)[:, 1] if self.catboost_model else np.zeros(len(X_scaled))
-        
+
+        # Learned blend (task-12 step 4): the persisted, OOF-fitted combiner
+        # from the artifact, used only under STRIDE_LEARNED_BLEND. It is a
+        # convex combination fitted on RAW OOF predictions (retrain_v2's
+        # oof_raw -> P_all), not on the per-model isotonic outputs.
+        # Any model the combiner expects but this artifact lacks
+        # falls through to the legacy chain.
+        combiner = getattr(self, "ensemble_combiner", None)
+        learned_blend = _learned_blend_enabled()
+        if learned_blend and _ml_apply_isotonic_enabled():
+            # Keep the two experimental paths mutually exclusive even if
+            # calibrators are incomplete. A combined path needs a combiner
+            # refitted and evaluated on the calibrated stage first.
+            if not getattr(self, "_blend_isotonic_notice_printed", False):
+                print(
+                    "[ML] STRIDE_LEARNED_BLEND ignored while "
+                    "STRIDE_ML_APPLY_ISOTONIC=true: the combiner was fitted on "
+                    "raw OOF predictions. Using the existing isotonic path "
+                    "(raw fallback if calibrators are incomplete). Refit and "
+                    "evaluate the combiner on calibrated inputs before combining these flags.",
+                    file=sys.stderr,
+                )
+                self._blend_isotonic_notice_printed = True
+            learned_blend = False
+        if learned_blend and combiner is not None and getattr(combiner, "is_fitted", False):
+            by_name = {"xgb": (xgb_pred, self.xgb_model), "lgb": (lgb_pred, self.lgb_model),
+                       "cb": (cat_pred, self.catboost_model)}
+            names = list(getattr(combiner, "model_names", ("xgb", "lgb", "cb")))
+            if all(n in by_name and by_name[n][1] is not None for n in names):
+                try:
+                    ensemble = combiner.predict(np.column_stack([by_name[n][0] for n in names]))
+                    return {"xgb": xgb_pred, "lightgbm": lgb_pred, "catboost": cat_pred,
+                            "ensemble": ensemble, "method": "learned_blend",
+                            "weights": combiner.describe().get("weights")}
+                except Exception:
+                    pass
+
         # Calibration at serve (audit 2026-09-06 H1). retrain_v2 fits one
         # out-of-fold isotonic calibrator per base model and the artifact
         # carries them, but this path served raw predict_proba. The comment
@@ -661,7 +738,7 @@ class RacingMLModel:
     def serve_calibration_status(self):
         """What serve-time calibration would do right now, for logs/tests."""
         present = [key for key, attr in self._CALIBRATOR_SLOTS if getattr(self, attr, None) is not None]
-        have = [key for key in present if key in (self.oof_calibrators or {})]
+        have = [key for key in present if key in (getattr(self, "oof_calibrators", None) or {})]
         missing = [key for key in present if key not in have]
         enabled = _ml_apply_isotonic_enabled()
         complete = bool(present) and not missing
@@ -748,7 +825,17 @@ class RacingMLModel:
         return sorted_contrib
     
     def save(self):
-        """Save trained models to disk."""
+        """Save trained models to disk.
+
+        Persists the OOF-fitted ensemble_combiner (retrain_v2 v3 artifacts;
+        read by predict_components only under STRIDE_LEARNED_BLEND). The
+        stacking meta-learner, double calibrator and target encoder that
+        train() fits are still NOT persisted, deliberately: the stacker is
+        fitted on shuffled StratifiedKFold folds (leaks across race dates)
+        and the double calibrator adds a calibration layer under the
+        pipeline's own isotonic (standing prohibition 3). Both fall through
+        to the legacy blend after a reload today; persisting them would
+        switch that path on with no flag and no measurement."""
         model_data = {
             'xgb_model': self.xgb_model,
             'lgb_model': self.lgb_model,
@@ -759,10 +846,37 @@ class RacingMLModel:
             'training_stats': self.training_stats,
             'feature_columns': getattr(self, '_trained_feature_columns', None)
                                or list(self.FEATURE_COLUMNS),
+            'ensemble_combiner': self._combiner_state(getattr(self, 'ensemble_combiner', None)),
         }
         with open(self.model_path, 'wb') as f:
             pickle.dump(model_data, f)
     
+    @staticmethod
+    def _combiner_state(combiner):
+        """Artifact form of the combiner: its plain state dict, never the
+        instance (a class path in the pickle would tie every artifact's load
+        to ensemble_combiner.py existing under that name)."""
+        return combiner.to_state() if hasattr(combiner, "to_state") else combiner
+
+    @staticmethod
+    def _restore_combiner(raw):
+        """Rebuild the combiner from the artifact's state dict. Anything that
+        cannot be restored becomes None — announced on stderr — so a bad or
+        unreadable combiner can never turn a loadable artifact into
+        is_trained=False; the blend just stays legacy. An instance (in-process
+        use) is accepted as is."""
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            try:
+                from ensemble_combiner import EnsembleCombiner
+                return EnsembleCombiner.from_state(raw)
+            except Exception as e:
+                print(f"[ML] artifact carries an ensemble_combiner state that could not be "
+                      f"restored ({e}); the legacy blend will be used", file=sys.stderr)
+                return None
+        return raw
+
     def load(self) -> bool:
         """Load trained models from disk."""
         try:
@@ -775,8 +889,7 @@ class RacingMLModel:
             self.catboost_model = model_data.get('catboost_model') or model_data.get('cb_model')
             # retrain_v2 payloads carry no scaler; the default must not depend
             # on the xgboost/catboost import block above having succeeded
-            # (CI runs without them, and the name StandardScaler is only bound
-            # when that whole block imports).
+            # (CI runs without them). sklearn is an unguarded base dependency.
             self.scaler = model_data.get('scaler')
             if self.scaler is None:
                 self.scaler = self._default_scaler()
@@ -789,6 +902,11 @@ class RacingMLModel:
             saved_cols = model_data.get('feature_columns')
             if saved_cols and isinstance(saved_cols, list):
                 self._trained_feature_columns = saved_cols
+            # Persisted OOF-fitted combiner (absent from pre-2026-09-05
+            # artifacts -> None; predict_components then falls through to
+            # the legacy blend exactly as before). No other combination
+            # object is read back — see save().
+            self.ensemble_combiner = self._restore_combiner(model_data.get('ensemble_combiner'))
             self.oof_calibrators = self._collect_oof_calibrators(model_data)
             return True
         except Exception as e:

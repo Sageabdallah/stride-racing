@@ -14,6 +14,7 @@ Walk-forward CV parameters:
 """
 
 import argparse
+import json
 import os
 import sys
 import pickle
@@ -99,6 +100,33 @@ except ImportError:
 from sklearn.metrics import roc_auc_score, brier_score_loss
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
+
+# Per-race metrics (top-1 hit vs the tip-time favourite, same-race H2H,
+# per-race log-loss) — task-12 step 3. Pure numpy/pandas; see race_metrics.py.
+from race_metrics import (
+    build_race_meta,
+    format_line as format_race_line,
+    per_race_metrics,
+    pool as pool_race_metrics,
+)
+# Learned, persisted combination of the base learners (task-12 step 4),
+# evaluated cross-fitted next to the equal-mean CV arm and the blend
+# production actually runs. See ensemble_combiner.py.
+from ensemble_combiner import (
+    MIN_PRIOR_FOLDS,
+    MIN_PRIOR_ROWS,
+    EnsembleCombiner,
+    arm_metrics,
+    production_blend,
+)
+
+# The four odds-derived inputs in the current contract (market_odds and the
+# Phase-5 relative-market trio — the same four snapshot_hybrid NaN-preserves).
+# Ablated as a unit to test the market double-count hypothesis
+# (docs/analysis/RESULTS.md §7.5): does the model carry skill without seeing
+# the price at all, and does its edge behave better? market_efficiency_flag is
+# named like a price feature but is computed from class_level — it stays.
+PRICE_FEATURES = ["market_odds", "fair_implied_prob", "odds_rank", "odds_rank_pct"]
 
 
 # Phase 2 sectional feature names and the NaN-preserve contract now live in
@@ -845,82 +873,167 @@ def _get_catboost_params() -> Dict:
     }
 
 
+# Fold hygiene (task-12 step 2). The early-stopping / per-model-isotonic
+# window is carved from the TAIL of the training window — the last TAIL_DAYS
+# of it, mirroring the 14-day test window — so the outer test fold is never
+# read by anything but the final scoring. Until 2026-09-05 LightGBM
+# early-stopped on the test fold, CatBoost selected its best iteration on the
+# test fold (use_best_model defaults to True whenever eval_set is given), and
+# all three per-model isotonics were fitted on the test fold's own labels; the
+# published fold AUC/Brier were therefore mildly self-fitted (evidence base
+# C4). Honest numbers are the deliverable, even if worse.
+TAIL_DAYS = 14
+EARLY_STOPPING_ROUNDS = 20
+MIN_TAIL_ROWS = 20
+MIN_TAIL_PER_CLASS = 2
+MIN_FIT_ROWS = 50
+
+
+def _carve_tail(n_rows: int, y: np.ndarray, dates_train=None,
+                tail_days: int = TAIL_DAYS) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Boolean tail mask over the training rows plus a hygiene record.
+
+    Preferred: the last `tail_days` calendar days of the train window (by
+    date). Fallback when that tail is degenerate (too few rows, a class
+    missing, or too few rows left to fit): the last 10% of rows by position
+    (the train frame is date-ordered). If that is degenerate too, no tail:
+    the fold trains without early stopping and without per-model isotonic —
+    said loudly in the record, never patched with test-fold labels.
+    """
+    def ok(mask: np.ndarray) -> bool:
+        n_tail = int(mask.sum())
+        if n_tail < MIN_TAIL_ROWS or (n_rows - n_tail) < MIN_FIT_ROWS:
+            return False
+        yt = y[mask]
+        return int(yt.sum()) >= MIN_TAIL_PER_CLASS and int((yt == 0).sum()) >= MIN_TAIL_PER_CLASS
+
+    record: Dict[str, Any] = {"tail_days": tail_days, "tail_rows": 0, "fit_rows": n_rows,
+                              "tail_start": None, "tail_end": None, "fallback": None,
+                              "early_stopping": False, "isotonic_on": "none"}
+    if dates_train is not None:
+        d = pd.to_datetime(pd.Series(np.asarray(dates_train))).reset_index(drop=True)
+        cutoff = d.max() - timedelta(days=tail_days - 1)
+        mask = (d >= cutoff).to_numpy()
+        if ok(mask):
+            record.update(tail_rows=int(mask.sum()), fit_rows=int(n_rows - mask.sum()),
+                          tail_start=str(d[mask].min().date()), tail_end=str(d[mask].max().date()),
+                          early_stopping=True, isotonic_on="tail")
+            return mask, record
+        record["fallback"] = "positional"
+    else:
+        record["fallback"] = "positional"
+    n_tail = max(int(round(n_rows * 0.10)), 0)
+    mask = np.zeros(n_rows, dtype=bool)
+    if n_tail:
+        mask[-n_tail:] = True
+    if ok(mask):
+        record.update(tail_rows=int(mask.sum()), fit_rows=int(n_rows - mask.sum()),
+                      early_stopping=True, isotonic_on="tail")
+        if dates_train is not None:
+            d = pd.to_datetime(pd.Series(np.asarray(dates_train))).reset_index(drop=True)
+            record.update(tail_start=str(d[mask].min().date()), tail_end=str(d[mask].max().date()))
+        return mask, record
+    record["fallback"] = "none"
+    return np.zeros(n_rows, dtype=bool), record
+
+
+def _fit_isotonic_on_tail(model, X_tail: pd.DataFrame, y_tail: np.ndarray):
+    raw_tail = model.predict_proba(X_tail)[:, 1]
+    iso = IsotonicRegression(out_of_bounds="clip")
+    iso.fit(raw_tail, y_tail)
+    return iso
+
+
 def train_single_fold(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_val: pd.DataFrame,
     y_val: pd.Series,
     feature_cols: List[str],
+    dates_train=None,
 ) -> Tuple[Any, Any, Any, Dict[str, float], Dict[str, list]]:
     """
     Train XGBoost, LightGBM, CatBoost independently on one fold.
-    Apply isotonic calibration on the validation set.
+
+    Early stopping and the per-model isotonic calibrators use a window carved
+    from the tail of the TRAINING rows (_carve_tail); X_val/y_val — the outer
+    test fold — is read only to produce the raw predictions that are returned
+    and scored. Pass dates_train (aligned to X_train) so the tail is the last
+    TAIL_DAYS calendar days; without it the tail is the last 10% of rows.
+
     Returns (xgb_model, lgb_model, cb_model, per_model_auc_dict, oof_raw).
-    oof_raw contains raw (pre-isotonic) predictions for OOF calibrator fitting.
+    oof_raw carries the raw (pre-isotonic) test-fold predictions for the OOF
+    calibrator fit, the test labels, and a "hygiene" record of the tail used.
     """
-    X_tr = X_train[feature_cols].copy()
+    X_tr = X_train[feature_cols].reset_index(drop=True)
     X_vl = X_val[feature_cols].copy()
+    y_tr = np.asarray(y_train).astype(int)
+    tail, hygiene = _carve_tail(len(X_tr), y_tr, dates_train)
+    X_fit, y_fit = X_tr.iloc[~tail], y_tr[~tail]
+    X_tail, y_tail = X_tr.iloc[tail], y_tr[tail]
+    use_tail = hygiene["early_stopping"]
 
     per_model_auc: Dict[str, float] = {}
     raw_xgb: list = []
     raw_lgb: list = []
     raw_cb: list = []
 
+    def _score(model, key):
+        raw = model.predict_proba(X_vl)[:, 1]
+        if use_tail:
+            model._isotonic = _fit_isotonic_on_tail(model, X_tail, y_tail)
+            cal = model._isotonic.transform(raw)
+        else:
+            cal = raw
+        try:
+            per_model_auc[key] = float(roc_auc_score(y_val, cal))
+        except Exception:
+            per_model_auc[key] = float("nan")
+        return list(raw)
+
     xgb_model = None
     if HAS_XGB:
-        xgb_model = xgb.XGBClassifier(**_get_xgb_params())
-        xgb_model.fit(X_tr, y_train, eval_set=[(X_vl, y_val)], verbose=False)
-        raw_xgb = xgb_model.predict_proba(X_vl)[:, 1]
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(raw_xgb, y_val.values)
-        xgb_model._isotonic = iso
-        cal_val = iso.transform(raw_xgb)
-        try:
-            per_model_auc["xgb"] = float(roc_auc_score(y_val, cal_val))
-        except Exception:
-            per_model_auc["xgb"] = float("nan")
-        raw_xgb = list(raw_xgb)
+        params = _get_xgb_params()
+        if use_tail:
+            xgb_model = xgb.XGBClassifier(**params, early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+            xgb_model.fit(X_fit, y_fit, eval_set=[(X_tail, y_tail)], verbose=False)
+        else:
+            xgb_model = xgb.XGBClassifier(**params)
+            xgb_model.fit(X_fit, y_fit, verbose=False)
+        raw_xgb = _score(xgb_model, "xgb")
 
     lgb_model = None
     if HAS_LGB:
         lgb_model = lgb.LGBMClassifier(**_get_lgb_params())
-        lgb_model.fit(
-            X_tr, y_train,
-            eval_set=[(X_vl, y_val)],
-            callbacks=[lgb.early_stopping(20, verbose=False),
-                       lgb.log_evaluation(-1)],
-        )
-        raw_lgb = lgb_model.predict_proba(X_vl)[:, 1]
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(raw_lgb, y_val.values)
-        lgb_model._isotonic = iso
-        cal_val = iso.transform(raw_lgb)
-        try:
-            per_model_auc["lgb"] = float(roc_auc_score(y_val, cal_val))
-        except Exception:
-            per_model_auc["lgb"] = float("nan")
-        raw_lgb = list(raw_lgb)
+        if use_tail:
+            lgb_model.fit(
+                X_fit, y_fit,
+                eval_set=[(X_tail, y_tail)],
+                callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                           lgb.log_evaluation(-1)],
+            )
+        else:
+            lgb_model.fit(X_fit, y_fit)
+        raw_lgb = _score(lgb_model, "lgb")
 
     cb_model = None
     if HAS_CB:
         cb_model = CatBoostClassifier(**_get_catboost_params())
-        cb_model.fit(X_tr, y_train, eval_set=(X_vl, y_val))
-        raw_cb = cb_model.predict_proba(X_vl)[:, 1]
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(raw_cb, y_val.values)
-        cb_model._isotonic = iso
-        cal_val = iso.transform(raw_cb)
-        try:
-            per_model_auc["cb"] = float(roc_auc_score(y_val, cal_val))
-        except Exception:
-            per_model_auc["cb"] = float("nan")
-        raw_cb = list(raw_cb)
+        if use_tail:
+            # use_best_model (default True with an eval_set) now selects on
+            # the train tail, never on the outer test fold.
+            cb_model.fit(X_fit, y_fit, eval_set=(X_tail, y_tail),
+                         early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+        else:
+            cb_model.fit(X_fit, y_fit)
+        raw_cb = _score(cb_model, "cb")
 
     oof_raw = {
         "xgb": raw_xgb,
         "lgb": raw_lgb,
         "cb":  raw_cb,
-        "labels": list(y_val.values),
+        "labels": list(np.asarray(y_val).astype(int)),
+        "hygiene": hygiene,
     }
     return xgb_model, lgb_model, cb_model, per_model_auc, oof_raw
 
@@ -996,10 +1109,19 @@ def run_walk_forward_cv(
     feature_cols: List[str],
     label: str = "full",
     collect_oof_calibrators: bool = False,
+    race_meta: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     Run full walk-forward CV for the given feature set.
     Returns aggregated metrics and per-fold results.
+
+    race_meta (optional, index-aligned with X; race_metrics.build_race_meta):
+    race_key, tip_time_odds, sp_odds, predicted_win_prob. When given, every
+    fold also reports per-race top-1 hit rate against the tip-time favourite
+    (the staging criterion's baseline), the SP favourite as a hindsight
+    diagnostic, the same-race H2H against the stored production probability,
+    and per-race normalised log-loss; the pooled result lands in
+    results["race_metrics"]. Counts are pooled exactly (summed), not averaged.
     """
     splitter = DateWindowSplitter(
         min_train_days=60,
@@ -1020,9 +1142,19 @@ def run_walk_forward_cv(
     fold_results = []
     all_auc = []
     all_brier = []
+    race_folds: List[Dict[str, Any]] = []
 
     # OOF accumulators — only populated when collect_oof_calibrators=True
     oof_xgb, oof_lgb, oof_cb, oof_labels = [], [], [], []
+
+    # Cross-fitted combiner arms: raw OOF predictions from folds already
+    # scored, used to fit the combiner that scores the NEXT fold. Never the
+    # fold being scored (pre-registration amendment 2026-09-05 §3).
+    prior_P: List[np.ndarray] = []
+    prior_y: List[np.ndarray] = []
+    prior_folds = 0
+    arm_names = ("legacy_equal_isotonic", "production_hardcoded", "simplex", "logistic")
+    present_models: List[str] = []
 
     for train_idx, test_idx, meta in folds:
         X_train = X.iloc[train_idx]
@@ -1035,11 +1167,18 @@ def run_walk_forward_cv(
 
         try:
             xgb_m, lgb_m, cb_m, per_auc, oof_raw = train_single_fold(
-                X_train, y_train, X_test, y_test, feature_cols
+                X_train, y_train, X_test, y_test, feature_cols,
+                dates_train=dates.iloc[train_idx],
             )
         except Exception as exc:
             print(f"  ERROR fold {meta['fold']}: {exc}", file=sys.stderr)
             continue
+        hygiene = oof_raw.get("hygiene") or {}
+        if hygiene.get("fallback"):
+            print(f"  fold {meta['fold']}: tail fallback={hygiene['fallback']} "
+                  f"(tail rows {hygiene['tail_rows']}, early stopping "
+                  f"{'on' if hygiene['early_stopping'] else 'OFF'}, isotonic "
+                  f"{hygiene['isotonic_on']})", file=sys.stderr)
 
         if collect_oof_calibrators:
             oof_xgb.extend(oof_raw["xgb"])
@@ -1075,7 +1214,57 @@ def run_walk_forward_cv(
             "auc": fold_auc,
             "brier": fold_brier,
             "per_model_auc": per_auc,
+            "hygiene": hygiene,
         }
+        race_line = None
+        rm = race_meta.iloc[test_idx] if race_meta is not None else None
+
+        def _race(proba):
+            if rm is None:
+                return None
+            return per_race_metrics(
+                proba, y_test.values, rm["race_key"].values,
+                tip_time_odds=rm["tip_time_odds"].values if "tip_time_odds" in rm else None,
+                sp_odds=rm["sp_odds"].values if "sp_odds" in rm else None,
+                stored=rm["predicted_win_prob"].values if "predicted_win_prob" in rm else None,
+            )
+
+        if rm is not None:
+            race = _race(ens_proba)
+            fold_entry["race"] = race
+            race_folds.append(race)
+            race_line = format_race_line(race)
+
+        # --- combiner arms on identical rows -------------------------------
+        present_models = [k for k, m in (("xgb", xgb_m), ("lgb", lgb_m), ("cb", cb_m)) if m is not None]
+        P_test = np.column_stack([np.asarray(oof_raw[k], dtype=float) for k in present_models])
+        y_test_arr = y_test.values.astype(int)
+        arms: Dict[str, Any] = {}
+        # (1) the CV's historical arm: equal-weight mean of isotonic-calibrated probs
+        arms["legacy_equal_isotonic"] = ens_proba
+        # (2) what production runs today: hardcoded weights on raw probs, by distance
+        dist = X_test["distance"].values if "distance" in X_test.columns else None
+        arms["production_hardcoded"] = production_blend(P_test, present_models, distances=dist)
+        # (3)(4) learned arms, fitted on PRIOR folds only
+        if prior_folds >= MIN_PRIOR_FOLDS and sum(len(a) for a in prior_y) >= MIN_PRIOR_ROWS:
+            P_prior = np.vstack(prior_P)
+            y_prior = np.concatenate(prior_y)
+            for method in ("simplex", "logistic"):
+                try:
+                    comb = EnsembleCombiner(method, model_names=present_models).fit(P_prior, y_prior)
+                    arms[method] = comb.predict(P_test)
+                except Exception as exc:
+                    print(f"  fold {meta['fold']}: combiner {method} failed: {exc}", file=sys.stderr)
+        fold_arms: Dict[str, Any] = {}
+        for name, proba in arms.items():
+            m = arm_metrics(proba, y_test_arr)
+            fold_arms[name] = {"auc": m["auc"], "brier": m["brier"], "log_loss": m["log_loss"],
+                               "race": _race(proba)}
+        fold_entry["arms"] = fold_arms
+        fold_entry["combiner_fitted_on_prior_folds"] = prior_folds if "simplex" in arms else None
+        prior_P.append(P_test)
+        prior_y.append(y_test_arr)
+        prior_folds += 1
         fold_results.append(fold_entry)
 
         xgb_auc_str = f"{per_auc.get('xgb', float('nan')):.4f}" if "xgb" in per_auc else "  n/a "
@@ -1090,6 +1279,8 @@ def run_walk_forward_cv(
             f"{auc_str:>7} {brier_str:>7} "
             f"{xgb_auc_str:>9} {lgb_auc_str:>9} {cb_auc_str:>8}"
         )
+        if race_line:
+            print(f"        race: {race_line}")
 
     mean_auc   = float(np.mean(all_auc))   if all_auc   else float("nan")
     mean_brier = float(np.mean(all_brier)) if all_brier else float("nan")
@@ -1101,6 +1292,80 @@ def run_walk_forward_cv(
         f"mean Brier={mean_brier:.4f}  "
         f"folds={len(fold_results)}"
     )
+    race_pooled = pool_race_metrics(race_folds) if race_folds else None
+    if race_pooled is not None:
+        print(f"  [{label}] PER-RACE (pooled): {format_race_line(race_pooled)}")
+
+    # Arm summary: identical rows, so the deltas are causal reads on the
+    # combination alone. The learned arms exist only on folds with enough
+    # prior OOF to fit on (cross-fitted) — fewer folds than the legacy and
+    # production arms — so every arm is also summarised on exactly those
+    # folds ("same_folds"): that, not the all-folds mean, is the comparison
+    # the STRIDE_LEARNED_BLEND flip criterion reads.
+    all_idx = list(range(len(fold_results)))
+    learned_idx = [i for i in all_idx if "simplex" in fold_results[i].get("arms", {})]
+
+    def _summarise_arm(name: str, idxs: List[int]) -> Optional[Dict[str, Any]]:
+        entries = [fold_results[i]["arms"][name] for i in idxs
+                   if name in fold_results[i].get("arms", {})]
+        if not entries:
+            return None
+        aucs = [e["auc"] for e in entries if not np.isnan(e["auc"])]
+        races = [e["race"] for e in entries if e["race"] is not None]
+        return {
+            "n_folds": len(entries),
+            "mean_auc": float(np.mean(aucs)) if aucs else float("nan"),
+            "mean_brier": float(np.mean([e["brier"] for e in entries])),
+            "race_metrics": pool_race_metrics(races) if races else None,
+        }
+
+    def _arm_line(name: str, s: Dict[str, Any]) -> str:
+        line = (f"    {name:<24} folds {s['n_folds']:>2}  AUC {s['mean_auc']:.4f}"
+                f"  Brier {s['mean_brier']:.4f}")
+        if s["race_metrics"]:
+            line += f"  | {format_race_line(s['race_metrics'])}"
+        return line
+
+    arms_summary: Dict[str, Any] = {}
+    print(f"\n  [{label}] COMBINATION ARMS (same rows; simplex/logistic fitted on PRIOR folds only):")
+    for name in arm_names:
+        summary = _summarise_arm(name, all_idx)
+        if summary is None:
+            continue
+        summary["same_folds"] = _summarise_arm(name, learned_idx)
+        arms_summary[name] = summary
+        print(_arm_line(name, summary))
+    if learned_idx and len(learned_idx) < len(all_idx):
+        print(f"  [{label}] SAME {len(learned_idx)} FOLDS as the learned arms "
+              f"(the flip criterion's comparison):")
+        for name, summary in arms_summary.items():
+            if summary["same_folds"] is not None:
+                print(_arm_line(name, summary["same_folds"]))
+
+    # The persisted combiner: fitted on ALL raw OOF rows (like the OOF
+    # isotonics), in-sample numbers labelled as such.
+    final_combiner = None
+    combiner_report: Optional[Dict[str, Any]] = None
+    if collect_oof_calibrators and oof_labels and present_models:
+        cols = {"xgb": oof_xgb, "lgb": oof_lgb, "cb": oof_cb}
+        y_all = np.asarray(oof_labels, dtype=int)
+        try:
+            if any(len(cols[k]) != len(y_all) for k in present_models):
+                raise ValueError(f"ragged OOF columns {[(k, len(cols[k])) for k in present_models]} "
+                                 f"vs {len(y_all)} labels")
+            P_all = np.column_stack([np.asarray(cols[k], dtype=float) for k in present_models])
+            final_combiner = EnsembleCombiner("simplex", model_names=present_models).fit(P_all, y_all)
+            combiner_report = {
+                "persisted": final_combiner.describe(),
+                "fitted_on": f"all {len(y_all)} raw OOF rows (IN-SAMPLE numbers below are not performance)",
+                "in_sample": {m: arm_metrics(EnsembleCombiner(m, present_models).fit(P_all, y_all).predict(P_all), y_all)
+                              for m in ("equal", "simplex", "logistic")},
+                "cross_fitted_arms": arms_summary,
+            }
+            print(f"  Persisted simplex combiner (all OOF rows, in-sample): weights "
+                  f"{combiner_report['persisted'].get('weights')}")
+        except Exception as exc:
+            print(f"  WARNING: final combiner fit failed: {exc}", file=sys.stderr)
 
     results = {
         "label": label,
@@ -1109,6 +1374,11 @@ def run_walk_forward_cv(
         "std_auc": std_auc,
         "mean_brier": mean_brier,
         "folds": fold_results,
+        "race_metrics": race_pooled,
+        "arms": arms_summary,
+        "present_models": present_models,
+        "ensemble_combiner": final_combiner,
+        "combiner_report": combiner_report,
     }
 
     if collect_oof_calibrators and oof_labels:
@@ -1129,6 +1399,7 @@ def run_ablation(
     X: pd.DataFrame,
     y: pd.Series,
     dates: pd.Series,
+    race_meta: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     Compare AUC of the full feature set against (a) the set without the
@@ -1143,17 +1414,31 @@ def run_ablation(
     all_features = [c for c in FEATURE_COLUMNS if c in X.columns]
     base_features = [c for c in all_features if c not in PHASE2_FEATURES]
     no_p5_features = [c for c in all_features if c not in PHASE5_FEATURES]
+    no_price_features = [c for c in all_features if c not in PRICE_FEATURES]
 
     print(f"\n  Full feature set : {len(all_features)} features")
     print(f"  Base feature set : {len(base_features)} features (Phase 2 excluded)")
     print(f"  -Phase5 set      : {len(no_p5_features)} features (relative-market trio excluded)")
+    print(f"  -price set       : {len(no_price_features)} features "
+          f"({[c for c in PRICE_FEATURES if c in all_features]} excluded)")
 
-    results_full = run_walk_forward_cv(X, y, dates, all_features, label="WITH Phase2")
-    results_base = run_walk_forward_cv(X, y, dates, base_features, label="WITHOUT Phase2")
-    results_no_p5 = run_walk_forward_cv(X, y, dates, no_p5_features, label="WITHOUT Phase5")
+    results_full = run_walk_forward_cv(X, y, dates, all_features, label="WITH Phase2",
+                                       race_meta=race_meta)
+    results_base = run_walk_forward_cv(X, y, dates, base_features, label="WITHOUT Phase2",
+                                       race_meta=race_meta)
+    results_no_p5 = run_walk_forward_cv(X, y, dates, no_p5_features, label="WITHOUT Phase5",
+                                        race_meta=race_meta)
+    # Market double-count arm (RESULTS.md §7.5, 13-race-aware-objective.md
+    # step 4): the model without any price input. Read on per-race hit rate
+    # against the tip-time favourite and on Brier, not AUC alone — AUC will
+    # fall (the price is the strongest cross-race separator); the question is
+    # whether the model's own ordering carries independent skill.
+    results_no_price = run_walk_forward_cv(X, y, dates, no_price_features, label="WITHOUT price",
+                                           race_meta=race_meta)
 
     delta = results_full["mean_auc"] - results_base["mean_auc"]
     delta_p5 = results_full["mean_auc"] - results_no_p5["mean_auc"]
+    delta_price = results_full["mean_auc"] - results_no_price["mean_auc"]
     print("\n  ABLATION RESULT:")
     print(f"    AUC WITH    Phase 2 : {results_full['mean_auc']:.4f}")
     print(f"    AUC WITHOUT Phase 2 : {results_base['mean_auc']:.4f}")
@@ -1162,13 +1447,24 @@ def run_ablation(
     print(f"    Phase 5 delta       : {delta_p5:+.4f}  "
           f"(Brier full {results_full['mean_brier']:.4f} vs "
           f"-P5 {results_no_p5['mean_brier']:.4f})")
+    print(f"    AUC WITHOUT price   : {results_no_price['mean_auc']:.4f}")
+    print(f"    Price delta         : {delta_price:+.4f}  "
+          f"(Brier full {results_full['mean_brier']:.4f} vs "
+          f"-price {results_no_price['mean_brier']:.4f}) — read the per-race line, not the AUC")
+    for name, res in (("full", results_full), ("-Phase2", results_base),
+                      ("-Phase5", results_no_p5), ("-price", results_no_price)):
+        rm = res.get("race_metrics")
+        if rm:
+            print(f"    per-race {name:<8}: {format_race_line(rm)}")
 
     return {
         "with_phase2": results_full,
         "without_phase2": results_base,
         "without_phase5": results_no_p5,
+        "without_price": results_no_price,
         "delta_auc": delta,
         "delta_auc_phase5": delta_p5,
+        "delta_auc_price": delta_price,
     }
 
 
@@ -1181,9 +1477,15 @@ def train_final_model(
 ) -> Tuple[Any, Any, Any, Dict[str, float]]:
     """
     Train XGBoost, LightGBM, CatBoost on the full dataset.
-    Uses a held-out 10% split for early stopping only.
-    Isotonic calibrators come from OOF predictions (if provided) to avoid
-    the leak where X_cal is used for both early stopping and calibration fitting.
+
+    The last 10% of rows (date-ordered) is the early-stopping window for all
+    three learners — until 2026-09-05 only LightGBM actually stopped early
+    there; XGBoost received the eval_set for logging only and ran its full
+    200 trees, and CatBoost selected its best iteration there with no patience
+    bound. Isotonic calibrators come from the walk-forward OOF predictions
+    (if provided) so X_cal is never used for both early stopping and
+    calibration fitting. A degenerate window (a class missing) disables early
+    stopping for that fit and says so rather than borrowing rows.
     """
     n = len(X)
     split_idx = int(n * 0.9)
@@ -1192,19 +1494,25 @@ def train_final_model(
     y_train_all = y.iloc[:split_idx]
     X_cal = X.iloc[split_idx:][feature_cols]
     y_cal = y.iloc[split_idx:]
+    y_cal_arr = np.asarray(y_cal).astype(int)
+    cal_ok = (len(y_cal_arr) >= MIN_TAIL_ROWS
+              and int(y_cal_arr.sum()) >= MIN_TAIL_PER_CLASS
+              and int((y_cal_arr == 0).sum()) >= MIN_TAIL_PER_CLASS)
 
-    print(f"\n  Final model: train={split_idx} rows, calibration={n - split_idx} rows")
+    print(f"\n  Final model: train={split_idx} rows, early-stopping window={n - split_idx} rows"
+          f"{'' if cal_ok else ' (DEGENERATE — early stopping disabled for the final fit)'}")
 
     xgb_model = lgb_model = cb_model = None
 
     if HAS_XGB:
         print("  Training final XGBoost ...")
-        xgb_model = xgb.XGBClassifier(**_get_xgb_params())
-        xgb_model.fit(
-            X_train_all, y_train_all,
-            eval_set=[(X_cal, y_cal)],
-            verbose=False,
-        )
+        if cal_ok:
+            xgb_model = xgb.XGBClassifier(**_get_xgb_params(),
+                                          early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+            xgb_model.fit(X_train_all, y_train_all, eval_set=[(X_cal, y_cal)], verbose=False)
+        else:
+            xgb_model = xgb.XGBClassifier(**_get_xgb_params())
+            xgb_model.fit(X_train_all, y_train_all, verbose=False)
         # Assign OOF-fitted isotonic calibrator (no leak — X_cal used only for early stopping)
         if oof_calibrators and "xgb" in oof_calibrators:
             xgb_model._isotonic = oof_calibrators["xgb"]
@@ -1212,19 +1520,26 @@ def train_final_model(
     if HAS_LGB:
         print("  Training final LightGBM ...")
         lgb_model = lgb.LGBMClassifier(**_get_lgb_params())
-        lgb_model.fit(
-            X_train_all, y_train_all,
-            eval_set=[(X_cal, y_cal)],
-            callbacks=[lgb.early_stopping(20, verbose=False),
-                       lgb.log_evaluation(-1)],
-        )
+        if cal_ok:
+            lgb_model.fit(
+                X_train_all, y_train_all,
+                eval_set=[(X_cal, y_cal)],
+                callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                           lgb.log_evaluation(-1)],
+            )
+        else:
+            lgb_model.fit(X_train_all, y_train_all)
         if oof_calibrators and "lgb" in oof_calibrators:
             lgb_model._isotonic = oof_calibrators["lgb"]
 
     if HAS_CB:
         print("  Training final CatBoost ...")
         cb_model = CatBoostClassifier(**_get_catboost_params())
-        cb_model.fit(X_train_all, y_train_all, eval_set=(X_cal, y_cal))
+        if cal_ok:
+            cb_model.fit(X_train_all, y_train_all, eval_set=(X_cal, y_cal),
+                         early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+        else:
+            cb_model.fit(X_train_all, y_train_all)
         if oof_calibrators and "cb" in oof_calibrators:
             cb_model._isotonic = oof_calibrators["cb"]
 
@@ -1236,6 +1551,9 @@ def train_final_model(
 
 
 
+DEFAULT_MODEL_VERSION = "v2"
+
+
 def save_model(
     xgb_model,
     lgb_model,
@@ -1245,7 +1563,13 @@ def save_model(
     cv_results: Dict[str, Any],
     ablation_results: Dict[str, Any],
     output_path: str,
+    version: str = DEFAULT_MODEL_VERSION,
+    extra: Optional[Dict[str, Any]] = None,
 ):
+    """`version` was hardcoded "v2" until 2026-09-05. retrain_preflight's
+    freshness gate REDs a candidate whose version equals the live artifact's,
+    so no output of this trainer could pass it while production runs v2;
+    the task-12 candidate is written as "v3". Default unchanged."""
     # The OOF isotonic calibrators ride on the boosters as ``_isotonic`` for
     # predict_ensemble above, but CatBoost's __getstate__ serialises only its
     # own params and model blob, so that attribute does not survive pickling:
@@ -1268,12 +1592,80 @@ def save_model(
         "cv_results": cv_results,
         "ablation_results": ablation_results,
         "trained_at": datetime.now().isoformat(),
-        "version": "v2",
+        "version": version,
     }
+    if extra:
+        payload.update(extra)
     with open(output_path, "wb") as fh:
         pickle.dump(payload, fh)
-    print(f"\n  Model saved to: {output_path}")
+    print(f"\n  Model saved to: {output_path}  (version {version})")
     print(f"  OOF calibrators persisted: {sorted(oof_calibrators) or 'none'}")
+
+
+def enforce_snapshot_floor(df: pd.DataFrame, min_rows: Optional[int]) -> int:
+    """Refuse (exit 2) to train a snapshot-odds candidate below `min_rows`.
+
+    filter_snapshot_rows already refuses an EMPTY frame; a small one is the
+    quieter failure — a candidate fitted on a few hundred rows would reach the
+    preflight looking like any other. The workflow passes
+    odds_ablation.DEFAULT_MIN_ROWS; None (the default here) applies no floor,
+    so a legacy run is unchanged."""
+    if min_rows is None:
+        return len(df)
+    if len(df) < int(min_rows):
+        print(f"  REFUSAL: {len(df):,} snapshot rows < floor {int(min_rows):,} — not enough "
+              f"tip-time odds accrued to train a candidate. Wait; do not fall back to SP.",
+              file=sys.stderr)
+        sys.exit(2)
+    print(f"  Snapshot floor: {len(df):,} rows >= {int(min_rows):,}")
+    return len(df)
+
+
+def artifact_cv_results(cv_results: Dict[str, Any]) -> Dict[str, Any]:
+    """The copy of cv_results that goes into the artifact: the fitted
+    EnsembleCombiner as its plain state dict (to_state), never as a pickled
+    instance. A class path inside the artifact would make every v3 pickle's
+    load depend on ensemble_combiner.py existing under that name on the
+    loading checkout — and RacingMLModel.load treats any unpickling error as
+    "no model", which would score the day with no ML at all while looking
+    normal. The in-process object is left untouched."""
+    out = dict(cv_results)
+    comb = out.get("ensemble_combiner")
+    out["ensemble_combiner"] = comb.to_state() if hasattr(comb, "to_state") else comb
+    return out
+
+
+def _json_safe(obj: Any) -> Any:
+    """cv_results carries fitted objects (IsotonicRegression under
+    oof_calibrators, the EnsembleCombiner under ensemble_combiner); drop them
+    (the artifact keeps them) so the report is plain JSON."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()
+                if k not in ("oof_calibrators", "ensemble_combiner")}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.floating, np.integer)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
+def write_report(path: str, cv_results: Dict[str, Any], ablation_results: Dict[str, Any],
+                 importance: Dict[str, float], meta: Dict[str, Any]) -> str:
+    """The run's evidence as JSON next to the artifact: CV (per-fold AUC/
+    Brier, per-race metrics, fold hygiene), ablation arms, importances, and
+    the run metadata (odds mode, version, row counts)."""
+    report = {
+        "meta": meta,
+        "cv": _json_safe(cv_results),
+        "ablation": _json_safe(ablation_results),
+        "feature_importance": {k: float(v) for k, v in importance.items()},
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, default=str)
+    print(f"  Report written to: {path}")
+    return path
 
 
 
@@ -1302,6 +1694,14 @@ def print_cv_summary(cv_results: Dict[str, Any]):
         aucs = [f["auc"] for f in cv_results["folds"] if not np.isnan(f["auc"])]
         if aucs:
             print(f"  AUC range     : [{min(aucs):.4f}, {max(aucs):.4f}]")
+    rm = cv_results.get("race_metrics")
+    if rm:
+        print("  Per-race (pooled over folds; staging criterion baseline = tip-time favourite):")
+        print(f"    {format_race_line(rm)}")
+        if rm.get("fav_tip_time_coverage") is not None and rm["fav_tip_time_coverage"] < 0.5:
+            print("    NOTE: tip-time odds cover under half the usable races — the "
+                  "tip-time favourite baseline is thin on this window; the SP "
+                  "favourite is hindsight and is not the baseline.")
 
 
 
@@ -1464,6 +1864,25 @@ def parse_args():
         action="store_true",
         help="Load the deployed view and build features, then stop immediately before model fitting.",
     )
+    parser.add_argument(
+        "--model-version",
+        default=DEFAULT_MODEL_VERSION,
+        help="Artifact version string (default v2 — unchanged). The task-12 candidate is "
+             "v3: the preflight freshness gate REDs a candidate whose version equals live.",
+    )
+    parser.add_argument(
+        "--min-snapshot-rows",
+        type=int,
+        default=None,
+        help="STRIDE_TRAIN_ODDS_SOURCE=snapshot only: refuse (exit 2) below this many "
+             "snapshot rows. Default: no floor.",
+    )
+    parser.add_argument(
+        "--report-path",
+        default=None,
+        help="Write the run's evidence (CV incl. per-race metrics and fold hygiene, "
+             "ablation, importances, run metadata) as JSON here.",
+    )
     return parser.parse_args()
 
 
@@ -1481,6 +1900,7 @@ def main():
     df_raw = load_training_data()
     if _train_odds_source() == "snapshot":
         df_raw = filter_snapshot_rows(df_raw)
+        enforce_snapshot_floor(df_raw, args.min_snapshot_rows)
 
     n_total = len(df_raw)
     n_winners = int(df_raw["is_winner"].astype(int).sum())
@@ -1529,14 +1949,22 @@ def main():
         print(f"\n  READY_FOR_MODEL_FIT — dry-run stopped before walk-forward CV ({elapsed:.1f}s)")
         return
 
+    # Per-race context for the CV (task-12 step 3): race identity on the
+    # same key the pace features group by, tip-time and SP odds, the stored
+    # production probability. Never a training input.
+    race_meta = build_race_meta(df_raw).reset_index(drop=True)
+    n_tt = int(np.isfinite(race_meta["tip_time_odds"].to_numpy()).sum())
+    print(f"  Race meta: {race_meta['race_key'].nunique():,} races; "
+          f"tip-time odds on {n_tt:,}/{len(race_meta):,} rows")
+
     print("\n[3] Walk-Forward Temporal Cross-Validation ...")
     print("  Parameters: min_train=60d, purge=14d, test=14d, step=14d")
     cv_results = run_walk_forward_cv(X, y, dates, feature_cols, label="CV-full",
-                                     collect_oof_calibrators=True)
+                                     collect_oof_calibrators=True, race_meta=race_meta)
     print_cv_summary(cv_results)
 
     print("\n[4] Ablation study ...")
-    ablation_results = run_ablation(X, y, dates)
+    ablation_results = run_ablation(X, y, dates, race_meta=race_meta)
 
     print("\n[5] Training final model on ALL data ...")
     oof_calibrators = cv_results.get("oof_calibrators", {})
@@ -1545,17 +1973,37 @@ def main():
     )
     print_top_features(final_importance, n=25)
 
+    run_meta = {
+        "version": args.model_version,
+        "odds_source_mode": _train_odds_source(),
+        "n_rows": int(n_total),
+        "n_winners": int(n_winners),
+        "n_features": len(feature_cols),
+        "race_metrics": cv_results.get("race_metrics"),
+        "trained_at": datetime.now().isoformat(),
+    }
     print(f"\n[6] Saving model to {output_model_path} ...")
+    cv_for_artifact = artifact_cv_results(cv_results)
     save_model(
         xgb_final,
         lgb_final,
         cb_final,
         feature_cols,
         final_importance,
-        cv_results,
+        cv_for_artifact,
         ablation_results,
         output_model_path,
+        version=args.model_version,
+        extra={"odds_source_mode": run_meta["odds_source_mode"],
+               "race_metrics": run_meta["race_metrics"],
+               # Learned combiner as a plain state dict, fitted on all raw
+               # OOF rows; served only under STRIDE_LEARNED_BLEND (default off).
+               "ensemble_combiner": cv_for_artifact.get("ensemble_combiner"),
+               "combiner_report": cv_results.get("combiner_report")},
     )
+    if args.report_path:
+        write_report(os.path.abspath(args.report_path), cv_results, ablation_results,
+                     final_importance, run_meta)
 
     elapsed = time.time() - t0
     print("\n" + "=" * 70)
@@ -1572,6 +2020,17 @@ def main():
         print(f"  AUC delta (Phase 5 impact) : {abl['delta_auc_phase5']:+.4f}")
         print(f"    WITH Phase 5    : {abl['with_phase2']['mean_auc']:.4f}")
         print(f"    WITHOUT Phase 5 : {abl['without_phase5']['mean_auc']:.4f}")
+    if "delta_auc_price" in abl:
+        print(f"  AUC delta (price inputs)   : {abl['delta_auc_price']:+.4f}  (judge on per-race hit)")
+        for name in ("with_phase2", "without_price"):
+            rm = abl[name].get("race_metrics")
+            if rm:
+                print(f"    {name:<15}: {format_race_line(rm)}")
+    arms = cv_results.get("arms") or {}
+    if arms:
+        print("  Combination arms (same rows; learned arms cross-fitted):")
+        for name, a in arms.items():
+            print(f"    {name:<24} AUC {a['mean_auc']:.4f}  Brier {a['mean_brier']:.4f}  folds {a['n_folds']}")
     print(f"  Model saved to  : {output_model_path}")
     print()
 

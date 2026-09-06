@@ -1021,6 +1021,27 @@ def job_tips_proof() -> dict:
     os.environ["STRIDE_SERVE_LIVE_FEATURES_SHADOW"] = "false"
     os.environ["STRIDE_ODDS_SNAPSHOT_WRITE"] = "false"
     os.environ["STRIDE_MC_AUDIT_WRITE"] = "false"
+    # Candidate parallel scoring (docs/project_retrain_gate.md: "one week
+    # parallel scoring"). With STRIDE_ENSEMBLE_ARTIFACT set on the task this
+    # proof scores the card with that artifact instead of the production
+    # slot (RacingMLModel honours the override; production never sets it)
+    # and writes to tips_<date>_candidate.json, beside the real file and
+    # beside any plain preview. The artifact must already be staged: absent,
+    # RacingMLModel degrades to is_trained=False and the run would score
+    # with no ML while looking like a candidate run — refused up front.
+    candidate = os.environ.get("STRIDE_ENSEMBLE_ARTIFACT", "").strip()
+    suffix = "cloudproof"
+    if candidate:
+        cpath = candidate if os.path.isabs(candidate) else \
+            f"{_root()}/server/python/models/{candidate}"
+        if not os.path.exists(cpath):
+            raise RuntimeError(
+                f"tips-proof: STRIDE_ENSEMBLE_ARTIFACT={candidate!r} is set but {cpath} "
+                f"was not staged — the proof would silently score without the "
+                f"candidate. Upload it to the models bucket (infra/09b_upload_models.sh) "
+                f"first.")
+        suffix = "candidate"
+        print(f"[tips-proof] candidate artifact {cpath} — output suffix '{suffix}'")
     os.environ.setdefault(CTX_MULT_DIAG_FLAG, "true")   # diagnostic only, see above
     if _tips_prepare() == "quiet":
         return {"last_success_date": _today(), "quiet_day": True}
@@ -1037,8 +1058,8 @@ def job_tips_proof() -> dict:
         print(f"[tips-proof] track filter: {', '.join(tracks)} "
               f"(the rest of the card is not scored)")
     out = _run_ok("run_tips_pipeline.py", _today(), *tracks,
-                  "--skip-db-store", "--output-suffix", "cloudproof")
-    tips = f"{_root()}/racecards/tips_{_today()}_cloudproof.json"
+                  "--skip-db-store", "--output-suffix", suffix)
+    tips = f"{_root()}/racecards/tips_{_today()}_{suffix}.json"
     if not os.path.exists(tips):
         raise RuntimeError(
             f"tips-proof: {tips} absent after a clean exit — the pipeline "
@@ -1050,7 +1071,7 @@ def job_tips_proof() -> dict:
     # wrap-up read. Relayed BEFORE the insight check, for the reason
     # morning-odds relays before it asserts: a failed check must not also
     # destroy the evidence of what the run produced.
-    _sync_up("racecards", f"tips_{_today()}_cloudproof.json")
+    _sync_up("racecards", f"tips_{_today()}_{suffix}.json")
     try:
         with_text, picks = _insight_coverage(tips)
     except (OSError, ValueError) as e:
@@ -1301,6 +1322,11 @@ def dispatch(event=None, context=None):
         # came from a different provider than the schedule's explains itself.
         print(f"[dispatch] LLM_PROVIDER={llm_override} set on the task; the "
               f"stride/prod value is not consulted for this run")
+    artifact_override = os.environ.get("STRIDE_ENSEMBLE_ARTIFACT", "").strip()
+    if artifact_override:
+        print(f"[dispatch] STRIDE_ENSEMBLE_ARTIFACT={artifact_override} set on the task: "
+              f"the ML wrapper loads that artifact instead of the production slot "
+              f"(candidate scoring; tips-proof refuses if it was not staged)")
     _load_secrets()
     _stage_models()
     _stage_panel()

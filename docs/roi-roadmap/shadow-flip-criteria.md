@@ -124,3 +124,56 @@ delta summaries.
 Same as the pre-registration: append-only once a shadow window opens. Changing a
 threshold, day-count, or review bar after shadow data exists voids that flag's
 window and restarts its day count.
+
+---
+
+## STRIDE_LEARNED_BLEND (2026-09-05; rides the v3 candidate)
+
+[SAGE-APPROVAL] confirm this section's bar
+
+**What it does:** `RacingMLModel.predict_components` combines the three base
+predictions with the artifact's persisted `ensemble_combiner` — a
+non-negative weighted average fitted on purge-gapped walk-forward OOF rows
+(`ensemble_combiner.py`) — instead of the hardcoded seed weights in
+`_model_performance`. Off, or with an artifact that carries no combiner, the
+legacy blend is byte-identical. It is a weighted average of the same raw
+quantities, not a new calibration layer (standing prohibition 3).
+
+**Evidence:** not a separate shadow window. The combiner is judged in the
+retrain's CV on identical rows, cross-fitted (fitted on prior folds, scored
+on the next), against the equal-mean arm and the production blend measured on
+the same rows (`retrain_v2` "COMBINATION ARMS"), by the staging criterion of
+the 2026-09-05 pre-registration amendment; and then in the v3 candidate's
+parallel-scoring week, where the proof job runs with the flag on.
+
+**Flip when all hold:**
+
+1. The cross-fitted simplex arm is not worse than the production arm on
+   pooled Brier and not worse on per-race top-1 hit rate against the
+   tip-time favourite, on the same folds, in the candidate's CV report.
+2. The v3 candidate that carries it has passed NEW-BEATS-OLD.
+3. The flag is set together with the candidate's installation into the
+   stable slot — never on the v2 artifact (which carries no combiner, so the
+   flag would be inert there, but a flag that reads on while doing nothing is
+   a false record).
+
+**Who flips:** Sage. **Where:** `STRIDE_LEARNED_BLEND=true` via the GitHub
+secret → deploy-infra path (test_flag_plumbing.py must list it first).
+**Rollback:** flag off — byte-identical legacy blend. **Log line to watch:**
+`predict_components` reports `method: learned_blend` in the prediction stages
+audit; its absence with the flag on means the artifact carries no combiner.
+
+---
+
+## Note 2026-09-05 — the criteria are now computed, not read by hand
+
+`server/python/shadow_flip_review.py` reads the durable evidence store and
+prints one verdict per criterion above, with every threshold quoted from this
+document next to its constant (5 days, 15% top-3 flip rate, order-of-magnitude
+race outliers; pooled Brier not worse, sums at unity, 5% transition rate, the
+25% single-race sign-off list). Criteria this document assigns to Sage
+(stability trend, the transition matrix, the largest-delta races) are printed
+as REVIEW with the numbers and never auto-passed. `--emit-evidence` writes
+`flip_review_<flag>_<date>.json` to the store; `gate_status.py` gate 3 requires
+that record's PASS, the 5-day count and the flag itself. No threshold, day
+count or review bar changed.

@@ -75,6 +75,20 @@ stepped 14 days at a time**. Each fold requires ≥ 50 train and ≥ 5 test rows
 final model trains on the first 90% of rows by date, with the last 10% used only for
 early stopping — never for calibration.
 
+**Fold hygiene (2026-09-05).** Inside each fold, early stopping and the per-model
+isotonic calibrators use a window carved from the **tail of the training rows**
+(the last `TAIL_DAYS = 14` calendar days; `_carve_tail`). Before this, LightGBM
+early-stopped on the outer test fold, CatBoost selected its best iteration on it
+(`use_best_model` defaults to True with an `eval_set`), and all three per-model
+isotonics were fitted on its labels, so the published fold AUC/Brier were mildly
+self-fitted (evidence base C4). The test fold is now read only to be scored. A
+degenerate tail (too few rows or a class missing) falls back to the last 10% of
+rows by position; if that is degenerate too the fold trains without early
+stopping and without per-model isotonic and says so in the fold's `hygiene`
+record — test rows are never borrowed. The final fit's 10% window now bounds all
+three learners (`early_stopping_rounds = 20`); previously XGBoost received it for
+logging only and ran its full 200 trees.
+
 ---
 
 ## 4. Out-of-fold isotonic calibration (the headline)

@@ -85,6 +85,54 @@ def flag_on(monkeypatch):
 FULL = {"xgb": StubCalibrator(0.2), "lgb": StubCalibrator(0.25), "cb": StubCalibrator(1 / 6)}
 
 
+@pytest.mark.parametrize("calibrators", [FULL, {"xgb": FULL["xgb"]}, {}])
+def test_both_flags_disable_raw_oof_combiner_loudly(monkeypatch, capsys, calibrators):
+    from ensemble_combiner import EnsembleCombiner
+
+    monkeypatch.setenv("STRIDE_ML_APPLY_ISOTONIC", "true")
+    monkeypatch.setenv("STRIDE_LEARNED_BLEND", "true")
+    m = _model(calibrators)
+    m.ensemble_combiner = EnsembleCombiner("equal").fit(
+        [[0.5, 0.4, 0.6], [0.2, 0.1, 0.3]], [1, 0])
+    calls = []
+    monkeypatch.setattr(m.ensemble_combiner, "predict", lambda p: calls.append(p))
+    out = m.predict_components(X)
+    again = m.predict_components(X)
+    assert calls == [], "a raw-OOF combiner cannot run with serve isotonic enabled"
+    expected = "weighted_average+isotonic" if calibrators == FULL else "weighted_average"
+    assert out["method"] == again["method"] == expected
+    warning = capsys.readouterr().err
+    assert warning.count("STRIDE_LEARNED_BLEND ignored") == 1
+    assert "STRIDE_ML_APPLY_ISOTONIC" in warning and "raw OOF" in warning
+    monkeypatch.setenv("STRIDE_LEARNED_BLEND", "false")
+    reference = m.predict_components(X)
+    for key in ("xgb", "lightgbm", "catboost", "ensemble"):
+        assert out[key].tobytes() == reference[key].tobytes()
+
+
+def test_learned_blend_receives_raw_predictions_when_isotonic_is_off(monkeypatch):
+    from ensemble_combiner import EnsembleCombiner
+
+    monkeypatch.setenv("STRIDE_ML_APPLY_ISOTONIC", "false")
+    monkeypatch.setenv("STRIDE_LEARNED_BLEND", "true")
+    m = _model(FULL)
+    m.ensemble_combiner = EnsembleCombiner("equal").fit(
+        [[0.5, 0.4, 0.6], [0.2, 0.1, 0.3]], [1, 0])
+    seen = []
+    predict = m.ensemble_combiner.predict
+
+    def record(p):
+        seen.append(p.copy())
+        return predict(p)
+
+    monkeypatch.setattr(m.ensemble_combiner, "predict", record)
+    out = m.predict_components(X)
+    raw = np.tile([0.5, 0.4, 0.6], (len(X), 1))
+    assert out["method"] == "learned_blend"
+    assert len(seen) == 1 and np.array_equal(seen[0], raw)
+    assert np.array_equal(out["ensemble"], predict(raw))
+
+
 class TestFlagOffIsLegacy:
     def test_raw_scores_are_served_even_when_calibrators_exist(self, flag_off):
         m = _model(FULL)

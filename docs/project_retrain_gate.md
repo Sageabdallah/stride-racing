@@ -42,3 +42,27 @@ No training job runs before the window opens and every gate passes. The
 promotion path is retrain_preflight.py plus a staged artifact
 (racing_ensemble_v3.pkl beside v2, one week parallel scoring); the gate
 never promotes itself.
+
+## Clarification 2026-09-05 (dates unchanged; gate mechanics only)
+
+Two of the five gates did not measure what they claimed, found while auditing
+the retrain plan against the code:
+
+- **Gate 3** was `ok = all(flipped)` in `gate_status.py`: the shadow-day
+  counts were printed but never enforced, so two environment variables set
+  on day one would have passed with zero evidence. It now requires, for each
+  stream, at least 5 evidence days in the durable store **and** a PASS
+  review record from `shadow_flip_review.py --emit-evidence` (the registered
+  criteria of `shadow-flip-criteria.md`, computed) **and** the flag on. The
+  human flip remains the approval act; the record is what makes it a flip on
+  the registered criteria.
+- **Gate 5** ran `retrain_preflight.py` with no candidate, which its
+  required `--staging` argument rejects (exit 2) every day, and then looked
+  for a `VERDICT` line the script never prints. It could not pass. It now
+  runs `retrain_preflight.py --inputs-only`: the staging-independent gates
+  (serve liveness of the declared columns, source lockstep, parity suites,
+  as-of td profiles, pre-registration). Candidate preflight (`--staging`)
+  runs on the artifact once it exists — a gate on whether training may start
+  cannot depend on the artifact training would produce.
+
+The registered dates above are untouched.
