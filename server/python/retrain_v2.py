@@ -1343,29 +1343,19 @@ def run_walk_forward_cv(
                 print(_arm_line(name, summary["same_folds"]))
 
     # The persisted combiner: fitted on ALL raw OOF rows (like the OOF
-    # isotonics), in-sample numbers labelled as such.
+    # isotonics), in-sample numbers labelled as such. combiner_status says
+    # in the results and the report what happened here: until 2026-09-06 a
+    # failed fit was one stderr line, the artifact carried
+    # ensemble_combiner None, and nothing downstream could tell a candidate
+    # that lost its combiner from one that never had one.
     final_combiner = None
     combiner_report: Optional[Dict[str, Any]] = None
+    combiner_status = ("not requested" if not collect_oof_calibrators
+                       else "not fitted: no OOF rows" if not oof_labels
+                       else "not fitted: no model present")
     if collect_oof_calibrators and oof_labels and present_models:
-        cols = {"xgb": oof_xgb, "lgb": oof_lgb, "cb": oof_cb}
-        y_all = np.asarray(oof_labels, dtype=int)
-        try:
-            if any(len(cols[k]) != len(y_all) for k in present_models):
-                raise ValueError(f"ragged OOF columns {[(k, len(cols[k])) for k in present_models]} "
-                                 f"vs {len(y_all)} labels")
-            P_all = np.column_stack([np.asarray(cols[k], dtype=float) for k in present_models])
-            final_combiner = EnsembleCombiner("simplex", model_names=present_models).fit(P_all, y_all)
-            combiner_report = {
-                "persisted": final_combiner.describe(),
-                "fitted_on": f"all {len(y_all)} raw OOF rows (IN-SAMPLE numbers below are not performance)",
-                "in_sample": {m: arm_metrics(EnsembleCombiner(m, present_models).fit(P_all, y_all).predict(P_all), y_all)
-                              for m in ("equal", "simplex", "logistic")},
-                "cross_fitted_arms": arms_summary,
-            }
-            print(f"  Persisted simplex combiner (all OOF rows, in-sample): weights "
-                  f"{combiner_report['persisted'].get('weights')}")
-        except Exception as exc:
-            print(f"  WARNING: final combiner fit failed: {exc}", file=sys.stderr)
+        final_combiner, combiner_report, combiner_status = fit_persisted_combiner(
+            {"xgb": oof_xgb, "lgb": oof_lgb, "cb": oof_cb}, oof_labels, present_models, arms_summary)
 
     results = {
         "label": label,
@@ -1379,6 +1369,7 @@ def run_walk_forward_cv(
         "present_models": present_models,
         "ensemble_combiner": final_combiner,
         "combiner_report": combiner_report,
+        "combiner_status": combiner_status,
     }
 
     if collect_oof_calibrators and oof_labels:
@@ -1619,6 +1610,61 @@ def enforce_snapshot_floor(df: pd.DataFrame, min_rows: Optional[int]) -> int:
         sys.exit(2)
     print(f"  Snapshot floor: {len(df):,} rows >= {int(min_rows):,}")
     return len(df)
+
+
+def fit_persisted_combiner(cols: Dict[str, List[float]], oof_labels: List[int],
+                           present_models: List[str], arms_summary: Any):
+    """Fit the persisted simplex combiner on ALL raw OOF rows.
+
+    Returns (combiner, report, status). A failure is reported, never raised:
+    every fold has trained by the time this runs and the CV numbers are
+    still the run's evidence. But it is a named status ("failed: ..."), not
+    only a stderr line — main() refuses a candidate on it
+    (candidate_combiner_refusal), and run_meta carries it into the report."""
+    y_all = np.asarray(oof_labels, dtype=int)
+    try:
+        if any(len(cols[k]) != len(y_all) for k in present_models):
+            raise ValueError(f"ragged OOF columns {[(k, len(cols[k])) for k in present_models]} "
+                             f"vs {len(y_all)} labels")
+        P_all = np.column_stack([np.asarray(cols[k], dtype=float) for k in present_models])
+        combiner = EnsembleCombiner("simplex", model_names=present_models).fit(P_all, y_all)
+        report = {
+            "persisted": combiner.describe(),
+            "fitted_on": f"all {len(y_all)} raw OOF rows (IN-SAMPLE numbers below are not performance)",
+            "in_sample": {m: arm_metrics(EnsembleCombiner(m, present_models).fit(P_all, y_all).predict(P_all), y_all)
+                          for m in ("equal", "simplex", "logistic")},
+            "cross_fitted_arms": arms_summary,
+        }
+        print(f"  Persisted simplex combiner (all OOF rows, in-sample): weights "
+              f"{report['persisted'].get('weights')}")
+        return combiner, report, "fitted"
+    except Exception as exc:
+        print(f"  WARNING: final combiner fit failed: {exc}", file=sys.stderr)
+        return None, None, f"failed: {type(exc).__name__}: {exc}"
+
+
+def candidate_combiner_refusal(version: str, cv_results: Dict[str, Any]) -> Optional[str]:
+    """Why a run may not stand as a candidate: a non-default --model-version
+    (the task-12 candidate is v3) whose persisted combiner was not fitted.
+
+    The learned-blend staging criterion (12-preregistration.md amendment
+    2026-09-05 §3, shadow-flip-criteria.md STRIDE_LEARNED_BLEND) is read from
+    the candidate's cross-fitted combiner arms; a candidate written with
+    ensemble_combiner None cannot be read against it, and RacingMLModel would
+    serve the legacy blend under the flag with nothing to say so. The
+    artifact and report are still written first — evidence before failure —
+    and main() then exits 2 so the workflow run is red, never a green run
+    with a hollow candidate. The default version (legacy evidence) keeps the
+    warning: its output is evidence, never a candidate. None when nothing is
+    wrong."""
+    if version == DEFAULT_MODEL_VERSION:
+        return None
+    if cv_results.get("ensemble_combiner") is not None:
+        return None
+    return (f"REFUSAL: --model-version {version} is a candidate and its persisted "
+            f"ensemble_combiner was not fitted ({cv_results.get('combiner_status', 'unknown')}). "
+            f"The artifact and report were written for inspection; the run is not a "
+            f"candidate. Fix the cause and re-run.")
 
 
 def artifact_cv_results(cv_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -1980,6 +2026,7 @@ def main():
         "n_winners": int(n_winners),
         "n_features": len(feature_cols),
         "race_metrics": cv_results.get("race_metrics"),
+        "combiner_status": cv_results.get("combiner_status"),
         "trained_at": datetime.now().isoformat(),
     }
     print(f"\n[6] Saving model to {output_model_path} ...")
@@ -2032,7 +2079,15 @@ def main():
         for name, a in arms.items():
             print(f"    {name:<24} AUC {a['mean_auc']:.4f}  Brier {a['mean_brier']:.4f}  folds {a['n_folds']}")
     print(f"  Model saved to  : {output_model_path}")
+    print(f"  Combiner        : {cv_results.get('combiner_status')}")
     print()
+    refusal = candidate_combiner_refusal(args.model_version, cv_results)
+    if refusal:
+        # After the artifact, report and summary — evidence first — so the
+        # workflow's upload step (success() || failure()) keeps what the run
+        # produced while the run itself is red.
+        print(refusal, file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

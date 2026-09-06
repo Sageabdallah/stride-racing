@@ -37,7 +37,7 @@ on:
         description: "Minutes to wait for each Fargate task before reading its exit code (1-55, default 20). HARD CEILING 55: the OIDC role session lasts one hour, after which every AWS call in this job fails and the task can no longer be observed from here. A job that runs longer is dispatched and reported STILL RUNNING with its task ARN — it keeps running on ECS and must be tracked by its artifact, not by this workflow."
         default: "20"
       ensemble_artifact:
-        description: "Optional candidate model filename for tips-proof (e.g. racing_ensemble_v3.pkl), set on the task as STRIDE_ENSEMBLE_ARTIFACT. The proof then scores the card with the candidate and writes tips_<date>_candidate.json — the parallel scoring of project_retrain_gate.md. The file must already be in the models bucket (infra/09b_upload_models.sh); tips-proof refuses otherwise. Production never sets this. Ignored by every other job."
+        description: "Optional candidate model filename for tips-proof ONLY (e.g. racing_ensemble_v3.pkl), set on that task as STRIDE_ENSEMBLE_ARTIFACT. The proof then scores the card with the candidate and writes tips_<date>_candidate.json — the parallel scoring of project_retrain_gate.md. The file must already be in the models bucket: copy that one file (aws s3 cp server/python/models/<file> s3://stride-models-<account>/<file>), NOT infra/09b_upload_models.sh, which re-uploads every local .pkl including whatever v2 sits beside it. tips-proof refuses if it was not staged, and this workflow refuses the whole dispatch if any other job is listed alongside it. Production never sets this."
         default: ""
 
 permissions:
@@ -107,6 +107,13 @@ jobs:
           # differ by six characters and both are plausible things to type at
           # 10pm — and tips-pipeline is a live dispatcher key that writes the
           # ledger and the file the frontend reads.
+          #
+          # The candidate override is the same shape of rule. Until 2026-09-06
+          # ensemble_artifact was appended to EVERY Fargate task in the
+          # dispatch while its description said only tips-proof honoured it:
+          # jobs=tips-pipeline with an artifact name would have scored the
+          # real card with the candidate — ledger, DB store and the real
+          # tips_<date>.json all on. Refused here, before anything runs.
           for JOB in $(echo "$IN_JOBS" | tr ',' ' '); do
             case "$JOB" in
               tips-pipeline|tip-time-snapshot)
@@ -116,6 +123,10 @@ jobs:
                 fi
                 ;;
             esac
+            if [ -n "$IN_ENSEMBLE_ARTIFACT" ] && [ "$JOB" != "tips-proof" ]; then
+              echo "::error::ensemble_artifact=$IN_ENSEMBLE_ARTIFACT is set but $JOB is not tips-proof. Only the proof scores a candidate (it writes nothing); any other job given the override would publish candidate probabilities. Refusing the whole dispatch."
+              exit 1
+            fi
           done
           for JOB in $(echo "$IN_JOBS" | tr ',' ' '); do
             echo "::group::$JOB"
@@ -154,9 +165,10 @@ jobs:
               if [ -n "$IN_TRACKS" ]; then
                 EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_TRACKS\",\"value\":\"$IN_TRACKS\"}"
               fi
-              if [ -n "$IN_ENSEMBLE_ARTIFACT" ]; then
-                # Candidate scoring: only tips-proof honours it (and refuses
-                # if the artifact is not staged); production tasks never see it.
+              if [ -n "$IN_ENSEMBLE_ARTIFACT" ] && [ "$JOB" = "tips-proof" ]; then
+                # Candidate scoring: only tips-proof receives it (the check
+                # above already refused any other job) and it refuses if the
+                # artifact is not staged; production tasks never see it.
                 EXTRA_ENV="$EXTRA_ENV,{\"name\":\"STRIDE_ENSEMBLE_ARTIFACT\",\"value\":\"$IN_ENSEMBLE_ARTIFACT\"}"
               fi
               OVR="{\"containerOverrides\":[{\"name\":\"job\",\"environment\":[{\"name\":\"STRIDE_JOB\",\"value\":\"$JOB\"}$EXTRA_ENV]}]}"

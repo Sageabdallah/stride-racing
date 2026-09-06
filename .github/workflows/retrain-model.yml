@@ -91,16 +91,29 @@ jobs:
         run: |
           set +e
           cd server/python
-          python retrain_preflight.py --inputs-only | tee ../../preflight_inputs.txt
-          RC=$?
+          python retrain_preflight.py --inputs-only > ../../preflight_inputs.txt
           python retrain_preflight.py --inputs-only --json > ../../preflight_inputs.json
           set -e
-          if [ "$IN_MODE" = "v3-candidate" ] && [ "$RC" -ne 0 ]; then
-            echo "::error::inputs-only preflight is not green — a v3 candidate may not be trained (project_retrain_gate.md gate 5). Read preflight_inputs.txt."
+          cat ../../preflight_inputs.txt
+          # Gate 5's own rule, read off the JSON board: every row GREEN, AMBER
+          # included (the script's exit code is 1 on RED only, so an unsigned
+          # pre-registration marker would have exited 0). The verdict comes
+          # from the file, never from `$?` — until 2026-09-06 this step read
+          # `RC=$?` after `python ... | tee`, and under GitHub's default
+          # `bash -e` (no pipefail) that was tee's status, always 0: the
+          # refusal below could not fire. test_v3_candidate_path executes this
+          # step under the same shell to keep it that way.
+          if python gate_status.py --preflight-board ../../preflight_inputs.json; then
+            GREEN=1
+          else
+            GREEN=0
+          fi
+          if [ "$IN_MODE" = "v3-candidate" ] && [ "$GREEN" -ne 1 ]; then
+            echo "::error::inputs-only preflight is not fully green — a v3 candidate may not be trained (project_retrain_gate.md gate 5). Read preflight_inputs.txt."
             exit 1
           fi
-          if [ "$RC" -ne 0 ]; then
-            echo "::warning::inputs-only preflight is RED; the legacy-evidence run continues because its output is evidence, never a candidate."
+          if [ "$GREEN" -ne 1 ]; then
+            echo "::warning::inputs-only preflight is not fully green; the legacy-evidence run continues because its output is evidence, never a candidate."
           fi
 
       - name: Retrain with walk-forward CV + ablation report

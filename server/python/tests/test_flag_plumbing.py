@@ -38,7 +38,7 @@ GATE3_PRODUCTION_FLAGS = (
 
 def secrets_allow_list():
     """The KEYS list inside the --from-env Python heredoc of 01_secrets.sh."""
-    text = SECRETS_SH.read_text()
+    text = SECRETS_SH.read_text(encoding="utf-8")
     start = text.index("KEYS = [")
     end = text.index("]", start)
     return re.findall(r'"([A-Z_][A-Z0-9_]*)"', text[start:end])
@@ -46,7 +46,7 @@ def secrets_allow_list():
 
 def deploy_env_block():
     """{env name: secret name} for the '01 secrets' step of deploy-infra.yml."""
-    text = DEPLOY_YML.read_text()
+    text = DEPLOY_YML.read_text(encoding="utf-8")
     start = text.index("- name: 01 secrets")
     tail = text.find("\n      - name:", start + 10)
     block = text[start:] if tail == -1 else text[start:tail]
@@ -93,7 +93,7 @@ def test_gate3_flags_have_a_production_path():
 def test_gate3_flags_are_documented_in_env_example():
     """IMPLEMENTATION_PLAN §6: every flag lands in .env.example, or it is
     invisible. STRIDE_SERVE_LIVE_FEATURES had never been added."""
-    text = ENV_EXAMPLE.read_text()
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
     for flag in GATE3_PRODUCTION_FLAGS:
         assert re.search(rf"^{flag}=", text, re.M), f"{flag} not in .env.example"
     assert "PRODUCTION PATH" in text, \
@@ -105,6 +105,6 @@ def test_absent_secrets_are_skipped_not_shipped_empty():
     safe: 01_secrets.sh keeps only keys with a value, so an unset secret is
     reported absent rather than written as an empty string that a reader
     could mistake for a deliberate blank."""
-    text = SECRETS_SH.read_text()
+    text = SECRETS_SH.read_text(encoding="utf-8")
     assert "for k in KEYS if os.environ.get(k)" in text
     assert "absent:" in text, "absent keys must be listed loudly"
