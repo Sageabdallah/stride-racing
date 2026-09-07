@@ -110,6 +110,51 @@ def test_order_of_magnitude_race_fails_stability():
     assert rep["auto_verdict"] == sfr.FAIL
 
 
+def test_a_race_an_order_of_magnitude_BELOW_the_window_also_fails():
+    """The registered clause is "an order of magnitude OFF the window's" and
+    the document is explicit that smallness is the failure mode: "small
+    deltas would mean the plumbing is inert and the shadow is measuring
+    nothing". Only the high side was flagged until 2026-09-07, so a race that
+    quietly served the legacy row passed as stability."""
+    rng = np.random.default_rng(21)
+    days = {f"2026-08-1{i}": _day(rng, n_races=6, scale=1.0) for i in range(5)}
+    inert = {"track": "Flat", "race_number": 9, "runners": [
+        {"horse": "a", "delta_pp": 0.0, "tier_change": False},
+        {"horse": "b", "delta_pp": 0.0, "tier_change": False}]}
+    days["2026-08-14"] = days["2026-08-14"] + [inert]
+    rep = sfr.review_serve_liveness(days)
+    c = {x["criterion"]: x for x in rep["criteria"]}["delta_stability"]
+    assert c["status"] == sfr.FAIL, c["detail"]
+    assert [o["direction"] for o in c["outlier_races"]] == ["below"]
+    assert (o := c["outlier_races"][0])["race_number"] == 9 and o["max_abs_delta_pp"] == 0.0
+    assert "below" in c["detail"] and "inert plumbing" in c["detail"]
+
+
+def test_outlier_rule_is_not_switched_off_by_a_zero_median_window():
+    """`if window_median > 0` disabled the whole criterion exactly when the
+    window was degenerate: four zero-delta races and one 100pp race returned
+    no outlier and an aggregate PASS. 10 x 0 needs no special case."""
+    def race(n, d):
+        return {"track": "T", "race_number": n, "runners": [
+            {"horse": "a", "delta_pp": d, "tier_change": False},
+            {"horse": "b", "delta_pp": 0.0, "tier_change": False}]}
+
+    days = {f"2026-08-1{i}": [race(1, 0.0), race(2, 0.0)] for i in range(5)}
+    days["2026-08-14"] = [race(1, 0.0), race(2, 100.0)]
+    rep = sfr.review_serve_liveness(days)
+    c = {x["criterion"]: x for x in rep["criteria"]}["delta_stability"]
+    assert c["window_median_race_max_abs_delta_pp"] == 0.0
+    assert c["status"] == sfr.FAIL and len(c["outlier_races"]) == 1
+    assert c["outlier_races"][0]["max_abs_delta_pp"] == 100.0
+    assert c["outlier_races"][0]["direction"] == "above"
+    assert rep["auto_verdict"] == sfr.FAIL
+
+    # a window where NOTHING moved has no race off it — every race is the median
+    flat = {f"2026-08-1{i}": [race(1, 0.0), race(2, 0.0)] for i in range(5)}
+    c = {x["criterion"]: x for x in sfr.review_serve_liveness(flat)["criteria"]}["delta_stability"]
+    assert c["outlier_races"] == [] and c["status"] == sfr.REVIEW
+
+
 def test_largest_delta_races_are_listed_for_the_reviewer():
     rng = np.random.default_rng(4)
     days = {f"2026-08-1{i}": _day(rng) for i in range(5)}
@@ -247,6 +292,39 @@ def test_single_race_rule_reads_per_race_detail_from_the_day_files():
     days["2026-08-12"]["day"]["status"] = "no_data"
     c = {x["criterion"]: x for x in sfr.review_renormalisation(days, pooled)["criteria"]}["single_race_signoff"]
     assert c["status"] == sfr.PASS
+
+
+def test_renorm_days_bar_is_the_registered_one_not_the_serve_flags():
+    """shadow-flip-criteria.md registers, for STRIDE_RENORMALISE_FIELD, only
+    ">= 5 race days of shadow comparison JSON". The restart-on-dirty rule is
+    registered under STRIDE_SERVE_LIVE_FEATURES #2 and nowhere else; sharing
+    it applied an unregistered, stricter bar, and under the document's own
+    amendment rule a bar that moves voids the window in either direction."""
+    days, pooled = _renorm_fixture(n_days=6)
+    days["2026-08-13"] = {"date": "2026-08-13", "day": {"status": "no_data", "n_rows": 0}}
+    c = {x["criterion"]: x for x in sfr.review_renormalisation(days, pooled)["criteria"]}["clean_days"]
+    assert c["status"] == sfr.PASS, c["detail"]
+    assert c["n_clean_days"] == 5 and c["dirty_days"] == ["2026-08-13"]
+    # the streak is still reported — the reviewer sees it, the gate does not enforce it
+    assert c["streak"] == 2 and c["restart_on_dirty"] is False
+    assert "registered for STRIDE_SERVE_LIVE_FEATURES only" in c["detail"]
+    assert "2026-08-13" in c["detail"]
+
+    # four clean days is still short of the registered five
+    days["2026-08-12"] = {"date": "2026-08-12", "day": {"status": "no_data", "n_rows": 0}}
+    c = {x["criterion"]: x for x in sfr.review_renormalisation(days, pooled)["criteria"]}["clean_days"]
+    assert c["status"] == sfr.WAIT and c["n_clean_days"] == 4
+
+
+def test_serve_days_bar_keeps_its_registered_restart_rule():
+    """The serve flag registers the restart explicitly, so its bar is
+    unchanged: a dirty latest day stands the count at zero."""
+    rng = np.random.default_rng(22)
+    days = {f"2026-08-1{i}": _day(rng) for i in range(6)}
+    days["2026-08-15"] = None          # an unreadable day file
+    c = {x["criterion"]: x for x in sfr.review_serve_liveness(days)["criteria"]}["clean_days"]
+    assert c["restart_on_dirty"] is True
+    assert c["status"] == sfr.FAIL and c["streak"] == 0 and c["n_clean_days"] == 5
 
 
 def test_renorm_dirty_day_detection():

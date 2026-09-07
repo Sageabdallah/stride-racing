@@ -30,6 +30,54 @@ def test_favourite_requires_a_price_on_every_runner():
     assert rmx.favourite_index(None) is None
 
 
+def test_tied_leaders_share_the_credit_instead_of_the_first_row_taking_it():
+    """np.argmax/argmin credit the FIRST maximal row, and row order inside a
+    race is whatever the training view emits (it orders by race_date only),
+    so the headline number moved with the database's row order. k tied
+    leaders share 1/k — the value an order-blind pick has in expectation."""
+    keys = ["R"] * 4
+    # two co-favourites at 2.0; the winner is one of them
+    tt = [2.0, 2.0, 6.0, 9.0]
+    y = [0, 1, 0, 0]
+    p = [0.4, 0.4, 0.1, 0.1]        # the model ties on the same two
+    m = rmx.per_race_metrics(p, y, keys, tt)
+    assert m["fav_tip_time_hit"] == 0.5
+    assert m["model_top1_hit"] == 0.5
+
+    # the same race with the two co-favourites listed the other way round
+    order = [1, 0, 2, 3]
+    m2 = rmx.per_race_metrics([p[i] for i in order], [y[i] for i in order],
+                              keys, [tt[i] for i in order])
+    assert m2["model_top1_hit"] == m["model_top1_hit"]
+    assert m2["fav_tip_time_hit"] == m["fav_tip_time_hit"]
+
+    # a winner outside the tie gets nothing; an outright leader still gets 1.0
+    assert rmx.per_race_metrics([0.4, 0.4, 0.1, 0.1], [0, 0, 1, 0], keys, tt)["model_top1_hit"] == 0.0
+    assert rmx.per_race_metrics([0.9, 0.4, 0.1, 0.1], [1, 0, 0, 0], keys, tt)["model_top1_hit"] == 1.0
+    # three-way tie
+    assert rmx.per_race_metrics([0.3, 0.3, 0.3, 0.1], [1, 0, 0, 0], keys, tt)["model_top1_hit"] == pytest.approx(1 / 3)
+
+
+def test_tie_credit_reaches_every_arm_and_pools_exactly():
+    """Model, both favourites and the stored probability get the same rule —
+    no arm is advantaged — and fractional credit must survive pooling, which
+    summed counts as int() until 2026-09-07 and floored every tie away."""
+    keys = ["R"] * 4
+    y = [0, 1, 0, 0]
+    tied = [0.4, 0.4, 0.1, 0.1]
+    tt = [2.0, 2.0, 6.0, 9.0]
+    sp = [3.0, 3.0, 6.0, 9.0]
+    m = rmx.per_race_metrics(tied, y, keys, tt, sp, stored=tied)
+    assert m["fav_sp_hit"] == 0.5
+    assert m["h2h"]["model_hit"] == 0.5 and m["h2h"]["stored_hit"] == 0.5
+    assert m["h2h"]["fav_tip_time_hit"] == 0.5
+
+    pooled = rmx.pool([m, m])
+    assert pooled["model_top1_hit"] == 0.5, "two tied races pool to 1.0/2, not 0/2"
+    assert pooled["counts"]["model_hits"] == 1.0
+    assert pooled["n_races_used"] == 2 and isinstance(pooled["counts"]["races_used"], int)
+
+
 def test_tip_time_favourite_and_sp_favourite_are_kept_apart():
     keys = ["R"] * 4
     y = [0, 1, 0, 0]

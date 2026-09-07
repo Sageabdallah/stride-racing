@@ -175,3 +175,40 @@ as REVIEW with the numbers and never auto-passed. `--emit-evidence` writes
 `flip_review_<flag>_<date>.json` to the store; `gate_status.py` gate 3 requires
 that record's PASS, the 5-day count and the flag itself. No threshold, day
 count or review bar changed.
+
+---
+
+## Note 2026-09-07 — two readings of the wording above, corrected
+
+Auditing `shadow_flip_review.py` against this document found two places where
+the code did not compute what is written here. **No threshold, day count or
+review bar changed**; both are readings of the registered wording, and both
+are recorded here because the reading is the thing that decides a flip.
+
+**1. "an order of magnitude off the window's" is either direction
+(STRIDE_SERVE_LIVE_FEATURES #3).** The code flagged only races ten times
+*over* the window median. The section above says in terms that smallness is
+the failure mode this flag has to watch for — "small deltas would mean the
+plumbing is inert and the shadow is measuring nothing" — so a race ten times
+*under* the window is as far off it as one ten times over, and it is the
+direction that means a race quietly served the legacy row. Both sides are now
+flagged, and the report names which.
+
+Removed with it: a guard that switched the criterion off whenever the window
+median was zero. `max > 10 x median` needs no special case there — it reads
+"any race that moved at all in a window that did not move" — and a window
+where nothing moved still flags nothing, because no race is off it. Before
+this, a window of four zero-delta races and one 100-point race returned no
+outlier and an aggregate PASS.
+
+**2. The 5-day bar for STRIDE_RENORMALISE_FIELD is its own
+(STRIDE_RENORMALISE_FIELD #1).** That flag registers "≥ 5 race days of shadow
+comparison JSON" and nothing else: it has no errored-day criterion, and the
+"restarts the 5-day count" rule belongs to STRIDE_SERVE_LIVE_FEATURES #2,
+where it is written. The two flags shared one implementation, so
+renormalisation was held to a trailing clean-day streak that was never
+registered for it. Under the amendment rule a bar that moves is a bar that
+voids the window, and that holds for a bar that moves upward too. Its count
+is now the clean days it registers; the trailing streak and any dirty days
+are still printed in the criterion's detail, so the reviewer sees what the
+gate is not enforcing. The serve flag's streak is unchanged.

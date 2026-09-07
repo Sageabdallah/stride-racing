@@ -60,7 +60,14 @@ features (→ [14](14-late-odds-features.md)).
    staged; the live *promotion* rule is [12-preregistration.md](12-preregistration.md)
    NEW-BEATS-OLD, see its 2026-09-05 amendment): honest OOF Brier not worse on
    identical folds, top-1 hit rate above the tip-time favourite, H2H not lost.
-   AUC remains a diagnostic.
+   AUC remains a diagnostic. **Ties take fractional credit (2026-09-07):**
+   `np.argmax`/`np.argmin` credit the first maximal row and the training view
+   orders by `race_date` only, so an integer hit made the staging number
+   depend on the order the database listed a race's runners — co-favourites at
+   one price are ordinary, and the ensemble arm is a mean of isotonic step
+   functions, so tied probabilities are real. k tied leaders share 1/k, applied
+   identically to the model, both favourite baselines and the stored
+   probability, so no arm is advantaged and an untied race is unaffected.
 4. **Learned, persisted ensemble.** Fit per-category weights or the stacking
    meta-learner on the purge-gapped OOF predictions; persist inside
    `racing_ensemble_v2.pkl` (fix `ml_model.save` :635-645 to include

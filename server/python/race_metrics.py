@@ -13,6 +13,17 @@ the pre-registration amendment of 2026-09-05 fixes:
   fav_tip_time_hit    the TIP-TIME favourite (shortest tip_time_odds) — the
                       PRIMARY baseline: selection uses the price knowable at
                       tip time (09-forward-validation-protocol.md)
+
+TIES GET FRACTIONAL CREDIT. `np.argmax`/`np.argmin` return the FIRST maximal
+row, and row order inside a race is whatever the training view emits (the
+query orders by race_date only), so an integer 0/1 credit made the headline
+number depend on row order: the same race scored 1.0 or 0.0 according to
+which co-favourite the database happened to list first. Co-favourites at one
+price are ordinary, and the ensemble arm is a mean of isotonic step functions
+so tied probabilities are real, not theoretical. k tied leaders therefore
+share the credit 1/k — the value an order-blind pick has in expectation —
+applied identically to the model, both favourite baselines and the stored
+probability, so no arm is advantaged. Untied races are unaffected (k = 1).
   fav_sp_hit          the SP favourite — a HINDSIGHT diagnostic only; SP is
                       the closing line and is for settlement/CLV
   h2h                 on races where the stored production probability
@@ -28,8 +39,10 @@ training view is usually a partial field, not a match race. A favourite is
 defined only when EVERY runner in the race has a usable price (> 1.0):
 argmin over a partial set is not the favourite.
 
-Fold results carry integer counts so pooling is exact (sum the counts, then
-divide) rather than a mean of fold rates.
+Fold results carry counts so pooling is exact (sum the counts, then divide)
+rather than a mean of fold rates. Race counters are integers; hit counters
+are exact sums of the per-race shares above and are fractional only when a
+race tied.
 
 DB-free: numpy and pandas only. `python race_metrics.py` runs the self-test.
 """
@@ -45,30 +58,71 @@ import pandas as pd
 
 MIN_RUNNERS = 4
 
-_COUNT_KEYS = (
-    "races_total", "races_used", "model_hits",
-    "fav_tt_races", "fav_tt_hits", "fav_sp_races", "fav_sp_hits",
-    "h2h_races", "h2h_model_hits", "h2h_stored_hits",
-    "h2h_fav_tt_races", "h2h_fav_tt_hits",
+# Race counters: whole races, always integers.
+_RACE_KEYS = (
+    "races_total", "races_used",
+    "fav_tt_races", "fav_sp_races",
+    "h2h_races", "h2h_fav_tt_races",
     "logloss_races",
 )
+# Hit counters: sums of per-race credit, fractional when a race tied.
+_HIT_KEYS = (
+    "model_hits", "fav_tt_hits", "fav_sp_hits",
+    "h2h_model_hits", "h2h_stored_hits", "h2h_fav_tt_hits",
+)
+_COUNT_KEYS = _RACE_KEYS + _HIT_KEYS
 
 
 def _empty_counts() -> Dict[str, Any]:
-    c: Dict[str, Any] = {k: 0 for k in _COUNT_KEYS}
+    c: Dict[str, Any] = {k: 0 for k in _RACE_KEYS}
+    c.update({k: 0.0 for k in _HIT_KEYS})
     c["logloss_sum"] = 0.0
     return c
 
 
+def _leader_share(values: np.ndarray, winner: int, largest: bool = True) -> float:
+    """The winner's share of an argmax (or argmin) pick: 1.0 outright, 1/k
+    when k rows tie for the lead, 0.0 otherwise.
+
+    This is what `int(np.argmax(v) == winner)` is worth once the arbitrary
+    row order is taken out of it: argmax breaks a tie by position, and
+    position here carries no information.
+    """
+    v = np.asarray(values, dtype=float)
+    if v.size == 0:
+        return 0.0
+    if not np.all(np.isfinite(v)):
+        # Unreachable for the model arm (predict_proba emits no NaN) and the
+        # favourite arms never get here (favourite_share returns None first).
+        # Keep argmax's exact behaviour rather than invent one for it.
+        return float(int((np.argmax(v) if largest else np.argmin(v)) == winner))
+    best = v.max() if largest else v.min()
+    leaders = np.flatnonzero(v == best)
+    return float(1.0 / leaders.size) if winner in leaders else 0.0
+
+
 def favourite_index(odds) -> Optional[int]:
     """Index of the shortest price, or None unless every runner has a usable
-    price (> 1.0). A favourite over part of a field is not a favourite."""
+    price (> 1.0). A favourite over part of a field is not a favourite.
+
+    With co-favourites this returns the first of them; it answers "does this
+    race have a favourite" (coverage). Scoring uses favourite_share, which
+    does not depend on which co-favourite comes first."""
     if odds is None:
         return None
     o = np.asarray(odds, dtype=float)
     if o.size == 0 or not np.all(np.isfinite(o)) or not np.all(o > 1.0):
         return None
     return int(np.argmin(o))
+
+
+def favourite_share(odds, winner: int) -> Optional[float]:
+    """The winner's share of the favourite's credit, or None when the race
+    has no favourite (the same rule as favourite_index). k co-favourites at
+    one price share the credit 1/k."""
+    if favourite_index(odds) is None:
+        return None
+    return _leader_share(np.asarray(odds, dtype=float), winner, largest=False)
 
 
 def _col(values, n: int) -> np.ndarray:
@@ -102,8 +156,8 @@ def race_counts(proba, y, race_keys, tip_time_odds=None, sp_odds=None,
         counts["races_used"] += 1
         w = int(winners[0])
         p = p_all[rows]
-        pick = int(np.argmax(p))
-        counts["model_hits"] += int(pick == w)
+        model_share = _leader_share(p, w)
+        counts["model_hits"] += model_share
 
         total = float(np.sum(np.clip(p, 0.0, None)))
         if total > 0:
@@ -111,23 +165,23 @@ def race_counts(proba, y, race_keys, tip_time_odds=None, sp_odds=None,
             counts["logloss_sum"] += -math.log(max(pw, 1e-12))
             counts["logloss_races"] += 1
 
-        f_tt = favourite_index(tt_all[rows])
-        if f_tt is not None:
+        tt_share = favourite_share(tt_all[rows], w)
+        if tt_share is not None:
             counts["fav_tt_races"] += 1
-            counts["fav_tt_hits"] += int(f_tt == w)
-        f_sp = favourite_index(sp_all[rows])
-        if f_sp is not None:
+            counts["fav_tt_hits"] += tt_share
+        sp_share = favourite_share(sp_all[rows], w)
+        if sp_share is not None:
             counts["fav_sp_races"] += 1
-            counts["fav_sp_hits"] += int(f_sp == w)
+            counts["fav_sp_hits"] += sp_share
 
         st = st_all[rows]
         if np.all(np.isfinite(st)) and np.all(st > 0):
             counts["h2h_races"] += 1
-            counts["h2h_model_hits"] += int(pick == w)
-            counts["h2h_stored_hits"] += int(int(np.argmax(st)) == w)
-            if f_tt is not None:
+            counts["h2h_model_hits"] += model_share
+            counts["h2h_stored_hits"] += _leader_share(st, w)
+            if tt_share is not None:
                 counts["h2h_fav_tt_races"] += 1
-                counts["h2h_fav_tt_hits"] += int(f_tt == w)
+                counts["h2h_fav_tt_hits"] += tt_share
     return counts
 
 
@@ -169,8 +223,12 @@ def pool(fold_metrics: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     total = _empty_counts()
     for m in fold_metrics:
         c = m.get("counts") or {}
-        for k in _COUNT_KEYS:
+        for k in _RACE_KEYS:
             total[k] += int(c.get(k, 0))
+        for k in _HIT_KEYS:
+            # float, not int: a tied race contributes a fraction, and int()
+            # here would silently floor every one of them away.
+            total[k] += float(c.get(k, 0.0))
         total["logloss_sum"] += float(c.get("logloss_sum", 0.0))
     return summarise(total)
 

@@ -107,22 +107,45 @@ def _streak(per_day: List[Dict[str, Any]]) -> int:
     return n
 
 
-def _days_criterion(per_day: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _days_criterion(per_day: List[Dict[str, Any]], restart_on_dirty: bool = True) -> Dict[str, Any]:
+    """The day-count bar. Two flags register two different bars, so this
+    takes which one to apply rather than applying the stricter to both.
+
+    STRIDE_SERVE_LIVE_FEATURES registers the restart (criterion #2: "any day
+    where the live path raised and fell back... restarts the 5-day count"),
+    so its bar is a trailing streak of clean days.
+
+    STRIDE_RENORMALISE_FIELD registers only "≥ 5 race days of shadow
+    comparison JSON" — no errored-day criterion and no restart rule. Until
+    2026-09-07 it shared the streak, an unregistered and stricter bar; under
+    the document's own amendment rule a bar that moves is a bar that voids
+    the window, and it moves in both directions. Its count is therefore the
+    number of clean days, with the streak and any dirty days still named in
+    the detail so nothing is hidden from the reviewer.
+    """
     streak = _streak(per_day)
+    n_clean = sum(1 for d in per_day if not d["dirty"])
     dirty = [d["date"] for d in per_day if d["dirty"]]
-    if streak >= MIN_CLEAN_DAYS:
+    counted = streak if restart_on_dirty else n_clean
+    if counted >= MIN_CLEAN_DAYS:
         status = PASS
-    elif per_day and per_day[-1]["dirty"]:
+    elif restart_on_dirty and per_day and per_day[-1]["dirty"]:
         status = FAIL   # the most recent day is dirty: the count stands at zero
     else:
         status = WAIT   # still accruing (a dirty day may have restarted the count)
+    if restart_on_dirty:
+        detail = (f"{streak} consecutive clean day(s) ending "
+                  f"{per_day[-1]['date'] if per_day else 'n/a'} (need {MIN_CLEAN_DAYS}); "
+                  f"{len(per_day)} day file(s) in store; dirty days: {dirty or 'none'}")
+    else:
+        detail = (f"{n_clean} clean day(s) of comparison JSON (need {MIN_CLEAN_DAYS}); "
+                  f"{len(per_day)} day file(s) in store; dirty days: {dirty or 'none'}; "
+                  f"trailing clean streak {streak} — the restart rule is registered "
+                  f"for STRIDE_SERVE_LIVE_FEATURES only, so it is reported, not enforced")
     return _c(
-        "clean_days",
-        status,
-        f"{streak} consecutive clean day(s) ending {per_day[-1]['date'] if per_day else 'n/a'} "
-        f"(need {MIN_CLEAN_DAYS}); {len(per_day)} day file(s) in store; "
-        f"dirty days: {dirty or 'none'}",
-        streak=streak, n_days=len(per_day), dirty_days=dirty,
+        "clean_days", status, detail,
+        streak=streak, n_clean_days=n_clean, n_days=len(per_day), dirty_days=dirty,
+        counted=counted, restart_on_dirty=restart_on_dirty,
     )
 
 
@@ -223,15 +246,33 @@ def review_serve_liveness(days: Dict[str, Any]) -> Dict[str, Any]:
     # #3 stability: per-day table plus the document's one quantitative
     # clause — no race an order of magnitude off the window. Trend and regime
     # shift are the reviewer's read (REVIEW), never auto-passed.
+    # "no single race whose deltas are an order of magnitude OFF the
+    # window's" — off is either direction. The document is explicit that
+    # smallness is the failure mode this flag has to watch for: "small
+    # deltas would mean the plumbing is inert and the shadow is measuring
+    # nothing... The criterion is stability + review, not smallness". A race
+    # ten times under the window median is as far off it as one ten times
+    # over, and it is the direction that means a race quietly served the
+    # legacy row. Until 2026-09-07 only the high side was flagged.
+    #
+    # The zero-median guard is gone with it. `max > 10 x median` needs no
+    # special case at median 0: it reads "any race that moved at all in a
+    # window that did not move", which is the rule, and an all-inert window
+    # (every race 0) still flags nothing because 0 > 0 is false. The guard
+    # turned the criterion OFF exactly when the window was degenerate, so a
+    # window of four zero-delta races and one 100pp race auto-passed.
     races = [r for d in clean for r in d["races"]]
     outliers: List[Dict[str, Any]] = []
     window_median = None
     if len(races) >= 3:
         per_race_max = np.asarray([r["max_abs_delta_pp"] for r in races], dtype=float)
         window_median = float(np.median(per_race_max))
-        if window_median > 0:
-            outliers = [r for r in races
-                        if r["max_abs_delta_pp"] > OUTLIER_FACTOR * window_median]
+        for r in races:
+            m = float(r["max_abs_delta_pp"])
+            if m > OUTLIER_FACTOR * window_median:
+                outliers.append({**r, "direction": "above"})
+            elif m * OUTLIER_FACTOR < window_median:
+                outliers.append({**r, "direction": "below"})
     largest = sorted(races, key=lambda r: -r["max_abs_delta_pp"])[:N_LARGEST_DELTA_RACES]
     day_table = [{k: d[k] for k in ("date", "n_races", "n_runners", "mean_delta_pp",
                                     "std_delta_pp", "max_abs_delta_pp", "tier_changes")}
@@ -240,14 +281,20 @@ def review_serve_liveness(days: Dict[str, Any]) -> Dict[str, Any]:
         st3, det3 = WAIT, "no clean day to summarise"
     elif outliers:
         st3 = FAIL
-        det3 = (f"{len(outliers)} race(s) with max |delta| > {OUTLIER_FACTOR:g}x the "
-                f"window median ({window_median:.2f} pp): "
+        n_above = sum(1 for o in outliers if o["direction"] == "above")
+        n_below = len(outliers) - n_above
+        det3 = (f"{len(outliers)} race(s) an order of magnitude off the window "
+                f"median ({window_median:.2f} pp): {n_above} above "
+                f"{OUTLIER_FACTOR:g}x, {n_below} below 1/{OUTLIER_FACTOR:g}x "
+                f"(a race that barely moved is inert plumbing, not stability): "
                 + ", ".join(f"{o['date']} {o['track']} R{o['race_number']} "
-                            f"{o['max_abs_delta_pp']} pp" for o in outliers[:5]))
+                            f"{o['max_abs_delta_pp']} pp ({o['direction']})"
+                            for o in outliers[:5]))
     else:
         st3 = REVIEW
-        det3 = (f"no order-of-magnitude race outlier (window median per-race max "
-                f"|delta| {window_median:.2f} pp)" if window_median is not None
+        det3 = (f"no race an order of magnitude off the window in either "
+                f"direction (window median per-race max |delta| "
+                f"{window_median:.2f} pp)" if window_median is not None
                 else "fewer than 3 races — outlier rule not applicable")
         det3 += "; trend / regime shift across the per-day table is the reviewer's call"
     criteria.append(_c("delta_stability", st3, det3, per_day=day_table,
@@ -332,7 +379,7 @@ def summarise_renorm_day(d: str, payload: Any) -> Dict[str, Any]:
 def review_renormalisation(days: Dict[str, Any], pooled: Any) -> Dict[str, Any]:
     per_day = [summarise_renorm_day(d, days[d]) for d in sorted(days)]
     clean = [d for d in per_day if not d["dirty"]]
-    criteria = [_days_criterion(per_day)]
+    criteria = [_days_criterion(per_day, restart_on_dirty=False)]
 
     # #2 pooled Brier and field sums. The pooled report is the registered
     # quantity ("pooled, not best-day"). Brier is a mean over rows, so the
