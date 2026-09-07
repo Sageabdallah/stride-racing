@@ -16,6 +16,17 @@
 #   Form's own API reference into the run log and exercises every candidate
 #   endpoint shape with the real key.
 #
+#   phase-e-probe (workflow_dispatch input): confirms the four Phase E
+#   endpoints (Conditions/Speedmaps/Ratings/Strike Rates) that pf_client.py
+#   has typed accessors for but that nothing has ever called live — only a
+#   monkeypatched unit test exercises them. Answers whether Starter actually
+#   serves all four, whether flucs is a usable pre-race series, whether
+#   Speedmaps/Ratings cover resulted meetings (backfill) or upcoming only
+#   (shadow accrual needed), real null-rates per field, and whether the
+#   entity_type enum genuinely splits jockey vs trainer. Saves every raw
+#   payload as a workflow artifact for review before any become committed
+#   golden fixtures.
+#
 # Cron is UTC. 17:15 UTC = 03:15 AEST; revisit in October when AEDT starts.
 
 name: puntingform-probe
@@ -29,6 +40,11 @@ on:
         description: "DM-H2: comma-separated PF meetingIds for the last10 as-of fetch (empty = original Phase A probe only)"
         required: false
         default: ""
+      run_phase_e_probe:
+        description: "Run the Phase E endpoint probe (Conditions/Speedmaps/Ratings/Strike Rates + flucs)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -98,3 +114,26 @@ jobs:
           name: pf-last10-asof-${{ github.run_number }}
           path: pf_last10_asof_artifacts/
           retention-days: 14
+
+  phase-e-probe:
+    if: github.event.inputs.run_phase_e_probe == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe Conditions/Speedmaps/Ratings/Strike Rates + flucs
+        env:
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
+        run: python3 scripts/puntingform_phase_e_probe.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pf-phase-e-probe-${{ github.run_number }}
+          path: |
+            server/python/providers/fixtures/*phase_e_probe*.json
+            server/python/providers/fixtures/pf_speedmaps_*_upcoming.json
+            server/python/providers/fixtures/pf_speedmaps_*_resulted.json
+            server/python/providers/fixtures/pf_ratings_*_upcoming.json
+            server/python/providers/fixtures/pf_ratings_*_resulted.json
+            server/python/providers/fixtures/pf_strikerate_entity*.json
+          retention-days: 30
+          if-no-files-found: warn
