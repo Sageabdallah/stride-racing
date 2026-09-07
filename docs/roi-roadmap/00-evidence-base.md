@@ -63,6 +63,25 @@ Settlement is modelled at SP, discarding early-price advantage. Best-tote/BOG pr
 - Tipster accuracy multipliers use `was_winner` only (`consensus_agent.py:106-138`): a favourite-tipper gets up-weighted despite negative ROI. Grade tips against tip-time odds → SP (tipster CLV), per tipster × track × distance band.
 - Independence flags are fabricated by position (`is_ind = i < n_independent`, `consensus_agent.py:1473`); `source_url` is always `None`; syndicated tips counted multiple times; no demotion protocol — underperformers stay forever. Add provenance, dedup, and a panel lifecycle.
 
+### B6. The intelligence override creates bets with no edge — the promotion path B2 didn't close *(added 2026-09-07, verified against `main` @ `51d2950`)*
+
+B2 closed crowd-promotion: a live path that turned NO_BET into BET with no measured edge. A second path does the same thing through a different door and was never scoped.
+
+`evaluate_bet_candidate` calls `_check_intelligence_override` at `:2469` and returns `True` at `:2470-2471` — **before every gate below it**. The override's conditions (`:2401-2449`) are rank-1, `intel_bonus ≥ 3.0` (`:2423`), `franking_score ≥ 55` (`:2431`), non-DECLINING trajectory (`:2436`). There is no edge term anywhere in it. What it skips:
+
+- `has_real_market` (`:2481`) — **an override BET can be returned for a runner with no real market quote at all.** Everything downstream that reasons about price (staking, EV, CLV, the ledger's `price_taken`) then starts from a quote that may not exist. This is the sharpest edge of the defect.
+- `edge <= 0` (`:2483`) — the positive-edge floor.
+- `odds > 15` (`:2486`) — `odds` is not even read before the override returns, so the ">$15 stays coverage-only" policy stated in the same function's own docstring does not bind it.
+- Every band gate (`:2489-2503`): edge ≥ 4 / 2.5 / 3, probability floors 30 / 15 / 10, and the low-confidence veto above $12.
+
+**This is the registered measurement band.** `12-preregistration.md` registers LIVE-GATE as "odds ≤ $15 cap; edge ≥ 4 / 2.5 / 3 …; probability floors 30 / 15 / 10; positive edge; real market quote required; low-confidence veto above $12" — that is exactly this function's rule list, and all seven rules sit below the override's exit. So the accrual window measures a band whose stated definition does not describe every bet inside it. (Two stale citations in that registration, recorded here rather than amended, because the document is append-only and editing it after outcomes are visible voids the window: the name `_bet_gate` matches no function in the tree, and `run_tips_pipeline.py:1812-1826` is now ledger-writing code. The rules it lists are `evaluate_bet_candidate`'s, at `:2481-2503`.)
+
+**The docstring's bar is not the code's bar.** `:2408` says `intel_bonus >= 3.0` is "only achievable with DEEP_FRANKED + peak prep". The bonus is additive, clamped to [-3.0, +4.0] (`:735`); the franking term alone is `min(2.0 + (ref_class_weight − 1.0) + 0.5·group_chain, 3.5)` (`:667-671`), so a high reference-class weight gets most of the way with no prep contribution, and `pagerank ≥ 0.8` (+0.5, `:680`) plus graph depth/independence (+0.5, `:684`) close it. The parenthetical describes an expected joint distribution, not a constraint the arithmetic enforces — as does "this gate is self-calibrating" in the same docstring, which is asserted and never measured.
+
+**Partial mitigation:** an override BET is not final. The crowd gate runs downstream (`apply_crowd_gate`, `:3439`, transition logged `:3446`) and can flip BET → NO_BET, and task 07 shipped gate-only crowd as default-on. That bounds exposure; it does not close the hole, because the crowd gate evaluates consensus, not expected value.
+
+**Fix, in order.** (1) Count it before changing it: the `[INTEL]` line at `:1049` and `selection_origin_reason` beginning "INTEL OVERRIDE" identify override-routed picks — measure how many live bets took this exit, and their realised ROI/CLV, before touching the logic. (2) Log the would-be EV for override bets in shadow, so the override earns its exemption on evidence rather than a docstring. (3) At minimum, move the override *below* `has_real_market` and `edge <= 0`, so intelligence can promote within the gate rather than around it — B2's own resolution shape. (4) Any EV-gate work (`STRIDE_EV_GATE_AT_PRICE`) must account for this path: a gate at `:2483` governs nothing that took the `:2470` exit.
+
 ---
 
 ## 4. Phase C — Model changes that actually raise strike rate
