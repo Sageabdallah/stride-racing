@@ -55,9 +55,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # (retrain_v2.py:347 batch_compute_form_features, run_tips_pipeline.py:2228
 # compute_race_form_features) — a top-of-file import scan misses it entirely,
 # which is how a first draft of this audit wrongly declared 69 features dead.
+# relative_market.py is the same lazy-import shape: retrain_v2.py:630 calls
+# add_relative_market_features and run_tips_pipeline.py:2983 calls
+# compute_field_relative_market, both inside functions. Without it the only
+# thing the audit could see of the Phase-5 market trio was the zero-fill in
+# each caller's except handler, so fair_implied_prob / odds_rank /
+# odds_rank_pct read LIVE_BOTH on the evidence of two fallbacks.
 TRAIN_FILES = ("retrain_v2.py", "refresh_training_view_v2.py",
-               "form_feature_builder.py")
+               "form_feature_builder.py", "relative_market.py")
 SERVE_FILES = ("run_tips_pipeline.py", "ml_model.py", "form_feature_builder.py",
+               "relative_market.py",
                # the shared serve builder lands via roi/03 / PR #11; absent on
                # this branch _read() yields "", so this entry is inert until
                # convergence and correct automatically afterwards
@@ -170,6 +177,50 @@ def _literal_collections(tree: ast.Module) -> Dict[str, List[str]]:
     return out
 
 
+def _declaration_derived(tree: ast.Module) -> frozenset:
+    """Module-level names that resolve back to a declaration list.
+
+    The exclusion below only recognised a bare `for col in FEATURE_COLUMNS`.
+    `COLS = FEATURE_COLUMNS` and `for c in FEATURE_COLUMNS + ["x"]` both walk
+    straight past it and credit every declared feature from one placeholder
+    loop, which is the exact evidence the exclusion exists to reject.
+    """
+    derived = set(_DECLARATION_NAMES)
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and _mentions(node.value, derived)):
+            derived.add(node.targets[0].id)
+    return frozenset(derived)
+
+
+def _mentions(node: ast.AST, names) -> bool:
+    """True when the expression reads any of `names`."""
+    return any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node))
+
+
+def _is_placeholder_value(node: ast.AST) -> bool:
+    """True for a value that fills a column rather than computing it: a
+    literal (`0.0`, `0`, `""`, None), a NaN/NA attribute (`np.nan`, `pd.NA`)
+    or `float("nan")`.
+
+    `for _c in ("fair_implied_prob", ...): out[_c] = 0.0` inside an except
+    handler is the fallback for the feature failing to compute — the same
+    kind of thing as the FEATURE_COLUMNS placeholder fill, and never
+    evidence that anything is live.
+    """
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.Attribute) and node.attr in ("nan", "NaN", "NA", "NaT"):
+        return True
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "float" and len(node.args) == 1
+            and isinstance(node.args[0], ast.Constant)
+            and str(node.args[0].value).strip().lower() == "nan"):
+        return True
+    return False
+
+
 def _loop_assignment_evidence(raw_src: str, fname: str) -> Dict[str, List[str]]:
     """{feature: [evidence]} for `for k in <literal collection>: X[k] = ...`.
 
@@ -185,14 +236,18 @@ def _loop_assignment_evidence(raw_src: str, fname: str) -> Dict[str, List[str]]:
     except SyntaxError:
         return {}
     consts = _literal_collections(tree)
+    declaration_names = _declaration_derived(tree)
     evidence: Dict[str, List[str]] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
             continue
         var = node.target.id
+        # Any iterable that reads a declaration list — directly, through an
+        # alias, or through a `+` — is a mask over the declaration, not
+        # liveness.
+        if _mentions(node.iter, declaration_names):
+            continue
         if isinstance(node.iter, ast.Name):
-            if node.iter.id in _DECLARATION_NAMES:
-                continue
             members = consts.get(node.iter.id)
             desc = node.iter.id
         else:
@@ -206,6 +261,12 @@ def _loop_assignment_evidence(raw_src: str, fname: str) -> Dict[str, List[str]]:
                 for t in sub.targets:
                     if (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Name)
                             and t.slice.id == var and isinstance(t.value, ast.Name)):
+                        # A constant fill is a placeholder; only a computed
+                        # value counts. One real assignment in the body is
+                        # enough, so a loop that defaults then computes still
+                        # counts.
+                        if _is_placeholder_value(sub.value):
+                            continue
                         target_name = t.value.id
         if target_name is None:
             continue
@@ -418,6 +479,7 @@ def _self_test() -> None:
 
     loop_src = (
         'FEATURE_COLUMNS = ["a", "loop_feat", "placeholder_only"]\n'
+        'ALIAS_COLS = FEATURE_COLUMNS\n'
         'SET_A = ("loop_feat", "other_feat")\n'
         'SET_B = SET_A + ("third_feat",)\n'
         'def build(runner):\n'
@@ -425,9 +487,17 @@ def _self_test() -> None:
         '    for k in SET_B:\n'
         '        feat[k] = runner.get(k)\n'
         '    for k in ["inline_feat"]:\n'
-        '        feat[k] = 0\n'
+        '        feat[k] = runner.get(k)\n'
+        '    for k in ["filled_only", "nan_filled_only"]:\n'
+        '        feat[k] = 0.0\n'
+        '    for k in ["nan_filled_only"]:\n'
+        '        feat[k] = np.nan\n'
         '    for col in FEATURE_COLUMNS:\n'
         '        feat[col] = None\n'
+        '    for col in ALIAS_COLS:\n'
+        '        feat[col] = runner.get(col)\n'
+        '    for col in FEATURE_COLUMNS + ["appended_feat"]:\n'
+        '        feat[col] = runner.get(col)\n'
         '    for c in [f for f in SET_A]:\n'
         '        feat[c] = 1\n'
         '    return feat\n')
@@ -435,6 +505,15 @@ def _self_test() -> None:
     assert set(ev) == {"loop_feat", "other_feat", "third_feat", "inline_feat"}, sorted(ev)
     assert "placeholder_only" not in ev, "iterating FEATURE_COLUMNS is a fill, not liveness"
     assert "for k in SET_B" in ev["third_feat"][0], ev["third_feat"]
+    # A loop that assigns a CONSTANT fills the column; it never shows one is
+    # live. retrain_v2's except handler does exactly this for the Phase-5
+    # market trio, and on that evidence alone the three read LIVE_BOTH.
+    assert "filled_only" not in ev, "a constant fill is a placeholder, not liveness"
+    assert "nan_filled_only" not in ev, "a NaN fill is a placeholder, not liveness"
+    # The declaration exclusion must survive an alias and a `+`, or one
+    # placeholder loop credits every declared feature.
+    assert "a" not in ev and "appended_feat" not in ev, \
+        "an alias of or a `+` over a declaration list is still a declaration mask"
 
     # the audit must reproduce the two proven findings on the real tree.
     # barrier_advantage stays unconditional: nothing plumbs it in any PR.

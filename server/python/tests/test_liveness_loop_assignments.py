@@ -26,11 +26,59 @@ def test_inline_literal_and_module_constant_loops_are_assignments():
         '    for k in MORE:\n'
         '        feat[k] = r.get(k)\n'
         '    for k in ["delta"]:\n'
-        '        feat[k] = 1\n'
+        '        feat[k] = r.get(k)\n'
     )
     ev = fla._loop_assignment_evidence(src, "x.py")
     assert set(ev) == {"alpha", "beta", "gamma", "delta"}
     assert ev["gamma"] == ["x.py:5: for k in MORE: feat[k] = ... (loop assignment)"]
+
+
+def test_constant_fills_are_placeholders_not_liveness():
+    """A loop that assigns a CONSTANT fills the column; it is not evidence
+    that anything computes it. retrain_v2's except handler does exactly this
+    for the Phase-5 market trio (`for _c in (...): out[_c] = 0.0`), and on
+    that evidence alone all three read LIVE_BOTH — a fallback standing in for
+    the feature."""
+    src = (
+        'def f(out, r):\n'
+        '    for c in ("zero_filled", "nan_filled", "none_filled", "str_filled"):\n'
+        '        out[c] = 0.0\n'
+        '    for c in ["nan_filled"]:\n'
+        '        out[c] = np.nan\n'
+        '    for c in ["none_filled"]:\n'
+        '        out[c] = None\n'
+        '    for c in ["str_filled"]:\n'
+        '        out[c] = float("nan")\n'
+    )
+    assert fla._loop_assignment_evidence(src, "x.py") == {}
+
+    # a loop that defaults AND computes still counts: one real assignment is enough
+    both = (
+        'def f(out, r):\n'
+        '    for c in ["computed"]:\n'
+        '        out[c] = 0.0\n'
+        '        out[c] = r.get(c)\n'
+    )
+    assert set(fla._loop_assignment_evidence(both, "x.py")) == {"computed"}
+
+
+def test_declaration_lists_cannot_be_laundered_through_an_alias_or_a_sum():
+    """The exclusion recognised only a bare `for col in FEATURE_COLUMNS`. An
+    alias or a `+` walked past it and credited every declared feature from one
+    placeholder loop — the exact evidence the exclusion exists to reject."""
+    src = (
+        'FEATURE_COLUMNS = ["a", "b"]\n'
+        'ALIAS = FEATURE_COLUMNS\n'
+        'ALIAS2 = ALIAS\n'
+        'def f(out, r):\n'
+        '    for c in ALIAS:\n'
+        '        out[c] = r.get(c)\n'
+        '    for c in ALIAS2:\n'
+        '        out[c] = r.get(c)\n'
+        '    for c in FEATURE_COLUMNS + ["appended"]:\n'
+        '        out[c] = r.get(c)\n'
+    )
+    assert fla._loop_assignment_evidence(src, "x.py") == {}
 
 
 def test_declaration_lists_never_count_as_liveness():
@@ -87,6 +135,30 @@ def test_real_tree_placeholder_fill_is_never_cited_as_evidence():
     for r in real["features"]:
         for e in r["train_evidence"] + r["serve_evidence"]:
             assert "FEATURE_COLUMNS" not in e, (r["feature"], e)
+
+
+def test_real_tree_market_trio_cites_the_module_that_computes_it():
+    """fair_implied_prob / odds_rank / odds_rank_pct read LIVE_BOTH on the
+    evidence of two fallbacks: retrain_v2's except-handler zero-fill at train,
+    and run_tips_pipeline's default `_rel_mkt` list at serve. relative_market
+    is imported lazily inside a function on both sides — the same shape as
+    form_feature_builder — so the audit never scanned the file that actually
+    computes them. The verdict was right; the evidence proved nothing."""
+    real = fla.audit_static()
+    by_name = {r["feature"]: r for r in real["features"]}
+    for f in ("fair_implied_prob", "odds_rank", "odds_rank_pct"):
+        row = by_name[f]
+        assert row["verdict"] == "LIVE_BOTH", row
+        # the computation, not relative_market's own `defaults = [{...0.0}]`
+        assert any("relative_market.py" in e and "defaults" not in e
+                   for e in row["train_evidence"]), row["train_evidence"]
+
+
+def test_real_tree_verdict_counts_are_unchanged_by_the_evidence_repair():
+    """Stricter evidence rules must not move the board: the five ZERO_AT_SERVE
+    findings are real and stay, and nothing silently drops to DEAD."""
+    counts = fla.audit_static()["verdict_counts"]
+    assert counts == {"LIVE_BOTH": 67, "ZERO_AT_SERVE": 5}, counts
 
 
 def test_real_tree_winner_pattern_features_surface_as_zero_at_serve():
