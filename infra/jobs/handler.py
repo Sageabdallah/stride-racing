@@ -1282,9 +1282,18 @@ def job_flag_state() -> dict:
     are live?" was answered by reading source — and read wrong twice. This
     executes instead, which is the same remedy verify-jobs was built on.
 
-    Writes nothing anywhere: no DB, no ledger, no snapshot, no racecard. It
-    reads source and os.environ. Safe on any day, including a race day, and
-    safe to run beside a real job.
+    Writes no domain data: no ledger row, no odds snapshot, no racecard, no
+    tips file, no prediction audit. It reads source and os.environ. What it
+    does write is what dispatch() writes for every job — one stride_run_state
+    row under this job's own name, and the model/panel staging every task
+    does on the way in. Neither touches anything a bet is computed from, so
+    it is safe on a race day and safe beside a real job; "writes nothing at
+    all" would be the overstatement.
+
+    Dispatched as `jobs=flag-state` on verify-jobs, which borrows the
+    stride-preflight task definition (there is no stride-flag-state family;
+    see the TD case there) and overrides STRIDE_JOB, exactly as the proof
+    jobs do.
 
     The full report goes to the evidence store, not the log: the container is
     gone minutes later and every log print here is tail-bounded, so a report

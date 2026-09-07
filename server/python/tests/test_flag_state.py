@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -314,6 +315,60 @@ def test_load_secrets_records_which_layer_won(handler, monkeypatch):
     # setdefault semantics preserved: the task value must still win.
     assert os.environ["STRIDE_LEDGER_WRITE"] == "false"
     assert os.environ["STRIDE_SERVE_NAN_CONTRACT"] == "true"
+
+
+def _dispatch_wiring():
+    """(jobs registered, families registered, lambda jobs, explicit TD map)."""
+    repo = Path(__file__).resolve().parents[3]
+    wf = (repo / ".github" / "workflows" / "verify-jobs.yml").read_text(encoding="utf-8")
+
+    td_map = dict(re.findall(r"^\s*([a-z0-9-]+)\)\s*TD=(\S+)\s*;;", wf, re.M))
+    td_map.pop("*", None)
+    lam = set(re.search(r'LAMBDA_JOBS:\s*"([^"]*)"', wf).group(1).split())
+
+    heavy = (repo / "infra" / "07_fargate_heavy.sh").read_text(encoding="utf-8")
+    block = heavy.split("for spec in", 1)[1].split("; do", 1)[0]
+    families = {f"stride-{m}" for m in re.findall(r'"([a-z0-9-]+)\s+\d+\s+\d+"', block)}
+    return families, lam, td_map
+
+
+def test_every_registered_job_can_actually_be_dispatched(handler):
+    """A job in JOBS that no task definition can run is a job that exists only
+    on paper.
+
+    verify-jobs falls through to `TD="stride-$JOB"`, so registering a handler
+    job LOOKS sufficient — routing to Fargate succeeds and the family is
+    resolved. It is not: run-task then fails on a family nobody registered,
+    and the failure reads as a broken job rather than a missing task
+    definition. I asserted "registration alone is enough" on the strength of
+    the routing and did not check the family existed; this is the check that
+    would have caught it.
+
+    infra/*.sh is off limits to this change, so the fix is a TD case in the
+    workflow, exactly as the four proof jobs already do.
+    """
+    families, lam, td_map = _dispatch_wiring()
+    undispatchable = []
+    for job in handler.JOBS:
+        if job in lam:
+            continue                      # runs as a Lambda, no task definition
+        family = td_map.get(job, f"stride-{job}")
+        if family not in families:
+            undispatchable.append(f"{job} -> {family} (no such family)")
+    assert not undispatchable, (
+        "these jobs resolve to a task-definition family that is never "
+        f"registered: {undispatchable}")
+
+
+def test_borrowed_task_definitions_get_their_job_name_by_override():
+    """Borrowing a family is only safe because containerOverrides replaces
+    STRIDE_JOB; the family bakes in its own name (07_fargate_heavy.sh:77), so
+    without the override flag-state would silently run preflight."""
+    repo = Path(__file__).resolve().parents[3]
+    wf = (repo / ".github" / "workflows" / "verify-jobs.yml").read_text(encoding="utf-8")
+    assert 'containerOverrides' in wf
+    assert re.search(r'containerOverrides.*STRIDE_JOB.*\$JOB', wf), \
+        "the dispatch must override STRIDE_JOB, or a borrowed family runs its own job"
 
 
 def test_flag_state_job_is_registered_and_writes_nothing(handler):
