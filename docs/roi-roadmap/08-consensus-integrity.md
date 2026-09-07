@@ -18,6 +18,24 @@ strike rate, and the market's contribution residualised out before blending.
   `source_url` is always `None` (:1483); `MIN_INDEPENDENT_SOURCES_PER_RACE = 3` is
   defined and never enforced (:76). Syndicated tips (same tip republished) count as
   multiple "independent" mentions.
+  **Correction (verified against code, 2026-09-07):** the mentions pipeline is two
+  separate code paths, not one, and the two claims above hold differently in each:
+  - Panel-sourced mentions (`consensus_agent.py:~1620-1662`) carry a real
+    `source_url` (`"source_url": url`, :1636/:1651) and hardcode
+    `"is_independent": True` (:1640/:1659) for *every* panel tipster
+    unconditionally — a different, code-side fabrication than the one cited
+    below, not fixed by touching `is_ind`.
+  - Claude-research-sourced mentions (`:~1710-1729`) are where `source_url` is
+    genuinely always `None` (:1723/:1737) and where `is_ind = i < n_independent`
+    (now :1713, cited line drifted) applies — `n_independent` here is the LLM's
+    own self-reported split.
+  So "source_url is always None" is true only for the research half of mentions,
+  not as a blanket statement, and step 2 below (provenance & independence
+  enforcement) must cover the panel branch's unconditional `True` in addition
+  to the research branch's positional split — fixing only the cited line
+  leaves the panel-source problem untouched.
+  `MIN_INDEPENDENT_SOURCES_PER_RACE = 3` (now :81) is confirmed still the only
+  reference to that name in the file — still unenforced.
 - Graded on strike, not ROI: `accuracy_multiplier` uses `was_winner`
   (`consensus_agent.py:106-114`, `:130-138`). A favourite-tipper has high strike and
   negative ROI — the feedback loop actively up-weights price-insensitive tippers.
@@ -45,7 +63,11 @@ odds-free prompts (A/B measured); residualisation of crowd vs market before the 
    `100 × Σ(weight_i × relevance_i) / Σ(weight_i)` over extracted mentions, where
    weights come from the accuracy system and relevance from the LLM's structured
    fields. The LLM still extracts mentions; it no longer does arithmetic. Store
-   numerator/denominator per race for audit.
+   numerator/denominator per race for audit. (Note, verified 2026-09-07: a
+   code-computed fallback already exists at `consensus_agent.py:1786-1788` —
+   `panel_count / tipsters_polled * 100` — but it only fires when the LLM's
+   own self-reported `crowd_score` is exactly 0. In the common case the LLM's
+   number is what's used today; that's the value this step replaces.)
 2. **Provenance & dedup.** Require `source_url` from extraction (drop mentions
    without one); normalise (strip tracking params); dedup near-identical tip text
    across domains (syndication) — one vote per unique (tipster, horse) pair.
@@ -70,17 +92,23 @@ odds-free prompts (A/B measured); residualisation of crowd vs market before the 
 
 - [ ] Crowd score reproducible from stored components (recompute one race day from
       DB rows → identical score, no LLM call).
-- [ ] Mentions table shows ≥95% non-null `source_url`; syndication dedup demonstrably
-      collapses a planted duplicate.
+- [ ] Mentions table shows ≥95% non-null `source_url`. Panel-sourced mentions already
+      clear this today (verified 2026-09-07); the gap to close is Claude-research-sourced
+      mentions, which are currently 100% null. Syndication dedup demonstrably collapses a
+      planted duplicate.
 - [ ] Accuracy multipliers reflect CLV grading; a synthetic favourite-only tipster's
       multiplier decreases over 20 settled losing-CLV tips (unit test).
 - [ ] A/B shadow report attached; promotion decision recorded.
 
 ## Rollout & flags
 
-- Flags: `STRIDE_CROWD_SCORE_V2=true` (deterministic score), `STRIDE_CONSENSUS_NO_ODDS`
-  (variant B). Both default off → A/B → promote per step 5.
-- Rollback: flags off restores LLM-computed score path (kept one release).
+- Flags: `STRIDE_CROWD_SCORE_V2` (deterministic score), `STRIDE_CONSENSUS_NO_ODDS`
+  (variant B). **Not implemented yet** — verified by a repo-wide search
+  (2026-09-07): neither name appears anywhere in the codebase, tests, or
+  workflows. This task is NOT_STARTED per the roadmap tracker; these are the
+  flag names to create in steps 1 and 5, each defaulting off, not flags that
+  exist today. Setting either now has no effect — nothing reads them.
+- Rollback (once built): flags off restores the current LLM-computed score path.
 
 ## Guardrails
 

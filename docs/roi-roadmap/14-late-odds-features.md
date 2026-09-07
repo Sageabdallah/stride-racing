@@ -4,10 +4,12 @@
 
 ## Goal
 
-Convert the ~13 market-movement features — currently constant-zero in training and
-split-brained at serve — into real, train-time-computed features from the captured
-odds series, including the T−5min smart-money window the literature (and the repo's
-own research, ranked #1) identifies as the strongest single feature addition.
+Convert the ~13 market-movement features — currently constant-zero in training
+(and, as of task 03, *consistently* zero at serve rather than split-brained — see
+the correction in "Why" below) — into real, train-time-computed features from the
+captured odds series, including the T−5min smart-money window the literature (and
+the repo's own research, ranked #1) identifies as the strongest single feature
+addition.
 
 ## Why (evidence)
 
@@ -18,6 +20,16 @@ own research, ranked #1) identifies as the strongest single feature addition.
   in the contract (`retrain_v2.py:183-188,206-213`) but never computed in training
   → zero-filled (`retrain_v2.py:680-682`). At serve, `mc_api.py` populates some from
   real movement while `run_tips_pipeline.py` serves 0 (see [03](03-serve-time-probability-fixes.md)).
+  **Correction (verified against code, 2026-09-07): the serve-time split-brain
+  described in this bullet is resolved, not open.** Task 03 (✅ shipped) put both
+  inference paths behind one shared builder, `serve_features.py:build_feature_row`
+  — `run_tips_pipeline.py` calls it directly (`run_tips_pipeline.py:2989`) and
+  `mc_api.py` calls it too (`mc_api.py:6119-6122`) — gated by one flag,
+  `STRIDE_MOVEMENT_FEATURES_LIVE` (default off, both paths serve 0 identically;
+  parity proven by `test_feature_parity.py::test_movement_columns_live_opt_in`).
+  The goal line above ("currently ... split-brained at serve") is therefore stale;
+  the real remaining gap is train-time computation only (steps 1-4 below), not a
+  serve-side inconsistency to fix.
 - The existing steam/drift signal measures overnight→8am only
   (`odds_movement.py:410-425`) — mostly opening-market noise; the validated window
   is the final 30 min (`docs/12` §5.5; `market_velocity.py:261` `final_30min_move`
@@ -55,9 +67,18 @@ feature-importance/ablation under [12](12-retrain-rebaseline.md)'s honest CV.
    v3 (no movement), v3+overnight movement, v3+overnight+late. Metrics: per-race
    hit rate, H2H, Brier — per [12](12-retrain-rebaseline.md)'s promotion criterion.
    Ship only arms that win.
-5. **Serve unification.** Both inference paths call `movement_features.py` (extends
-   [03](03-serve-time-probability-fixes.md)'s single builder); delete the inline mc_api
-   population (`mc_api.py:2046-2055`, `:5960-5969`, `:1408-1416`).
+5. **Serve unification (scope corrected 2026-09-07 — largely already done by task 03).**
+   Both inference paths already call one shared builder (`serve_features.py:build_feature_row`,
+   wired at `run_tips_pipeline.py:2989` and `mc_api.py:6119-6122`); this is not new work.
+   What remains: point that builder at real values from `movement_features.py` once step 1
+   exists (currently it only zero-fills or passes through a caller-supplied `movement` dict).
+   The three inline population blocks in `mc_api.py` (currently ~`:1543-1548`, `:2181-2186`,
+   `:6096-6117` — the doc's previous citations, `:2046-2055`/`:5960-5969`/`:1408-1416`, no
+   longer point at movement code; grep `_movement_features_live` to relocate) are already
+   dead in effect — each is gated by the same `STRIDE_MOVEMENT_FEATURES_LIVE` flag, and the
+   shared builder's output overwrites them when the flag is on (`mc_api.py:6117-6118`,
+   "Extracted values already in `features` win over raw runner keys"). Deleting them is
+   optional cleanup with no behavioural change, not a fix for a live inconsistency.
 
 ## Acceptance criteria
 

@@ -58,8 +58,13 @@ fourth ensemble voter; same-race H2H promotion criterion.
 
 ## Rollout & flags
 
-- Flags: `STRIDE_SOFTMAX_PICK`, `STRIDE_LISTWISE_VOTER` (both default off until
-  criteria met). Rollback: flags off.
+- Flags: `STRIDE_SOFTMAX_PICK`, `STRIDE_LISTWISE_VOTER`. **Not implemented
+  yet** — verified by a repo-wide search (2026-09-07): neither name appears
+  anywhere in the codebase, tests, or workflows. This task is NOT_STARTED
+  per the roadmap tracker; these are the flag names to create when steps 1
+  and 2 are built, each defaulting off, not flags that exist today. Setting
+  either now has no effect — nothing reads them.
+- Rollback (once built): flags off.
 
 ## Guardrails
 
