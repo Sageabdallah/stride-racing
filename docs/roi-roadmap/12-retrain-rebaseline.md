@@ -43,12 +43,43 @@ a contradiction: **15** is the original finding, still quoted by
 `serve_features.py:29`/`:392`, `DEPLOY_RUNBOOK.md:92` and the stale
 `docs/research/feature_liveness_report.json` (whose `static.verdict_counts`
 still reads `LIVE_BOTH 54 / ZERO_AT_SERVE 15 / DEAD_BOTH_SIDES 41 /
-DEAD_AT_TRAIN 3`); **5** is the tracker's 2026-09-05 line, recorded before
-`ground_suitability` was resolved; the **live audit** is the only authority.
-The stale JSON does not affect the gate — the preflight recomputes the board
-every run — but it is exactly the kind of artifact that gets quoted into a
-promotion decision, so regenerate or archive it. That regeneration needs the
-training environment (numpy), not a docs pass.
+DEAD_AT_TRAIN 3`); **5** is the tracker's 2026-09-05 line. The live audit is
+the authority for *the gate* — but, per the correction immediately below, not
+for what production actually serves. The stale JSON does not affect the gate
+(the preflight recomputes the board every run) but it is exactly the kind of
+artifact that gets quoted into a promotion decision, so regenerate or archive
+it. That regeneration needs the training environment (numpy), not a docs pass.
+
+**Correction 2026-09-07 — the liveness audit is flag-blind, so
+`ZERO_AT_SERVE = 0` does not mean "production serves real values".**
+An earlier version of this section called the live audit "the only
+authority" and attributed the 15 → 4 drop to `ground_suitability` being
+resolved. Both were wrong, and the reason matters more than the numbers:
+`feature_liveness_audit.py` contains **zero** references to any flag, env
+var or `_enabled()` call (grep count 0), so it cannot express "assigned only
+behind a default-off flag". The plumbed serve block is gated —
+`serve_features.py:399` is `if serve_live_features_enabled() or force_live:`.
+So a column plumbed behind `STRIDE_SERVE_LIVE_FEATURES` (default OFF) scores
+`LIVE_BOTH` while production serves it as a constant, and most of the 15 → 4
+drop is task 03 adding flag-gated plumbing that the tool counted as
+assignment — not features starting to serve real values.
+
+Consequences, in order of who gets hurt first:
+
+- **`gate_liveness_static` can go GREEN while production serves constants.**
+  The gate's `ZERO_AT_SERVE = 0` reads as "assignment code exists
+  somewhere", not "the serve path is honest". That is a cheap proxy sitting
+  in front of the expensive fact, which is the substitution this repo has
+  already been bitten by three times in one pass (CLAUDE.md, unattended-run
+  rules). Do not let it clear task 12 on its own.
+- **Fix the tool before using it as evidence for anything.** Marking
+  flag-conditional assignment with its own verdict (or an annotation on the
+  evidence line) is small, and every feature-wiring decision below depends
+  on honest output from it.
+- **The operationally meaningful count** is "constant at serve with the
+  flags as production actually runs them" — obtainable only from the flag
+  state plus a flag-aware audit, never from the current board alone. Until
+  both exist, quote no single number.
 
 ## Why (evidence)
 
