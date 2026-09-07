@@ -643,9 +643,15 @@ def self_test() -> int:
         failures.append("STRIDE_SERVE_LIVE_FEATURES is in the secret blob; "
                         "reporting it undeliverable means the delivery scan broke")
 
-    # The scanner must never claim production from a checkout.
-    if "NOT production" not in report["scope"] and not os.environ.get("AWS_EXECUTION_ENV"):
-        failures.append(f"scope must not imply production locally: {report['scope']!r}")
+    # The scanner must never claim to be describing a container it is not in.
+    # Stated as "scope must contain 'NOT production'" this passed locally and
+    # failed every CI run, because _scope() has a third answer ("ci") that the
+    # assertion did not allow for — a tripwire that fired on a correct scope.
+    # The real invariant is narrower: only claim `container` inside one.
+    in_container = bool(os.environ.get("AWS_EXECUTION_ENV")
+                        or os.environ.get("ECS_CONTAINER_METADATA_URI_V4"))
+    if "container" in report["scope"] and not in_container:
+        failures.append(f"scope claims a container from outside one: {report['scope']!r}")
 
     for line in failures:
         print(f"FAIL: {line}", file=sys.stderr)

@@ -224,6 +224,24 @@ def test_scope_never_claims_production_from_a_checkout(monkeypatch):
     assert "tips-pipeline" in fs.build_report()["scope"]
 
 
+@pytest.mark.parametrize("env,expect", [
+    ({}, "NOT production"),
+    ({"CI": "true"}, "ci"),
+    ({"AWS_EXECUTION_ENV": "AWS_ECS_FARGATE", "STRIDE_JOB": "flag-state"}, "container"),
+])
+def test_self_test_passes_in_every_environment_scope_can_report(monkeypatch, env, expect):
+    """The first version of the scope tripwire allowed for two environments
+    while _scope() returns three, so it failed every CI run on a scope that
+    was correct. Running the self-test under each answer _scope() can give is
+    the check that would have caught it -- locally, where it was written."""
+    for key in ("CI", "AWS_EXECUTION_ENV", "ECS_CONTAINER_METADATA_URI_V4", "STRIDE_JOB"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert expect in fs.build_report()["scope"]
+    assert fs.self_test() == 0, f"self-test must pass under scope={expect!r}"
+
+
 def test_secret_values_of_non_stride_keys_are_never_returned():
     """The same blob holds DATABASE_URL and four API keys. A diagnostic that
     dumps its environment is a credential leak, not a diagnostic."""
