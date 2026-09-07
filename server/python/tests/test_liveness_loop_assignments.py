@@ -154,11 +154,46 @@ def test_real_tree_market_trio_cites_the_module_that_computes_it():
                    for e in row["train_evidence"]), row["train_evidence"]
 
 
-def test_real_tree_verdict_counts_are_unchanged_by_the_evidence_repair():
-    """Stricter evidence rules must not move the board: the five ZERO_AT_SERVE
-    findings are real and stay, and nothing silently drops to DEAD."""
+def test_real_tree_verdict_counts_are_the_expected_board():
+    """The board, pinned so it cannot drift silently in either direction.
+    68/4 since mc_api.py joined SERVE_FILES (2026-09-07); before that the
+    stricter evidence rules held it at 67/5, and neither change may move a
+    column to DEAD unnoticed."""
     counts = fla.audit_static()["verdict_counts"]
-    assert counts == {"LIVE_BOTH": 67, "ZERO_AT_SERVE": 5}, counts
+    assert counts == {"LIVE_BOTH": 68, "ZERO_AT_SERVE": 4}, counts
+
+
+def test_ground_suitability_is_served_by_mc_api_not_the_shared_builder():
+    """Two serve paths reach RacingMLModel and the audit scanned only one, so
+    ground_suitability read "trained but never served" — a RED gate-5 row for
+    a column mc_api computes on a live inference path.
+
+    Both halves are pinned here because the second is what makes the first
+    safe: serve_features omits it DELIBERATELY (LIVE_FEATURES is 14, not 15)
+    since its artifact importance is 0.0000 — "dead weight both ways",
+    docs/research/FEATURE_PROVENANCE.md:39 — so the builder that skips it
+    changes no published probability. If someone plumbs it into the shared
+    builder, or mc_api stops assigning it, this test says which happened."""
+    by_name = {r["feature"]: r for r in fla.audit_static()["features"]}
+    row = by_name["ground_suitability"]
+    assert row["verdict"] == "LIVE_BOTH", row
+    assert any("mc_api.py" in e for e in row["serve_evidence"]), row["serve_evidence"]
+
+    shared = (SERVER_PYTHON / "serve_features.py").read_text(encoding="utf-8")
+    assert "ground_suitability" not in shared, \
+        "the shared builder now plumbs it — update FEATURE_PROVENANCE and this test"
+    # Unconditional on purpose. FEATURE_PROVENANCE.md is tracked in git, so it
+    # is present in every checkout including CI, and an `if exists()` guard
+    # here could only ever do one thing: silently skip the check when the file
+    # moved — which is precisely when the 0.0000 figure stops being verifiable.
+    # That figure is the whole justification for calling this column served, so
+    # losing it must fail loudly, not quietly pass.
+    provenance = SERVER_PYTHON.parents[1] / "docs" / "research" / "FEATURE_PROVENANCE.md"
+    assert provenance.exists(), \
+        f"{provenance} is gone — it carries the 0.0000 importance this verdict rests on"
+    line = [l for l in provenance.read_text(encoding="utf-8").splitlines()
+            if l.startswith("| ground_suitability ")]
+    assert line and "0.0000" in line[0], line
 
 
 def test_real_tree_winner_pattern_features_surface_as_zero_at_serve():
