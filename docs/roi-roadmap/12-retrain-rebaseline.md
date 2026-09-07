@@ -9,6 +9,47 @@ with fold hygiene that makes reported metrics honest, per-race hit-rate as a
 first-class metric, and a learned (persisted) ensemble combination. Re-publish
 every headline number against the favourite baseline.
 
+## Blocked on two preflight gates (recorded 2026-09-07) — neither is scheduled
+
+`retrain_preflight.py` is RED on two **independent** gates. Both must clear
+before a v3 candidate can be trained, and neither is covered by any existing
+roadmap task, so this section is the schedule until they get one.
+
+1. **`liveness:serve` — the winner-pattern columns.** The gate requires
+   `ZERO_AT_SERVE = 0` (`retrain_preflight.py:142`, computed live by
+   `feature_liveness_audit.audit_static` at `:136` — it reads source, never
+   an artifact). The columns still failing it are the winner-pattern
+   features (`prior_pb_close_underreaction`, `cohort_fast_close_prior`,
+   `pos400_win_prior`, `jockey_wet_residual`). They live in
+   `winner_pattern_features.py`, `retrain_v2.py`, `ml_model.py` and
+   `nan_contract.py`, and appear **nowhere in `serve_features.py`** — so they
+   sit outside both `SECTIONAL_LIVE_FEATURES` and `LIVE_FEATURES` and are
+   **not** reachable by `STRIDE_SERVE_LIVE_FEATURES`. Flipping that flag
+   leaves this gate RED. There are exactly two ways out: plumb these columns
+   through the serve path, or prune them from the contract. Pick one
+   deliberately — do not assume the sectional-liveness work covers it.
+2. **`asof-td-profiles`.** A separate gate (`retrain_preflight.py:205`)
+   requiring `server/python/intelligence/track_distance_profiles_asof.json`
+   to exist, parse, and hold as-of buckets, so `retrain_v2` cannot silently
+   fall back. That path is gitignored generated output (`.gitignore:46`,
+   produced by `track_profiler.py`), so it is absent from the repo by design
+   and its real state depends on the training box. Check it there; do not
+   infer it from a clean checkout. (The gate is GREEN-not-applicable only if
+   no `td_*` features are in the contract — three are, so it applies.)
+
+**Board vintages — reconcile before quoting any ZERO_AT_SERVE number.** Three
+different counts are in circulation and they are three dates of one board, not
+a contradiction: **15** is the original finding, still quoted by
+`serve_features.py:29`/`:392`, `DEPLOY_RUNBOOK.md:92` and the stale
+`docs/research/feature_liveness_report.json` (whose `static.verdict_counts`
+still reads `LIVE_BOTH 54 / ZERO_AT_SERVE 15 / DEAD_BOTH_SIDES 41 /
+DEAD_AT_TRAIN 3`); **5** is the tracker's 2026-09-05 line, recorded before
+`ground_suitability` was resolved; the **live audit** is the only authority.
+The stale JSON does not affect the gate — the preflight recomputes the board
+every run — but it is exactly the kind of artifact that gets quoted into a
+promotion decision, so regenerate or archive it. That regeneration needs the
+training environment (numpy), not a docs pass.
+
 ## Why (evidence)
 
 - **SP→serve skew:** training maps `sp_odds→market_odds` (`retrain_v2.py:142-144`,
