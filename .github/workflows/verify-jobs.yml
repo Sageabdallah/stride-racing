@@ -16,6 +16,12 @@
 # that day upserts over a few hours later. `llm_provider` pins the LLM for one
 # dispatch, and `llm-proof` is the two-pick check to run before a preview whose
 # insights are the point.
+#
+# `jobs=flag-state` reports what every STRIDE_* flag is resolved to IN THE
+# CONTAINER, and which flags have no way to be set at all. It reads source and
+# os.environ and writes nothing, so unlike everything above it is safe beside a
+# real job on a race day. Not in the default set: it answers a question you ask,
+# not one worth asking on every dispatch.
 name: verify-jobs
 
 on:

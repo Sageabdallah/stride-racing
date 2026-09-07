@@ -13,6 +13,8 @@ os.environ.
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -22,6 +24,37 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import flag_state as fs  # noqa: E402
+
+HANDLER_PATH = (Path(__file__).resolve().parents[3] / "infra" / "jobs" / "handler.py")
+
+
+class _StubBoto3:
+    """Offline like the rest of the suite; every boto3 call in the handler is
+    inside a function body, so importing it only needs the name to exist."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"boto3.{name} must not be called in this test")
+
+
+class _Completedish:
+    """Enough of subprocess.CompletedProcess for the job under test."""
+
+    def __init__(self, stdout: str, stderr: str = "", returncode: int = 0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+def _proc(stdout: str, stderr: str = "", returncode: int = 0):
+    return lambda *a, **k: _Completedish(stdout, stderr, returncode)
+
+
+@pytest.fixture(scope="module")
+def handler():
+    sys.modules.setdefault("boto3", _StubBoto3())
+    spec = importlib.util.spec_from_file_location("stride_handler_flagstate", HANDLER_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["stride_handler_flagstate"] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # --------------------------------------------------------------------------
@@ -225,3 +258,121 @@ def test_json_and_table_render_without_error(capsys):
 
 def test_self_test_passes():
     assert fs.self_test() == 0
+
+
+# --------------------------------------------------------------------------
+# Exact provenance, and the cloud job that supplies it
+# --------------------------------------------------------------------------
+
+def test_recorded_origin_beats_value_comparison(monkeypatch):
+    """The merge record turns "ambiguous" into a fact. Comparing values can
+    only ever say the two layers agree; only the merger knows who won."""
+    monkeypatch.setenv("STRIDE_LEDGER_WRITE", "true")
+    monkeypatch.setenv("STRIDE_SERVE_NAN_CONTRACT", "true")
+    monkeypatch.setenv(fs.ORIGIN_ENV, json.dumps({
+        "STRIDE_LEDGER_WRITE": "secret",
+        "STRIDE_SERVE_NAN_CONTRACT": "task-env",
+    }))
+    rep = fs.build_report(secret_origin=fs.secret_origin_from_env())
+    assert rep["origin_recorded"] is True
+    assert rep["flags"]["STRIDE_LEDGER_WRITE"]["provenance"] == "secret"
+    assert rep["flags"]["STRIDE_SERVE_NAN_CONTRACT"]["provenance"] \
+        == "task-env overrode secret"
+
+
+def test_origin_env_is_not_itself_a_stride_flag():
+    """Naming the channel STRIDE_* would make the diagnostic report itself as
+    an undeliverable flag on every run."""
+    assert not fs.ORIGIN_ENV.startswith("STRIDE_")
+    assert fs.secret_origin_from_env.__doc__
+
+
+@pytest.mark.parametrize("raw", ["", "not json", '["a"]', "null"])
+def test_malformed_origin_degrades_to_ambiguous(monkeypatch, raw):
+    monkeypatch.setenv(fs.ORIGIN_ENV, raw)
+    assert fs.secret_origin_from_env() is None
+
+
+def test_load_secrets_records_which_layer_won(handler, monkeypatch):
+    """_load_secrets is the only moment the two layers are distinguishable."""
+    blob = {"STRIDE_LEDGER_WRITE": "true", "STRIDE_SERVE_NAN_CONTRACT": "true",
+            "DATABASE_URL": "postgres://u:p@h/db"}
+
+    class _SM:
+        def get_secret_value(self, SecretId):  # noqa: N803 - boto3 signature
+            return {"SecretString": json.dumps(blob)}
+
+    monkeypatch.setattr(handler, "boto3",
+                        type("B", (), {"client": staticmethod(lambda *a, **k: _SM())}))
+    monkeypatch.setenv("STRIDE_LEDGER_WRITE", "false")   # already on the task
+    monkeypatch.delenv("STRIDE_SERVE_NAN_CONTRACT", raising=False)
+    handler._SECRET_ORIGIN.clear()
+    handler._load_secrets()
+
+    assert handler._SECRET_ORIGIN["STRIDE_LEDGER_WRITE"] == "task-env"
+    assert handler._SECRET_ORIGIN["STRIDE_SERVE_NAN_CONTRACT"] == "secret"
+    # setdefault semantics preserved: the task value must still win.
+    assert os.environ["STRIDE_LEDGER_WRITE"] == "false"
+    assert os.environ["STRIDE_SERVE_NAN_CONTRACT"] == "true"
+
+
+def test_flag_state_job_is_registered_and_writes_nothing(handler):
+    assert handler.JOBS["flag-state"] is handler.job_flag_state
+    src = HANDLER_PATH.read_text(encoding="utf-8")
+    body = src.split("def job_flag_state(")[1].split("\ndef ")[0]
+    for forbidden in ("_sync_up(", "_put_state(", "psycopg2", "store_selections"):
+        assert forbidden not in body, f"flag-state must not {forbidden}"
+
+
+def test_flag_state_job_refuses_an_empty_scan(handler, monkeypatch):
+    """The silent no-op class the repo keeps rediscovering: a scan that finds
+    nothing exits 0 and reads as a clean bill of health."""
+    monkeypatch.setattr(handler, "_run", _proc(json.dumps(
+        {"counts": {"with_read_sites": 0}, "flags": {}})))
+    monkeypatch.setattr(handler, "_today", lambda: "2026-09-07")
+    with pytest.raises(RuntimeError, match="broken scan"):
+        handler.job_flag_state()
+
+
+def test_flag_state_job_refuses_unparseable_output(handler, monkeypatch):
+    monkeypatch.setattr(handler, "_run", _proc("not json at all"))
+    monkeypatch.setattr(handler, "_today", lambda: "2026-09-07")
+    with pytest.raises(RuntimeError, match="did not emit JSON"):
+        handler.job_flag_state()
+
+
+def test_flag_state_job_fails_on_a_nonzero_exit(handler, monkeypatch):
+    monkeypatch.setattr(handler, "_run", _proc("{}", returncode=2))
+    monkeypatch.setattr(handler, "_today", lambda: "2026-09-07")
+    with pytest.raises(RuntimeError, match="exited 2"):
+        handler.job_flag_state()
+
+
+def test_flag_state_job_passes_only_stride_origins_downstream(handler, monkeypatch):
+    """The origin map is handed to a subprocess; it must carry flag names and
+    the layer, never a secret value, and never a non-STRIDE key."""
+    seen = {}
+
+    def _fake_run(script, *args, **kw):
+        seen["script"] = script
+        seen["args"] = args
+        seen["origin"] = os.environ.get("FLAG_STATE_SECRET_ORIGIN")
+        return _Completedish(json.dumps(
+            {"counts": {"with_read_sites": 3, "names_seen": 3},
+             "flags": {"STRIDE_LEDGER_WRITE": {"resolved": "true"}},
+             "no_delivery_path": [], "scope": "container"}))
+
+    monkeypatch.setattr(handler, "_run", _fake_run)
+    monkeypatch.setattr(handler, "_today", lambda: "2026-09-07")
+    handler._SECRET_ORIGIN.clear()
+    handler._SECRET_ORIGIN.update({"STRIDE_LEDGER_WRITE": "secret",
+                                   "DATABASE_URL": "secret"})
+    out = handler.job_flag_state()
+
+    assert seen["script"] == "flag_state.py"
+    assert "--json" in seen["args"] and "--evidence" in seen["args"]
+    assert "flag_state_2026-09-07.json" in seen["args"]
+    passed = json.loads(seen["origin"])
+    assert passed == {"STRIDE_LEDGER_WRITE": "secret"}, "non-STRIDE key leaked downstream"
+    assert out["evidence"] == "flag_state_2026-09-07.json"
+    assert out["flags_on"] == 1

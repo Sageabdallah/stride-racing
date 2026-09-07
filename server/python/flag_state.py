@@ -425,7 +425,33 @@ def _scope() -> str:
     return "local checkout — NOT production"
 
 
-def build_report(secret_values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+ORIGIN_ENV = "FLAG_STATE_SECRET_ORIGIN"
+
+
+def secret_origin_from_env() -> Optional[Dict[str, str]]:
+    """Exact provenance, when the process that merged the secret recorded it.
+
+    ``handler._load_secrets`` merges with ``setdefault``, so after the merge
+    the two layers are indistinguishable — comparing values only tells you
+    they agree, not who supplied it. The merger is the one place that knows,
+    so it records key -> "secret" | "task-env" and passes it down. Deliberately
+    not a STRIDE_ name: this is plumbing for the report, not a flag, and
+    naming it STRIDE_* would make the diagnostic list itself.
+    """
+    raw = os.environ.get(ORIGIN_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(k): str(v) for k, v in parsed.items() if str(k).startswith(PREFIX)}
+
+
+def build_report(secret_values: Optional[Dict[str, str]] = None,
+                 secret_origin: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     readers = scan_readers()
     mentioned = mentioned_names()
     in_secret = secret_keys()
@@ -447,6 +473,12 @@ def build_report(secret_values: Optional[Dict[str, str]] = None) -> Dict[str, An
         live = os.environ.get(name)
         if live is None:
             provenance = "unset"
+        elif secret_origin is not None and name in secret_origin:
+            # Recorded at the merge, so this is a fact rather than a comparison.
+            provenance = ("task-env overrode secret"
+                          if secret_origin[name] == "task-env" else "secret")
+        elif secret_origin is not None:
+            provenance = "env/image (secret does not carry it)"
         elif secret_values is None:
             provenance = "env (secret not read)"
         elif name not in secret_values:
@@ -485,6 +517,7 @@ def build_report(secret_values: Optional[Dict[str, str]] = None) -> Dict[str, An
     return {
         "scope": _scope(),
         "secret_compared": secret_values is not None,
+        "origin_recorded": secret_origin is not None,
         "counts": {
             "names_seen": len(flags),
             "with_read_sites": sum(1 for f in flags.values() if f["n_read_sites"]),
@@ -508,7 +541,7 @@ def render(report: Dict[str, Any], only_gated: bool = False) -> str:
     lines = [
         "=== STRIDE FLAG STATE ===",
         f"scope: {report['scope']}",
-        f"secret compared: {report['secret_compared']}",
+        f"provenance: {'exact (recorded at the secret merge)' if report.get('origin_recorded') else ('by comparison with the secret' if report['secret_compared'] else 'not resolved — env layer only')}",
         "",
     ]
     c = report["counts"]
@@ -631,6 +664,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="also read stride/prod to resolve env-vs-secret provenance")
     ap.add_argument("--gated-only", action="store_true",
                     help="only flags with no delivery path")
+    ap.add_argument("--evidence", metavar="FILENAME",
+                    help="also write the full JSON report to the evidence store "
+                         "under this name (the caller supplies the date, so this "
+                         "module needs no clock)")
     ap.add_argument("--self-test", action="store_true", help="run scanner tripwires")
     args = ap.parse_args(argv)
 
@@ -644,7 +681,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("  [flag_state] secret unreadable (no boto3, no creds, or denied) — "
                   "provenance stays ambiguous", file=sys.stderr)
 
-    report = build_report(secret_values)
+    report = build_report(secret_values, secret_origin_from_env())
+
+    if args.evidence:
+        # Durable copy. A container's stdout is tail-bounded by the caller and
+        # the container itself is gone minutes later, so the log is not a
+        # record. Reported on stderr so --json stdout stays parseable.
+        try:
+            from evidence_store import put_evidence  # noqa: PLC0415 - optional
+            stored = put_evidence(args.evidence,
+                                  json.dumps(report, indent=1, sort_keys=True))
+            print(f"  [flag_state] evidence: {stored}", file=sys.stderr)
+        except Exception as e:  # never fail the report over its own filing
+            print(f"  [flag_state] evidence write failed ({type(e).__name__}: {e}) — "
+                  f"the report below is still complete", file=sys.stderr)
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
