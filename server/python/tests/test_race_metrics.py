@@ -78,6 +78,38 @@ def test_tie_credit_reaches_every_arm_and_pools_exactly():
     assert pooled["n_races_used"] == 2 and isinstance(pooled["counts"]["races_used"], int)
 
 
+def test_pooling_non_dyadic_shares_matches_one_pass_within_float_noise():
+    """The pooled==direct invariant, exercised on shares that are NOT exact
+    in binary. A 3-way tie contributes 1/3, and float addition is not
+    associative, so fold-by-fold summation can differ from one pass in the
+    last bits — the self-test fixture never ties, so an exact == there would
+    pass for the wrong reason. Anything an ablation reads is far above this."""
+    def three_way_tie_race(key, winner_in_tie):
+        y = [0, 0, 0, 0]
+        y[0 if winner_in_tie else 3] = 1
+        return ([0.3, 0.3, 0.3, 0.1], y, [key] * 4)
+
+    races = [three_way_tie_race(f"r{i}", i % 3 != 0) for i in range(9)]
+    p_all = [v for r in races for v in r[0]]
+    y_all = [v for r in races for v in r[1]]
+    k_all = [v for r in races for v in r[2]]
+    direct = rmx.per_race_metrics(p_all, y_all, k_all)
+
+    folds, at = [], 0
+    for size in (2, 3, 4):                       # uneven folds, as walk-forward gives
+        rows = size * 4
+        folds.append(rmx.per_race_metrics(p_all[at:at + rows], y_all[at:at + rows],
+                                          k_all[at:at + rows]))
+        at += rows
+    pooled = rmx.pool(folds)
+
+    assert pooled["n_races_used"] == direct["n_races_used"] == 9
+    assert abs(pooled["counts"]["model_hits"] - direct["counts"]["model_hits"]) < 1e-9
+    assert abs(pooled["model_top1_hit"] - direct["model_top1_hit"]) < 1e-12
+    # six of nine races have the winner inside the three-way tie -> 6 * (1/3)
+    assert pooled["counts"]["model_hits"] == pytest.approx(2.0)
+
+
 def test_tip_time_favourite_and_sp_favourite_are_kept_apart():
     keys = ["R"] * 4
     y = [0, 1, 0, 0]

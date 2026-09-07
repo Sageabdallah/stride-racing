@@ -320,10 +320,20 @@ def _self_test() -> None:
         folds.append(per_race_metrics(all_p[sl], all_y[sl], all_k[sl], all_tt[sl]))
     pooled = pool(folds)
     direct = per_race_metrics(all_p, all_y, all_k, all_tt)
-    for k in _COUNT_KEYS:   # integers: exact
+    for k in _RACE_KEYS:    # whole races: integers, so pooling is exact
         assert pooled["counts"][k] == direct["counts"][k], (k, pooled["counts"][k], direct["counts"][k])
+    # Hit counters are sums of per-race shares. Summed fold by fold rather
+    # than in one pass they can differ in the last bits whenever a share is
+    # not a dyadic fraction (a 3-way tie contributes 1/3), because float
+    # addition is not associative: ~1e-13 on a season's races, orders below
+    # anything a rate is read to. An exact == here would hold only because
+    # THIS fixture has continuous probabilities and therefore never ties —
+    # it would be a check that passes for the wrong reason.
+    for k in _HIT_KEYS:
+        assert abs(pooled["counts"][k] - direct["counts"][k]) < 1e-9, \
+            (k, pooled["counts"][k], direct["counts"][k])
     assert abs(pooled["counts"]["logloss_sum"] - direct["counts"]["logloss_sum"]) < 1e-9
-    assert pooled["model_top1_hit"] == direct["model_top1_hit"]
+    assert abs(pooled["model_top1_hit"] - direct["model_top1_hit"]) < 1e-12
     assert pooled["n_races_used"] == 120
     print(f"  pooled 4 folds == direct: {format_line(pooled)}")
 
