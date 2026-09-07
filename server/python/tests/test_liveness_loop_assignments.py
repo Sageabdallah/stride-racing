@@ -182,11 +182,18 @@ def test_ground_suitability_is_served_by_mc_api_not_the_shared_builder():
     shared = (SERVER_PYTHON / "serve_features.py").read_text(encoding="utf-8")
     assert "ground_suitability" not in shared, \
         "the shared builder now plumbs it — update FEATURE_PROVENANCE and this test"
-    provenance = (SERVER_PYTHON.parents[1] / "docs" / "research" / "FEATURE_PROVENANCE.md")
-    if provenance.exists():
-        line = [l for l in provenance.read_text(encoding="utf-8").splitlines()
-                if l.startswith("| ground_suitability ")]
-        assert line and "0.0000" in line[0], line
+    # Unconditional on purpose. FEATURE_PROVENANCE.md is tracked in git, so it
+    # is present in every checkout including CI, and an `if exists()` guard
+    # here could only ever do one thing: silently skip the check when the file
+    # moved — which is precisely when the 0.0000 figure stops being verifiable.
+    # That figure is the whole justification for calling this column served, so
+    # losing it must fail loudly, not quietly pass.
+    provenance = SERVER_PYTHON.parents[1] / "docs" / "research" / "FEATURE_PROVENANCE.md"
+    assert provenance.exists(), \
+        f"{provenance} is gone — it carries the 0.0000 importance this verdict rests on"
+    line = [l for l in provenance.read_text(encoding="utf-8").splitlines()
+            if l.startswith("| ground_suitability ")]
+    assert line and "0.0000" in line[0], line
 
 
 def test_real_tree_winner_pattern_features_surface_as_zero_at_serve():
