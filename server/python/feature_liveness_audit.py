@@ -68,7 +68,24 @@ SERVE_FILES = ("run_tips_pipeline.py", "ml_model.py", "form_feature_builder.py",
                # the shared serve builder lands via roi/03 / PR #11; absent on
                # this branch _read() yields "", so this entry is inert until
                # convergence and correct automatically afterwards
-               "serve_features.py")
+               "serve_features.py",
+               # THERE ARE TWO SERVE PATHS INTO RacingMLModel, and this list
+               # carried only one of them. mc_api.extract_ml_features builds
+               # its own feature dict for calculate_ml_probability_adjustment
+               # -> get_model().predict_adjustment, beside
+               # serve_features.build_feature_row -> prepare_features ->
+               # predict_proba. Scanning only the shared builder made
+               # ground_suitability read "trained but never served" while
+               # mc_api.py:1071 assigns it on a live inference path — a RED
+               # row on the gate-5 board for a column that is in fact
+               # computed. serve_features omits it DELIBERATELY: it is one of
+               # the 15 dark features minus one, LIVE_FEATURES has 14, because
+               # its artifact importance is 0.0000 ("dead weight both ways",
+               # docs/research/FEATURE_PROVENANCE.md:39) — so the builder that
+               # skips it changes no probability, and both facts are pinned by
+               # test_liveness_loop_assignments. Resolved by Sage 2026-09-07:
+               # a feature computed on either live path is served.
+               "mc_api.py")
 
 
 def _read(name: str) -> str:
