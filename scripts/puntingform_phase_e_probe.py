@@ -3,12 +3,13 @@
 Conditions / Speedmaps / Ratings / Strike Rates, and what does flucs look
 like? `PUNTINGFORM_MIGRATION.md` Phase E lists these four endpoints as
 ranked, unwired levers; `pf_client.py` has typed, contract-tested accessors
-for all four, but the only thing that has ever called them live is a
-monkeypatched unit test (`providers/test_puntingform.py::
-test_phase_e_accessor_contracts`) — the endpoint paths and payload shapes
-were pinned from Punting Form's published reference pages (2026-08-01), not
-confirmed against the live API. This probe is the confirmation, before any
-feature-wiring code gets written.
+for all four, and nothing has ever called them against the live API — the
+only caller anywhere is a monkeypatched unit test
+(`providers/test_puntingform.py::test_phase_e_accessor_contracts`), which
+asserts the path and params sent and never opens a socket. The endpoint
+paths and payload shapes were pinned from Punting Form's published
+reference pages (2026-08-01), not confirmed against the live API. This
+probe is that confirmation, before any feature-wiring code gets written.
 
 Read-only. Calls through `pf_client` (the code that will actually be wired)
 so this validates the client, not just the API; falls back to a raw HTTP
@@ -30,15 +31,21 @@ Answers five specific questions (see the final report section):
   5. Do the `strike_rates(entity_type=...)` enum values return genuinely
      different jockey vs trainer datasets, and what does `startDate` anchor?
 
-Every raw payload is saved to server/python/providers/fixtures/ using the
-existing pf_<endpoint>_<label>.json naming convention, so this run's output
-becomes the golden fixtures for the contract tests when wiring starts —
-that work isn't done twice.
+Every raw payload is saved using the existing pf_<endpoint>_<label>.json
+naming convention, so this run's output becomes the golden fixtures for the
+contract tests when wiring starts — that work isn't done twice. The default
+destination is server/python/providers/fixtures/, which is what CI wants
+(ephemeral checkout, uploaded as an artifact); a LOCAL run should pass
+--out-dir to somewhere scratch, so payloads never land in the tracked
+fixtures directory beside real ones.
 
     PUNTINGFORM_API_KEY=... python3 scripts/puntingform_phase_e_probe.py
+    PUNTINGFORM_API_KEY=... python3 scripts/puntingform_phase_e_probe.py \
+        --out-dir /tmp/pf_phase_e
 """
 from __future__ import annotations
 
+import argparse
 import datetime
 import json
 import os
@@ -49,8 +56,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server" / "python"))
 
-FIXTURES_DIR = (Path(__file__).resolve().parent.parent / "server" / "python"
-                / "providers" / "fixtures")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_FIXTURES_DIR = REPO_ROOT / "server" / "python" / "providers" / "fixtures"
+
+# Set by main() from --out-dir. Defaults to the real fixtures directory
+# because that is where CI wants them (ephemeral checkout, uploaded as an
+# artifact), but a local run against a real key should point this somewhere
+# scratch: writing straight into the tracked fixtures directory is how a
+# batch of mock payloads once ended up looking like real captures.
+OUT_DIR = DEFAULT_FIXTURES_DIR
 
 API_KEY = (os.environ.get("PUNTINGFORM_API_KEY") or "").strip()
 UA = "Mozilla/5.0 (compatible; StrideRacing/1.0)"
@@ -69,12 +83,32 @@ def banner(t):
 
 
 def save_fixture(name, payload):
-    FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
-    path = FIXTURES_DIR / name
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUT_DIR / name
     with open(path, "w") as f:
         json.dump(payload, f, indent=2, default=str)
-    print(f"  saved -> {path.relative_to(Path(__file__).resolve().parent.parent)}")
+    try:
+        shown = path.relative_to(REPO_ROOT)
+    except ValueError:
+        shown = path  # --out-dir pointed outside the repo
+    print(f"  saved -> {shown}")
     return path
+
+
+def union_keys(records):
+    """Every key seen across ALL records, not just the first.
+
+    A field missing from record[0] but present later would otherwise never
+    be reported at all — and a missing key is not the same fact as a null
+    key. Q4's whole job is saying which documented fields are really
+    populated, so reading one record would quietly truncate the answer on
+    exactly the endpoint where it matters most (Ratings, 40+ fields, the
+    shape confirmed least)."""
+    keys = set()
+    for r in records:
+        if isinstance(r, dict):
+            keys.update(r.keys())
+    return sorted(keys)
 
 
 def raw_fallback(path, params):
@@ -151,7 +185,21 @@ def pick_meeting(meetings, prefer_country="AUS", require_resulted=None):
     return pool[0] if pool else None
 
 
-def main():
+def main(argv=None):
+    global OUT_DIR
+    parser = argparse.ArgumentParser(
+        description="Probe the four unwired Punting Form Phase E endpoints.")
+    parser.add_argument(
+        "--out-dir", default=None,
+        help="Directory for the raw payloads (default: "
+             "server/python/providers/fixtures/, which is what CI wants). "
+             "Point this somewhere scratch for a local run so payloads do "
+             "not land in the tracked fixtures directory.")
+    args = parser.parse_args(argv)
+    if args.out_dir:
+        OUT_DIR = Path(args.out_dir).expanduser().resolve()
+        print(f"payloads -> {OUT_DIR}")
+
     if not API_KEY:
         print("PUNTINGFORM_API_KEY is not set — nothing to probe")
         return 2
@@ -361,12 +409,12 @@ def main():
              "pfaiRank", "assessedPrice", "speed", "settle", "barrier", "mapA2E",
              "jockeyA2E", "ratedRunStyle", "ratedSettle"])
     ratings_records = ratings_resulted or ratings_upcoming or []
-    if isinstance(ratings_records, list) and ratings_records and isinstance(ratings_records[0], dict):
-        null_rate_report("ratings", ratings_records, sorted(ratings_records[0].keys()))
+    if isinstance(ratings_records, list) and ratings_records:
+        null_rate_report("ratings", ratings_records, union_keys(ratings_records))
     for label, sr in [("strike_rates(entity_type=0)", strike_entity0),
                        ("strike_rates(entity_type=1)", strike_entity1)]:
         if isinstance(sr, list) and sr:
-            null_rate_report(label, sr, sorted(sr[0].keys()))
+            null_rate_report(label, sr, union_keys(sr))
 
     # ----------------------------------------------------- Q5 entity enum
     banner("5. Does entity_type actually split jockey vs trainer? What does startDate anchor?")
