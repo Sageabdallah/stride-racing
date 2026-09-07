@@ -129,8 +129,6 @@ window and restarts its day count.
 
 ## STRIDE_LEARNED_BLEND (2026-09-05; rides the v3 candidate)
 
-[SAGE-APPROVAL] confirm this section's bar
-
 **What it does:** `RacingMLModel.predict_components` combines the three base
 predictions with the artifact's persisted `ensemble_combiner` — a
 non-negative weighted average fitted on purge-gapped walk-forward OOF rows

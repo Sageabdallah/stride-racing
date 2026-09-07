@@ -126,8 +126,6 @@ protocol.
 
 ## Amendment 2026-09-05 — window start, staging vs promotion, cross-fitted evaluation (append-only entry)
 
-[SAGE-APPROVAL] confirm this amendment (remove this marker to sign; `retrain_preflight.py` reads the pre-registration AMBER until it is gone)
-
 Written before any v3 candidate exists and before any window metric was
 computed. Nothing above is edited; this entry supersedes by reference.
 
