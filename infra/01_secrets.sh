@@ -22,7 +22,16 @@ KEYS = ["BETFAIR_APP_KEY", "BETFAIR_USERNAME", "BETFAIR_PASSWORD",
         "LLM_ENABLED", "LLM_PROVIDER", "STRIDE_COMMISSION_RATE",
         "STRIDE_LEDGER_WRITE", "STRIDE_SHADOW_KELLY",
         "STRIDE_BOOK_COHERENCE",
-        "STRIDE_SERVE_LIVE_FEATURES_SHADOW", "STRIDE_MODEL_WEIGHT",
+        "STRIDE_SERVE_LIVE_FEATURES_SHADOW",
+        # The three production flags gate 3 of docs/project_retrain_gate.md
+        # requires flipped. Until 2026-09-05 only the SHADOW flag had a path
+        # here, so a flip set by hand in Secrets Manager was erased by the next
+        # deploy (put-secret-value replaces the whole blob) and the Fargate
+        # tasks, which read only this blob (_load_secrets), never saw it.
+        # test_flag_plumbing.py keeps this list and deploy-infra.yml in lockstep.
+        "STRIDE_SERVE_LIVE_FEATURES", "STRIDE_SERVE_NAN_CONTRACT",
+        "STRIDE_RENORMALISE_FIELD",
+        "STRIDE_MODEL_WEIGHT",
         "CONSENSUS_WEIGHT", "MARKET_SIGNAL_WEIGHT",
         "CONSENSUS_CONFIRM_THRESHOLD", "CONSENSUS_LOCK_THRESHOLD",
         "MARKET_SIGNAL_THRESHOLD"]

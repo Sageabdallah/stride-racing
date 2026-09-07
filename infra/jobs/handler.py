@@ -987,6 +987,28 @@ def _insight_coverage(path: str) -> tuple:
     return with_text, len(picks)
 
 
+def _ml_scored_picks(path: str) -> tuple:
+    """(top picks whose prediction_stages carry a numeric ML ensemble value,
+    top picks) for a tips file.
+
+    mc_api records the `ensemble` stage from RacingMLModel's own components
+    (_attach_prediction_stages); an untrained wrapper — the artifact present
+    but not loadable — hands it no value, so this reads whether the model
+    SCORED the card, not whether its file existed. Raises like
+    _insight_coverage on a file that cannot be read."""
+    with open(path) as fh:
+        data = json.load(fh)
+    picks = [p for race in (data.get("races") or [])
+             for p in (race.get("top_picks") or [])]
+    scored = 0
+    for p in picks:
+        stage = (p.get("prediction_stages") or {}).get("ensemble") or {}
+        value = stage.get("value") if isinstance(stage, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            scored += 1
+    return scored, len(picks)
+
+
 def job_tips_proof() -> dict:
     """Exercise the whole 10:00 path in the real runtime, writing nothing.
 
@@ -1021,6 +1043,31 @@ def job_tips_proof() -> dict:
     os.environ["STRIDE_SERVE_LIVE_FEATURES_SHADOW"] = "false"
     os.environ["STRIDE_ODDS_SNAPSHOT_WRITE"] = "false"
     os.environ["STRIDE_MC_AUDIT_WRITE"] = "false"
+    # Candidate parallel scoring (docs/project_retrain_gate.md: "one week
+    # parallel scoring"). With STRIDE_ENSEMBLE_ARTIFACT set on the task this
+    # proof scores the card with that artifact instead of the production
+    # slot (RacingMLModel honours the override; production never sets it)
+    # and writes to tips_<date>_candidate.json, beside the real file and
+    # beside any plain preview. The artifact must already be staged: absent,
+    # RacingMLModel degrades to is_trained=False and the run would score
+    # with no ML while looking like a candidate run — refused up front.
+    candidate = os.environ.get("STRIDE_ENSEMBLE_ARTIFACT", "").strip()
+    suffix = "cloudproof"
+    if candidate:
+        cpath = candidate if os.path.isabs(candidate) else \
+            f"{_root()}/server/python/models/{candidate}"
+        if not os.path.exists(cpath):
+            bucket = os.environ.get("STRIDE_MODELS_BUCKET", "").strip() or "stride-models-<account>"
+            raise RuntimeError(
+                f"tips-proof: STRIDE_ENSEMBLE_ARTIFACT={candidate!r} is set but {cpath} "
+                f"was not staged — the proof would silently score without the "
+                f"candidate. Copy that one file to the models bucket first: "
+                f"aws s3 cp server/python/models/{os.path.basename(candidate)} "
+                f"s3://{bucket}/{os.path.basename(candidate)} — not "
+                f"infra/09b_upload_models.sh, which re-uploads every local .pkl "
+                f"including whatever racing_ensemble_v2.pkl sits beside it.")
+        suffix = "candidate"
+        print(f"[tips-proof] candidate artifact {cpath} — output suffix '{suffix}'")
     os.environ.setdefault(CTX_MULT_DIAG_FLAG, "true")   # diagnostic only, see above
     if _tips_prepare() == "quiet":
         return {"last_success_date": _today(), "quiet_day": True}
@@ -1037,8 +1084,8 @@ def job_tips_proof() -> dict:
         print(f"[tips-proof] track filter: {', '.join(tracks)} "
               f"(the rest of the card is not scored)")
     out = _run_ok("run_tips_pipeline.py", _today(), *tracks,
-                  "--skip-db-store", "--output-suffix", "cloudproof")
-    tips = f"{_root()}/racecards/tips_{_today()}_cloudproof.json"
+                  "--skip-db-store", "--output-suffix", suffix)
+    tips = f"{_root()}/racecards/tips_{_today()}_{suffix}.json"
     if not os.path.exists(tips):
         raise RuntimeError(
             f"tips-proof: {tips} absent after a clean exit — the pipeline "
@@ -1050,7 +1097,7 @@ def job_tips_proof() -> dict:
     # wrap-up read. Relayed BEFORE the insight check, for the reason
     # morning-odds relays before it asserts: a failed check must not also
     # destroy the evidence of what the run produced.
-    _sync_up("racecards", f"tips_{_today()}_cloudproof.json")
+    _sync_up("racecards", f"tips_{_today()}_{suffix}.json")
     try:
         with_text, picks = _insight_coverage(tips)
     except (OSError, ValueError) as e:
@@ -1066,6 +1113,23 @@ def job_tips_proof() -> dict:
         raise RuntimeError(
             f"tips-proof: {tips} carries no top picks at all — the pipeline "
             f"exited 0 having scored nothing. There is no preview here.")
+    if candidate:
+        # Presence was checked before the run; this is loadability. A pickle
+        # that exists but does not load leaves RacingMLModel is_trained=False,
+        # mc_api falls back to rule-based with a debug line only, and every
+        # pick's prediction_stages then carries no numeric ML ensemble value.
+        # Without this check the proof reported success and
+        # compare_candidate_tips would have attributed a v2-vs-no-ML delta to
+        # the candidate. Relayed first, so the file can still be read.
+        scored, n = _ml_scored_picks(tips)
+        if scored == 0:
+            raise RuntimeError(
+                f"tips-proof: STRIDE_ENSEMBLE_ARTIFACT={candidate!r} was staged but none "
+                f"of the {n} top picks carries an ML ensemble stage — the artifact did "
+                f"not load (RacingMLModel reported untrained) and the card was scored "
+                f"WITHOUT the candidate. Look for 'Failed to load model' in this "
+                f"task's log; the relayed file is not candidate evidence.")
+        print(f"[tips-proof] candidate scored {scored}/{n} top picks with the ML ensemble")
     if _llm_expected():
         floor = max(1, int(picks * INSIGHT_COVERAGE_FLOOR))
         if with_text < floor:
@@ -1301,6 +1365,11 @@ def dispatch(event=None, context=None):
         # came from a different provider than the schedule's explains itself.
         print(f"[dispatch] LLM_PROVIDER={llm_override} set on the task; the "
               f"stride/prod value is not consulted for this run")
+    artifact_override = os.environ.get("STRIDE_ENSEMBLE_ARTIFACT", "").strip()
+    if artifact_override:
+        print(f"[dispatch] STRIDE_ENSEMBLE_ARTIFACT={artifact_override} set on the task: "
+              f"the ML wrapper loads that artifact instead of the production slot "
+              f"(candidate scoring; tips-proof refuses if it was not staged)")
     _load_secrets()
     _stage_models()
     _stage_panel()

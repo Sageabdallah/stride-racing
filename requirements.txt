@@ -24,6 +24,14 @@ hyperopt==0.3.0
 tabulate
 colorama
 psycopg2-binary
+# retrain_preflight.py runs the two parity suites in-process (gate 5 of
+# docs/project_retrain_gate.md), and the stride-preflight Fargate task runs
+# it every morning through gate_status.py. Without pytest in the image the
+# import inside gate_parity_suites raised and gate 5 could only ever read
+# "unreadable preflight output" where it is scheduled — the gate the
+# 2026-09-05 repair was meant to make measurable. Unpinned like the other
+# tooling; it is a test runner, not part of the artifact's unpickle path.
+pytest
 playwright
 dnfile
 networkx==3.6.1

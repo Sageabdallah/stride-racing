@@ -52,10 +52,15 @@ features (→ [14](14-late-odds-features.md)).
    to final XGB/CatBoost fits using the held-out tail. Keep `DateWindowSplitter`'s
    14-day purge (:695-762) — it is correct.
 3. **Per-race metrics in CV.** `run_walk_forward_cv` output adds, per fold and pooled:
-   per-race top-1 hit rate, SP-favourite baseline hit rate on the same races,
-   same-race H2H vs the stored production model (reuse `rank_model.py`'s harness),
-   and per-race softmax log-loss. **Promotion criterion:** new model must beat the
-   favourite baseline and not lose the H2H. AUC/Brier remain as diagnostics.
+   per-race top-1 hit rate, **tip-time**-favourite baseline hit rate on the same
+   races (SP favourite printed as a hindsight diagnostic only — selection uses
+   tip-time price, [09](09-forward-validation-protocol.md)), same-race H2H vs the
+   stored production model (reuse `rank_model.py`'s harness), and per-race
+   normalised log-loss. **Staging criterion** (this decides which candidate is
+   staged; the live *promotion* rule is [12-preregistration.md](12-preregistration.md)
+   NEW-BEATS-OLD, see its 2026-09-05 amendment): honest OOF Brier not worse on
+   identical folds, top-1 hit rate above the tip-time favourite, H2H not lost.
+   AUC remains a diagnostic.
 4. **Learned, persisted ensemble.** Fit per-category weights or the stacking
    meta-learner on the purge-gapped OOF predictions; persist inside
    `racing_ensemble_v2.pkl` (fix `ml_model.save` :635-645 to include
@@ -85,8 +90,25 @@ features (→ [14](14-late-odds-features.md)).
 ## Rollout & flags
 
 - Staged artifact promotion (existing discipline): `racing_ensemble_v3.pkl` beside
-  v2, env pointer, one-week parallel scoring, then switch.
-- Rollback: point back to v2 artifact.
+  v2, one-week parallel scoring, then switch.
+- **Mechanics (2026-09-05).** Production keeps the stable slot: `RacingMLModel`
+  loads `models/racing_ensemble_v2.pkl`, `REQUIRED_MODEL_ARTIFACTS` and the
+  release manifest name it, and nothing in production reads an env pointer. The
+  candidate is scored by the `tips-proof` job with `STRIDE_ENSEMBLE_ARTIFACT`
+  set on the task (verify-jobs input `ensemble_artifact`): the wrapper honours
+  the override only when set, the proof writes nothing to the database and
+  relays `tips_<date>_candidate.json`, and `compare_candidate_tips.py` puts it
+  beside the real `tips_<date>.json`. The proof refuses to run if the candidate
+  was not staged (a missing artifact would otherwise score with no ML while
+  looking like a candidate run). The candidate is produced by the
+  `retrain-model` workflow in `v3-candidate` mode, where snapshot odds are fixed
+  in the workflow rather than chosen, the run is refused below the snapshot-row
+  floor and when the inputs-only preflight is not green, and the artifact is
+  written with `--model-version v3` so the preflight freshness gate can pass.
+  Promotion = the operator installs the candidate into the stable slot after
+  the NEW-BEATS-OLD rule ([12-preregistration.md](12-preregistration.md)) is
+  met on the parallel week.
+- Rollback: point back to v2 artifact (reinstall it into the stable slot).
 
 ## Guardrails
 

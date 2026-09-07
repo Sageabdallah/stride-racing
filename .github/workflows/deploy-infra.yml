@@ -68,6 +68,13 @@ jobs:
           STRIDE_SHADOW_KELLY: ${{ secrets.STRIDE_SHADOW_KELLY }}
           STRIDE_BOOK_COHERENCE: ${{ secrets.STRIDE_BOOK_COHERENCE }}
           STRIDE_SERVE_LIVE_FEATURES_SHADOW: ${{ secrets.STRIDE_SERVE_LIVE_FEATURES_SHADOW }}
+          # Gate-3 production flags (docs/project_retrain_gate.md). Absent
+          # GitHub secrets are skipped by 01_secrets.sh, so listing them before
+          # the operator creates them is safe; a flip is: create the secret,
+          # re-run this workflow with skip_image=true.
+          STRIDE_SERVE_LIVE_FEATURES: ${{ secrets.STRIDE_SERVE_LIVE_FEATURES }}
+          STRIDE_SERVE_NAN_CONTRACT: ${{ secrets.STRIDE_SERVE_NAN_CONTRACT }}
+          STRIDE_RENORMALISE_FIELD: ${{ secrets.STRIDE_RENORMALISE_FIELD }}
           STRIDE_MODEL_WEIGHT: ${{ secrets.STRIDE_MODEL_WEIGHT }}
           CONSENSUS_WEIGHT: ${{ secrets.CONSENSUS_WEIGHT }}
           MARKET_SIGNAL_WEIGHT: ${{ secrets.MARKET_SIGNAL_WEIGHT }}
