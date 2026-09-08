@@ -424,6 +424,38 @@ def _run(script: str, *args: str, cwd: str = None) -> subprocess.CompletedProces
         raise
 
 
+def _failure_tail(proc, limit: int = 700) -> str:
+    """The child's own last words, sized to fit the alert that carries them.
+
+    A failing script prints its reason on the way out — consensus_agent.py's
+    zero-yield FATAL line is the last thing on its stderr — and _run_ok used to
+    print that to the container log and then drop it, raising a bare
+    "<script> exited <n>". The log is the one place an operator woken by the
+    alert cannot read; the alert itself is capped at 1000 characters and was
+    spending 41 of them. On 2026-09-08 consensus-agent exited 4 and the whole
+    notification was "RuntimeError: consensus_agent.py exited 4", which is six
+    distinct faults wearing one number (issue #176).
+
+    Whole lines from the end, never a truncated one, because a tail cut
+    mid-token reads as corruption rather than as a bound. stdout is the
+    fallback for a script that reports on stdout and dies silent on stderr.
+    """
+    for stream in (proc.stderr, proc.stdout):
+        if not stream:
+            continue
+        lines = [ln.strip() for ln in stream.strip().splitlines() if ln.strip()]
+        if not lines:
+            continue
+        picked, total = [], 0
+        for ln in reversed(lines):
+            if picked and total + len(ln) + 3 > limit:
+                break
+            picked.append(ln)
+            total += len(ln) + 3
+        return " | ".join(reversed(picked))[:limit]
+    return ""
+
+
 def _run_ok(script: str, *args: str, ok_codes=(0,)) -> str:
     proc = _run(script, *args)
     print(proc.stdout[-4000:])
@@ -435,7 +467,9 @@ def _run_ok(script: str, *args: str, ok_codes=(0,)) -> str:
     if proc.stderr and proc.stderr.strip():
         print(proc.stderr[-4000:], file=sys.stderr)
     if proc.returncode not in ok_codes:
-        raise RuntimeError(f"{script} exited {proc.returncode}")
+        tail = _failure_tail(proc)
+        raise RuntimeError(f"{script} exited {proc.returncode}"
+                           + (f" -- {tail}" if tail else ""))
     return proc.stdout
 
 
@@ -867,7 +901,32 @@ def job_consensus_agent() -> dict:
         # be a RuntimeError and an SNS alarm for a day with nothing to do.
         # It also spends real LLM budget to reach that conclusion.
         return {"last_success_date": _today(), "quiet_day": True}
-    _run_ok("consensus_agent.py", _today())
+    try:
+        _run_ok("consensus_agent.py", _today())
+    except Exception:
+        # The health sidecar is the run's own account of what its two mention
+        # sources did — panel_fetch_success/attempted and the per-API call
+        # counts — and it is written before the exit-code contract is applied.
+        # _sync_up ran only after _run_ok, so the artifact that explains a
+        # failure was the one artifact a failure never uploaded (issue #176).
+        #
+        # The sidecar ALONE, not the directory: on a zero-yield run
+        # consensus_<date>.json exists and is full of zeroes, and publishing it
+        # would let run_tips_pipeline consume a failed day as a real one. That
+        # file stays unpublished on failure exactly as before. Nothing reads
+        # the sidecar back, so uploading it changes no pipeline behaviour.
+        #
+        # Guarded: an S3 error raised from inside this handler would chain over
+        # the RuntimeError and put a boto stack trace in the alert instead of
+        # the reason the run failed — losing exactly what this block exists to
+        # save. Best-effort upload, original exception either way.
+        try:
+            _sync_up("server/python/intelligence",
+                     f"consensus_{_today()}.health.json")
+        except Exception as sync_err:
+            print(f"[sync] health sidecar upload failed: {sync_err}",
+                  file=sys.stderr)
+        raise
     path = f"{_root()}/server/python/intelligence/consensus_{_today()}.json"
     if not os.path.exists(path):
         raise RuntimeError(

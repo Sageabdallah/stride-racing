@@ -244,6 +244,19 @@ def _check_cap(usage: dict, key: str, cap: int) -> bool:
     return usage.get(key, 0) < cap
 
 
+def _pplx_record(usage: dict, outcome: str) -> None:
+    """Tally what Perplexity actually returned, not just what was asked of it.
+
+    Deliberately NOT the "perplexity_" prefix: search_race_tips_perplexity_multi
+    sums every key starting with that to decide its spend warning, and an
+    outcome tally read as spend would be worse than no tally. These land in
+    health["api_calls"], which is what lets a zero-yield exit name the leg that
+    went dark instead of reporting the symptom (issue #176).
+    """
+    key = f"pplx_{outcome}"
+    usage[key] = usage.get(key, 0) + 1
+
+
 def is_content_usable(
     content: str, url: str, field_names: list[str]
 ) -> tuple[bool, str]:
@@ -742,7 +755,14 @@ def search_race_tips_perplexity_multi(
     """
     perplexity_key = os.getenv("PERPLEXITY_API_KEY")
     if not perplexity_key:
-        print("    [PERPLEXITY_MULTI] No API key — falling back", file=sys.stderr)
+        # There is no fallback. claude_research_race returns an empty result
+        # the moment this returns an empty summary, so this branch is the
+        # entire web-research leg going dark for every race of the day — and
+        # with the panel measured at 3/16 usable, that is the whole yield. The
+        # old wording said the opposite of what the code does.
+        _pplx_record(usage, "nokey")
+        print("    [PERPLEXITY_MULTI] No PERPLEXITY_API_KEY — web research is "
+              "DISABLED for this race; there is no fallback", file=sys.stderr)
         return "", 0, {}
 
     field_lines_list = []
@@ -805,13 +825,22 @@ def search_race_tips_perplexity_multi(
             )
 
             if response.status_code != 200:
-                print(f"    [PERPLEXITY_MULTI] {label} error {response.status_code}", file=sys.stderr)
+                # The body, as search_race_tips_perplexity above already keeps
+                # it. A bare status cannot tell a retired model id from a
+                # revoked key from a spent quota, and on 2026-09-08 that was
+                # the whole distance between "which dependency broke" and
+                # "something did" (issue #176).
+                _pplx_record(usage, f"err_{response.status_code}")
+                print(f"    [PERPLEXITY_MULTI] {label} error "
+                      f"{response.status_code}: {response.text[:200]}",
+                      file=sys.stderr)
                 per_query_counts[label] = 0
                 continue
 
             data = response.json()
             content = data["choices"][0]["message"]["content"]
             citations = data.get("citations", [])
+            _pplx_record(usage, "ok")
 
             for c in citations:
                 if isinstance(c, str):
@@ -830,9 +859,11 @@ def search_race_tips_perplexity_multi(
             time.sleep(1)
 
         except _requests.exceptions.Timeout:
+            _pplx_record(usage, "timeout")
             print(f"    [PERPLEXITY_MULTI] {label} timeout — skipping", file=sys.stderr)
             per_query_counts[label] = 0
         except Exception as e:
+            _pplx_record(usage, f"exc_{type(e).__name__}")
             print(f"    [PERPLEXITY_MULTI] {label} failed: {e}", file=sys.stderr)
             per_query_counts[label] = 0
 
@@ -1389,6 +1420,30 @@ def build_health(date_str: str, results_by_race: dict, usage: dict,
     }
 
 
+def _zero_yield_breakdown(h: dict) -> str:
+    """One line naming which of the two mention sources produced nothing.
+
+    Reads only what build_health already recorded — no new state, no second
+    pass. Kept short on purpose: it travels to SNS inside a bounded stderr
+    tail, and a breakdown that overruns that bound is a breakdown nobody woken
+    at 05:37 gets to read.
+    """
+    calls = h.get("api_calls") or {}
+    attempted = sum(v for k, v in calls.items() if k.startswith("perplexity_"))
+    ok = calls.get("pplx_ok", 0)
+    failures = sorted((k[len("pplx_"):], v) for k, v in calls.items()
+                      if k.startswith("pplx_") and k != "pplx_ok")
+    detail = ", ".join(f"{name}={n}" for name, n in failures) or "none recorded"
+    return (
+        f"panel {h.get('panel_fetch_success', 0)}/"
+        f"{h.get('panel_fetch_attempted', 0)} sources fetched OK | "
+        f"perplexity {attempted} queries, {ok} returned content ({detail}) | "
+        f"claude extraction calls {calls.get('claude', 0)} | "
+        f"tavily {calls.get('tavily', 0)} | "
+        f"model {h.get('extraction_model', '?')}"
+    )
+
+
 def _write_health(date_str: str, health: dict) -> None:
     """Sibling file, not a key inside consensus_<date>.json.
 
@@ -1468,12 +1523,22 @@ def run_consensus_agent(
     tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
-    if not tavily_key:
-        print("[CONSENSUS] ERROR: TAVILY_API_KEY not set in .env", file=sys.stderr)
-        return {}
-    if not anthropic_key:
-        print("[CONSENSUS] ERROR: ANTHROPIC_API_KEY not set in .env", file=sys.stderr)
-        return {}
+    # Raised, not returned. `return {}` left LAST_RUN_HEALTH empty, so main()'s
+    # exit contract found no zero_yield, skipped the db_mirror branch on a
+    # falsy health dict, and fell off the end — exit 0. A consensus run with no
+    # API keys reported SUCCESS, wrote no consensus file, and left every
+    # downstream pick to degrade to NO_BET with no alarm anywhere: the silent
+    # no-op class, in the one job whose absence is hardest to see. It gets the
+    # same treatment the DATABASE_URL check below already has (issue #176).
+    missing = [name for name, val in (("TAVILY_API_KEY", tavily_key),
+                                      ("ANTHROPIC_API_KEY", anthropic_key))
+               if not val]
+    if missing:
+        raise RuntimeError(
+            f"{', '.join(missing)} not set — consensus cannot fetch the panel "
+            f"or extract picks, so every race would score zero mentions. "
+            f"Failing before any spend rather than reporting an empty run as "
+            f"a successful one.")
 
     # Presence check only — no connection is opened here, or anywhere before
     # the write site. A missing DATABASE_URL used to crash at startup; the
@@ -2017,6 +2082,15 @@ def main():
             f"Treating as a failed run, not a quiet day.",
             file=sys.stderr,
         )
+        # Last line before the exit, so it is the line the alert's stderr tail
+        # is guaranteed to carry. Six distinct faults reach exit 4 — no
+        # Perplexity key, Perplexity 4xx, a spent Claude cap, unparseable
+        # extraction JSON, a panel below the usable floor, a horse matcher that
+        # matches nothing — and on 2026-09-08 the operator's entire
+        # notification was "consensus_agent.py exited 4" (issue #176). The
+        # numbers that separate them were already in the health dict.
+        print(f"[CONSENSUS] zero-yield breakdown: {_zero_yield_breakdown(h)}",
+              file=sys.stderr)
         sys.exit(4)
     if h and not h.get("db_mirror_ok", True):
         print("[CONSENSUS] FATAL: DB mirror failed after retries.", file=sys.stderr)
