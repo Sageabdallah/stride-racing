@@ -34,6 +34,22 @@ COPY infra/entrypoint.sh /entrypoint.sh
 # missed the same way.
 COPY racing_system_v8.3_mc.py ${LAMBDA_TASK_ROOT}/racing_system_v8.3_mc.py
 
+# The secret key list, read by flag_state.py to answer "could this flag be set
+# at all". Same failure shape as the module above and caught the same way:
+# present in every checkout and CI runner, absent from the image, and
+# secret_keys() degrades to an empty set rather than an error — so the
+# flag-state report named every secret-deliverable flag as undeliverable and
+# exited 0. handler.py is already here (as jobs/); flag_state resolves it at
+# either spelling.
+#
+# .github/workflows is deliberately NOT copied. It is the third delivery
+# source, but baking it in would put every workflow edit inside IMAGE_PATHS
+# and the deploy-freshness gate would alarm on YAML that cannot change what
+# the image does — the noise that test_deploy_freshness exists to prevent.
+# flag_state treats that source as optional and proves, where it CAN see it,
+# that no gate-able flag depends on it alone.
+COPY infra/01_secrets.sh ${LAMBDA_TASK_ROOT}/infra/01_secrets.sh
+
 # Which commit these bytes were built from. Stamped twice on purpose:
 #
 #   LABEL  readable with `aws ecr describe-images` / `docker inspect`, i.e.

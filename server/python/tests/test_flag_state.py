@@ -17,6 +17,8 @@ import importlib.util
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -335,6 +337,126 @@ def test_load_secrets_records_which_layer_won(handler, monkeypatch):
     assert os.environ["STRIDE_SERVE_NAN_CONTRACT"] == "true"
 
 
+def _image_layout(tmp_path, *, complete: bool):
+    """The file layout infra/Dockerfile actually produces.
+
+    `server/python` -> server/python, `infra/jobs` -> **jobs** (not
+    infra/jobs), plus the two delivery inputs the fix adds. `complete=False`
+    reproduces the pre-fix image, where none of the three delivery sources sat
+    at its repo path.
+    """
+    repo = Path(__file__).resolve().parents[3]
+    root = tmp_path / "var-task"
+    (root / "server").mkdir(parents=True)
+    (root / "server" / "python").mkdir()
+    for name in ("flag_state.py",):
+        shutil.copy(repo / "server" / "python" / name, root / "server" / "python" / name)
+    (root / "jobs").mkdir()
+    shutil.copy(repo / "infra" / "jobs" / "handler.py", root / "jobs" / "handler.py")
+    if complete:
+        (root / "infra").mkdir()
+        shutil.copy(repo / "infra" / "01_secrets.sh", root / "infra" / "01_secrets.sh")
+    # .github is never copied, matching infra/Dockerfile: the workflow source
+    # is optional by design, so its absence must not make the matrix incomplete.
+    return root
+
+
+def _report_from(root):
+    """Run flag_state.py --json with `root` as its repo root."""
+    out = subprocess.run([sys.executable, "flag_state.py", "--json"],
+                         cwd=str(root / "server" / "python"),
+                         capture_output=True, text=True)
+    return json.loads(out.stdout), out.returncode
+
+
+def test_missing_delivery_sources_are_reported_not_silently_empty(tmp_path):
+    """The container defect: all three delivery inputs resolve against the repo
+    root, and infra/Dockerfile put none of them there.
+
+    Each accessor returns an empty set on a missing path, and empty is
+    indistinguishable from "this flag has no delivery path" — the opposite
+    claim. Unguarded, the report named every secret-deliverable flag
+    (SERVE_LIVE_FEATURES, SERVE_NAN_CONTRACT, RENORMALISE_FIELD, LEDGER_WRITE,
+    SHADOW_KELLY, BOOK_COHERENCE, COMMISSION_RATE, MODEL_WEIGHT,
+    SERVE_LIVE_FEATURES_SHADOW) as undeliverable and exited 0.
+    """
+    report, _ = _report_from(_image_layout(tmp_path, complete=False))
+    assert report["delivery_complete"] is False
+    unavailable = {k for k, v in report["delivery_sources"].items() if not v["available"]}
+    assert "secret" in unavailable, unavailable
+    # secret is required, so the matrix is incomplete; workflow is optional and
+    # its absence alone would NOT have been enough.
+    assert report["delivery_sources"]["secret"]["required"] is True
+    assert report["delivery_sources"]["workflow"]["required"] is False
+    # The whole point: no undeliverable verdict may be published from a
+    # matrix that could not be built.
+    assert report["no_delivery_path"] == []
+    assert all(f["delivery_known"] is False for f in report["flags"].values())
+
+
+def test_image_layout_reproduces_the_checkout_once_the_sources_are_copied(tmp_path):
+    """With the Dockerfile's new COPY lines the container answer equals the
+    checkout answer — which is the only way the report is worth running."""
+    report, code = _report_from(_image_layout(tmp_path, complete=True))
+    assert code == 0 and report["delivery_complete"] is True
+    local = fs.build_report()
+    # Delivery only. The layout carries one module, so its READER scan is
+    # necessarily smaller than the checkout's; the delivery columns are what
+    # the container broke and what must match.
+    assert report["counts"]["in_secret_blob"] == local["counts"]["in_secret_blob"] == 9
+    assert report["counts"]["set_by_image"] == local["counts"]["set_by_image"]
+    for flag in ("STRIDE_SERVE_LIVE_FEATURES", "STRIDE_SERVE_NAN_CONTRACT",
+                 "STRIDE_RENORMALISE_FIELD", "STRIDE_SHADOW_KELLY"):
+        assert "secret" in report["flags"][flag]["delivery"], (
+            f"{flag} is in the secret blob but reported {report['flags'][flag]['delivery']}")
+
+
+def test_handler_resolves_at_the_container_spelling_too(tmp_path):
+    """infra/jobs is copied to /var/task/jobs, so the repo spelling misses the
+    image setters entirely."""
+    root = _image_layout(tmp_path, complete=True)
+    report, _ = _report_from(root)
+    assert "image" in report["flags"]["STRIDE_CTX_MULT_DIAG"]["delivery"]
+
+
+def test_job_refuses_an_incomplete_delivery_matrix(handler, monkeypatch):
+    """Exit 0 with a backwards matrix is worse than failing: the run-state row
+    goes green and the report says the retrain-gate flags cannot be flipped."""
+    monkeypatch.setattr(handler, "_run", _proc(json.dumps({
+        "counts": {"with_read_sites": 74, "names_seen": 84},
+        "flags": {"STRIDE_LEDGER_WRITE": {"resolved": None, "effective": "'false'"}},
+        "no_delivery_path": [], "scope": "container",
+        "delivery_complete": False,
+        "delivery_sources": {"secret": {"path": "/var/task/infra/01_secrets.sh",
+                                        "available": False}},
+    })))
+    monkeypatch.setattr(handler, "_today", lambda: "2026-09-08")
+    with pytest.raises(RuntimeError, match="delivery matrix is incomplete"):
+        handler.job_flag_state()
+
+
+def test_job_reports_on_flags_by_effective_not_just_env(handler, monkeypatch):
+    """A default-on flag with nothing in the environment is on.
+    STRIDE_INTERACTION_PARITY is the live case: default 'true', and with no
+    delivery path it cannot be turned off either."""
+    captured = {}
+    monkeypatch.setattr(handler, "_run", _proc(json.dumps({
+        "counts": {"with_read_sites": 74, "names_seen": 84},
+        "flags": {
+            "STRIDE_INTERACTION_PARITY": {"resolved": None, "effective": "'true'"},
+            "STRIDE_ML_APPLY_ISOTONIC": {"resolved": None, "effective": "'false'"},
+        },
+        "no_delivery_path": [], "scope": "container", "delivery_complete": True,
+        "delivery_sources": {},
+    })))
+    monkeypatch.setattr(handler, "_today", lambda: "2026-09-08")
+    monkeypatch.setattr("builtins.print",
+                        lambda *a, **k: captured.setdefault("out", []).append(" ".join(map(str, a))))
+    out = handler.job_flag_state()
+    assert out["flags_on"] == 1
+    assert any("STRIDE_INTERACTION_PARITY" in line for line in captured["out"])
+
+
 def _dispatch_wiring():
     """(jobs registered, families registered, lambda jobs, explicit TD map)."""
     repo = Path(__file__).resolve().parents[3]
@@ -432,8 +554,9 @@ def test_flag_state_job_passes_only_stride_origins_downstream(handler, monkeypat
         seen["origin"] = os.environ.get("FLAG_STATE_SECRET_ORIGIN")
         return _Completedish(json.dumps(
             {"counts": {"with_read_sites": 3, "names_seen": 3},
-             "flags": {"STRIDE_LEDGER_WRITE": {"resolved": "true"}},
-             "no_delivery_path": [], "scope": "container"}))
+             "flags": {"STRIDE_LEDGER_WRITE": {"resolved": "true", "effective": "true"}},
+             "no_delivery_path": [], "scope": "container",
+             "delivery_complete": True, "delivery_sources": {}}))
 
     monkeypatch.setattr(handler, "_run", _fake_run)
     monkeypatch.setattr(handler, "_today", lambda: "2026-09-07")

@@ -1336,6 +1336,21 @@ def job_flag_state() -> dict:
             "flag-state: the scan returned no flags with a reader. That is a "
             "broken scan, not a clean result — the repo has dozens.")
 
+    # The reader scan lives in server/python, which the image carries, so it
+    # is green even when every DELIVERY input is missing — and a missing
+    # source degrades to "no delivery path", the opposite claim. This job ran
+    # green and reported 47 undeliverable flags instead of 37, naming every
+    # retrain-gate flag among them, until the sources were reported. An
+    # incomplete matrix is worse than none: it is confidently backwards.
+    if not report.get("delivery_complete"):
+        missing = {k: v["path"] for k, v in (report.get("delivery_sources") or {}).items()
+                   if not v.get("available")}
+        raise RuntimeError(
+            f"flag-state: the delivery matrix is incomplete — these inputs "
+            f"could not be read in this container: {missing}. Every flag would "
+            f"report 'no delivery path', which is the opposite of the truth "
+            f"for anything the secret or the image sets. Refusing to publish it.")
+
     print(f"[flag-state] scope={report.get('scope')} "
           f"provenance={'exact' if report.get('origin_recorded') else 'ambiguous'}")
     print(f"[flag-state] {counts.get('names_seen')} names | "
@@ -1345,8 +1360,14 @@ def job_flag_state() -> dict:
           f"{counts.get('no_delivery_path')} undeliverable")
     # Values, by name, for the flags that gate the fixes under review. A count
     # of "how many are on" would pass whichever ones were on.
+    #
+    # `effective`, not `resolved`: a default-on flag with nothing in the
+    # environment IS on, and reading only what env carries omits it.
+    # STRIDE_INTERACTION_PARITY is the live case — default 'true', and with no
+    # delivery path it cannot be turned off either.
     on = sorted(n for n, f in flags.items()
-                if str(f.get("resolved") or "").strip().lower() in ("true", "1", "yes"))
+                if str(f.get("effective") or "").strip().strip("'").lower()
+                in ("true", "1", "yes"))
     print(f"[flag-state] ON in this container: {on or 'none'}")
     print(f"[flag-state] undeliverable: {report.get('no_delivery_path')}")
 

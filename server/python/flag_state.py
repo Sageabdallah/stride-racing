@@ -74,9 +74,28 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
 PREFIX = "STRIDE_"
-SECRETS_SH = REPO / "infra" / "01_secrets.sh"
-HANDLER_PY = REPO / "infra" / "jobs" / "handler.py"
-WORKFLOW_DIR = REPO / ".github" / "workflows"
+
+# The three delivery inputs, each at the repo path first and the container
+# path second. infra/Dockerfile copies `infra/jobs` to /var/task/JOBS, not
+# /var/task/infra/jobs, so the repo spelling misses it in the one environment
+# this job exists to describe. Resolved rather than assumed, and the result is
+# reported: a source that cannot be read is NOT evidence that a flag has no
+# delivery path, and reporting it as one inverts the finding.
+_SECRETS_CANDIDATES = (REPO / "infra" / "01_secrets.sh", REPO / "01_secrets.sh")
+_HANDLER_CANDIDATES = (REPO / "infra" / "jobs" / "handler.py", REPO / "jobs" / "handler.py")
+_WORKFLOW_CANDIDATES = (REPO / ".github" / "workflows", REPO / "workflows")
+
+
+def _resolve(candidates) -> Optional[Path]:
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+SECRETS_SH = _resolve(_SECRETS_CANDIDATES) or _SECRETS_CANDIDATES[0]
+HANDLER_PY = _resolve(_HANDLER_CANDIDATES) or _HANDLER_CANDIDATES[0]
+WORKFLOW_DIR = _resolve(_WORKFLOW_CANDIDATES) or _WORKFLOW_CANDIDATES[0]
 
 # Flags that name a value rather than gate a branch: reporting them as
 # "never turned on" would be noise. They still get a row; they are just not
@@ -458,6 +477,36 @@ def build_report(secret_values: Optional[Dict[str, str]] = None,
     by_handler = handler_setters()
     by_workflow = workflow_overrides()
 
+    # Which delivery inputs were actually readable. Every one of these degrades
+    # to empty on a missing path, and empty is indistinguishable from "this
+    # flag has no delivery path" — which is the opposite claim. In the image
+    # built by infra/Dockerfile none of the three is at its repo path, so an
+    # unguarded run reported 47 undeliverable flags instead of 37 and named
+    # every retrain-gate flag among them, with exit 0. Availability is data.
+    #
+    # `workflow` is optional: .github/ is deliberately not in the image (see
+    # infra/Dockerfile), because baking CI config in would make every YAML edit
+    # mark the image stale. That is only safe while no gate-able flag is
+    # deliverable by workflow ALONE — an invariant checked below wherever the
+    # source IS readable, so the environment that cannot see it stays safe by
+    # construction rather than by luck.
+    sources = {
+        "secret": {"path": str(SECRETS_SH), "available": SECRETS_SH.exists(),
+                   "required": True},
+        "image": {"path": str(HANDLER_PY), "available": HANDLER_PY.exists(),
+                  "required": True},
+        "workflow": {"path": str(WORKFLOW_DIR), "available": WORKFLOW_DIR.exists(),
+                     "required": False},
+    }
+    # The merge record is stronger evidence than the deploy script: it says
+    # what the blob actually carried, where 01_secrets.sh only says what the
+    # NEXT deploy would ship. When present it stands in for the file.
+    if secret_origin:
+        in_secret = in_secret | set(secret_origin)
+        sources["secret"] = {"path": "recorded at the secret merge",
+                             "available": True, "required": True}
+    delivery_complete = all(s["available"] for s in sources.values() if s["required"])
+
     flags: Dict[str, Dict[str, Any]] = {}
     for name in sorted(set(readers) | mentioned | in_secret
                        | set(by_handler) | set(by_workflow)):
@@ -500,6 +549,7 @@ def build_report(secret_values: Optional[Dict[str, str]] = None,
             "code_defaults": defaults,
             "defaults_disagree": len(defaults) > 1,
             "delivery": delivery,
+            "delivery_known": delivery_complete,
             "value_flag": name in VALUE_FLAGS,
             "resolved": live,
             "provenance": provenance,
@@ -507,17 +557,31 @@ def build_report(secret_values: Optional[Dict[str, str]] = None,
                 defaults[0] if len(defaults) == 1 else None),
         }
 
+    # Only assertable when every source was read. Half a delivery matrix is
+    # not a shorter list of undeliverable flags, it is a wrong one.
     gated = [n for n, f in flags.items()
-             if f["n_read_sites"] and not f["delivery"] and not f["value_flag"]]
+             if f["n_read_sites"] and not f["delivery"] and not f["value_flag"]
+             ] if delivery_complete else []
     # A key the deploy ships, or the image sets, that nothing consumes: a
     # delivery slot spent on a control that does not exist. The inverse of
     # `gated`, and the one worth acting on — prose mentions are not, so the
     # scan that produced them is not reported.
     unread = [n for n, f in flags.items() if f["delivery"] and not f["n_read_sites"]]
+    # The invariant that lets the image skip .github/: a gate-able flag whose
+    # ONLY delivery is a workflow override would be misreported as undeliverable
+    # wherever that source is absent. Recorded here and asserted by --self-test,
+    # which runs in the checkout and in CI where the source IS readable.
+    workflow_only = sorted(
+        n for n, f in flags.items()
+        if f["delivery"] == ["workflow"] and f["n_read_sites"] and not f["value_flag"]
+    ) if sources["workflow"]["available"] else None
     return {
         "scope": _scope(),
         "secret_compared": secret_values is not None,
         "origin_recorded": secret_origin is not None,
+        "delivery_sources": sources,
+        "delivery_complete": delivery_complete,
+        "workflow_only_gateable": workflow_only,
         "counts": {
             "names_seen": len(flags),
             "with_read_sites": sum(1 for f in flags.values() if f["n_read_sites"]),
@@ -544,6 +608,13 @@ def render(report: Dict[str, Any], only_gated: bool = False) -> str:
         f"provenance: {'exact (recorded at the secret merge)' if report.get('origin_recorded') else ('by comparison with the secret' if report['secret_compared'] else 'not resolved — env layer only')}",
         "",
     ]
+    if not report.get("delivery_complete", True):
+        lines += ["*** DELIVERY MATRIX INCOMPLETE — the columns below are NOT a",
+                  "*** finding. These sources could not be read:"]
+        for name, src in sorted(report["delivery_sources"].items()):
+            if not src["available"]:
+                lines.append(f"***   {name}: {src['path']}")
+        lines.append("")
     c = report["counts"]
     lines.append(
         f"{c['names_seen']} names seen | {c['with_read_sites']} have a reader | "
@@ -565,7 +636,10 @@ def render(report: Dict[str, Any], only_gated: bool = False) -> str:
         if f["defaults_disagree"]:
             default = "!" + default[:10]
         resolved = f["resolved"] if f["resolved"] is not None else "(unset)"
-        delivery = "+".join(f["delivery"]) if f["delivery"] else "** NONE **"
+        if not f.get("delivery_known", True):
+            delivery = "?? UNKNOWN ??"
+        else:
+            delivery = "+".join(f["delivery"]) if f["delivery"] else "** NONE **"
         lines.append(f"{name:<38} {default:<12} {str(resolved)[:9]:<10} "
                      f"{delivery:<20} {f['n_read_sites']}")
 
@@ -635,6 +709,29 @@ def self_test() -> int:
                         f"unexpected={sorted(keys - expected)}")
 
     report = build_report()
+
+    # Every delivery source must have been read before any "no delivery path"
+    # verdict below is worth anything. In the container none of the three was
+    # at its repo path and all three degraded to empty, so the report inverted
+    # its own headline finding and exited 0.
+    if not report["delivery_complete"]:
+        missing = {k: v["path"] for k, v in report["delivery_sources"].items()
+                   if not v["available"]}
+        failures.append(f"delivery sources unreadable: {missing} — every flag "
+                        f"would report 'no delivery path'")
+    if report["delivery_complete"] and not report["no_delivery_path"]:
+        failures.append("delivery sources all read but nothing is undeliverable — "
+                        "the repo has dozens; the delivery scan is not working")
+    # Runs where .github/ IS readable, so the image — which has no .github/ by
+    # design — is safe by proof rather than by assumption.
+    if report["workflow_only_gateable"]:
+        failures.append(
+            f"gate-able flags deliverable ONLY by a workflow override: "
+            f"{report['workflow_only_gateable']}. The image has no .github/, so "
+            f"these would report 'no delivery path' there. Either add the flag "
+            f"to the secret blob, or make the workflow source required and copy "
+            f"it into the image.")
+
     for flag in ("STRIDE_EV_GATE_AT_PRICE", "STRIDE_ML_APPLY_ISOTONIC"):
         if flag not in report["no_delivery_path"]:
             failures.append(f"{flag} should report NO delivery path "
