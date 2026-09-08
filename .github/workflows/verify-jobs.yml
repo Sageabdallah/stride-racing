@@ -16,6 +16,12 @@
 # that day upserts over a few hours later. `llm_provider` pins the LLM for one
 # dispatch, and `llm-proof` is the two-pick check to run before a preview whose
 # insights are the point.
+#
+# `jobs=flag-state` reports what every STRIDE_* flag is resolved to IN THE
+# CONTAINER, and which flags have no way to be set at all. It reads source and
+# os.environ and writes nothing, so unlike everything above it is safe beside a
+# real job on a race day. Not in the default set: it answers a question you ask,
+# not one worth asking on every dispatch.
 name: verify-jobs
 
 on:
@@ -151,6 +157,15 @@ jobs:
                 llm-proof)       TD=stride-tips-pipeline ;;
                 consensus-proof) TD=stride-consensus-agent ;;
                 panel-proof)     TD=stride-consensus-agent ;;
+                # Same borrow as the proofs above, and for the same reason:
+                # the default branch resolves stride-$JOB, and no family named
+                # stride-flag-state is registered — 07_fargate_heavy.sh's spec
+                # list is eleven hardcoded jobs and this is not one of them.
+                # Without this line the dispatch dies at run-task with "no task
+                # ARN", which reads as a broken job rather than a missing task
+                # definition. preflight is the right family to borrow: 512/1024,
+                # read-only, and its log group already exists.
+                flag-state)      TD=stride-preflight ;;
                 *)               TD="stride-$JOB" ;;
               esac
               EXTRA_ENV=""

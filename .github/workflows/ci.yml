@@ -86,3 +86,8 @@ jobs:
           # once serve_features.py exists) was never run anywhere and had been
           # failing silently — the audit could not see loop assignments.
           python feature_liveness_audit.py --self-test
+          # flag_state's value depends entirely on its scanner not under-
+          # counting; a scanner that misses a read shape is the same failure
+          # mode feature_liveness_audit had above, just for flags instead of
+          # features. This tripwire is that regression net running somewhere.
+          python flag_state.py --self-test

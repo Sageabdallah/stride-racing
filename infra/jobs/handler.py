@@ -34,11 +34,21 @@ SYD = timezone(timedelta(hours=10))  # display only; schedules own DST
 PF_WALL_DAYS = 31
 
 
+# Which layer supplied each secret key, recorded at the merge because that is
+# the only moment either layer is distinguishable. `setdefault` keeps a value
+# already on the task, and afterwards the merged environment carries no trace
+# of which side won — comparing values later proves only that they agree. Key
+# names and the layer, never values: this dict is passed to the flag-state
+# report, and the same blob holds DATABASE_URL and four API keys.
+_SECRET_ORIGIN: dict = {}
+
+
 def _load_secrets() -> None:
     sid = os.environ.get("STRIDE_SECRET_ID", "stride/prod")
     sm = boto3.client("secretsmanager", region_name=REGION)
     blob = json.loads(sm.get_secret_value(SecretId=sid)["SecretString"])
     for k, v in blob.items():
+        _SECRET_ORIGIN[k] = "task-env" if k in os.environ else "secret"
         os.environ.setdefault(k, v)
 
 
@@ -1263,6 +1273,111 @@ def job_panel_proof() -> dict:
             "degraded": bool(usable is not None and total and usable < total)}
 
 
+def job_flag_state() -> dict:
+    """What every STRIDE_* flag is resolved to IN THE CONTAINER, and whether
+    it could be set at all.
+
+    A checkout cannot answer this. Production environment is the stride/prod
+    blob, which is not in the repository, so "which of our default-off fixes
+    are live?" was answered by reading source — and read wrong twice. This
+    executes instead, which is the same remedy verify-jobs was built on.
+
+    Writes no domain data: no ledger row, no odds snapshot, no racecard, no
+    tips file, no prediction audit. It reads source and os.environ. What it
+    does write is what dispatch() writes for every job — one stride_run_state
+    row under this job's own name, and the model/panel staging every task
+    does on the way in. Neither touches anything a bet is computed from, so
+    it is safe on a race day and safe beside a real job; "writes nothing at
+    all" would be the overstatement.
+
+    Dispatched as `jobs=flag-state` on verify-jobs, which borrows the
+    stride-preflight task definition (there is no stride-flag-state family;
+    see the TD case there) and overrides STRIDE_JOB, exactly as the proof
+    jobs do.
+
+    The full report goes to the evidence store, not the log: the container is
+    gone minutes later and every log print here is tail-bounded, so a report
+    that only ever existed in stdout is not a record. The log keeps the
+    counts, the flags that are ON and the undeliverable names — by name,
+    because "3 flags on" tells a reader nothing about which three.
+
+    FLAG_STATE_SECRET_ORIGIN carries the merge record from _load_secrets so
+    the report can say "secret" or "task-env overrode secret" as a fact.
+    Without it every key present in both layers reports as ambiguous, which
+    is true but useless.
+    """
+    fname = f"flag_state_{_today()}.json"
+    os.environ["FLAG_STATE_SECRET_ORIGIN"] = json.dumps(
+        {k: v for k, v in _SECRET_ORIGIN.items() if k.startswith("STRIDE_")})
+    # _run, not _run_ok: stdout here is the JSON this job parses and re-reports
+    # as a readable summary, and _run_ok would echo 4000 chars of it first,
+    # filling the log's bounded tail with the same data in the least readable
+    # form and pushing the summary out of view. stderr is still relayed — it
+    # carries where the evidence landed.
+    proc = _run("flag_state.py", "--json", "--evidence", fname)
+    if proc.stderr and proc.stderr.strip():
+        print(proc.stderr[-4000:], file=sys.stderr)
+    if proc.returncode != 0:
+        raise RuntimeError(f"flag-state: flag_state.py exited {proc.returncode}")
+    try:
+        report = json.loads(proc.stdout)
+    except ValueError as e:
+        raise RuntimeError(
+            f"flag-state: flag_state.py --json did not emit JSON ({e}). The "
+            f"job cannot report a flag set it could not parse.") from e
+
+    counts = report.get("counts") or {}
+    flags = report.get("flags") or {}
+    # The silent no-op class: a scan that finds nothing exits 0 and reports a
+    # clean bill of health. Zero flags means the scanner broke, not that the
+    # repo has no flags.
+    if not flags or not counts.get("with_read_sites"):
+        raise RuntimeError(
+            "flag-state: the scan returned no flags with a reader. That is a "
+            "broken scan, not a clean result — the repo has dozens.")
+
+    # The reader scan lives in server/python, which the image carries, so it
+    # is green even when every DELIVERY input is missing — and a missing
+    # source degrades to "no delivery path", the opposite claim. This job ran
+    # green and reported 47 undeliverable flags instead of 37, naming every
+    # retrain-gate flag among them, until the sources were reported. An
+    # incomplete matrix is worse than none: it is confidently backwards.
+    if not report.get("delivery_complete"):
+        missing = {k: v["path"] for k, v in (report.get("delivery_sources") or {}).items()
+                   if not v.get("available")}
+        raise RuntimeError(
+            f"flag-state: the delivery matrix is incomplete — these inputs "
+            f"could not be read in this container: {missing}. Every flag would "
+            f"report 'no delivery path', which is the opposite of the truth "
+            f"for anything the secret or the image sets. Refusing to publish it.")
+
+    print(f"[flag-state] scope={report.get('scope')} "
+          f"provenance={'exact' if report.get('origin_recorded') else 'ambiguous'}")
+    print(f"[flag-state] {counts.get('names_seen')} names | "
+          f"{counts.get('with_read_sites')} with a reader | "
+          f"{counts.get('in_secret_blob')} in secret | "
+          f"{counts.get('set_by_image')} set by image | "
+          f"{counts.get('no_delivery_path')} undeliverable")
+    # Values, by name, for the flags that gate the fixes under review. A count
+    # of "how many are on" would pass whichever ones were on.
+    #
+    # `effective`, not `resolved`: a default-on flag with nothing in the
+    # environment IS on, and reading only what env carries omits it.
+    # STRIDE_INTERACTION_PARITY is the live case — default 'true', and with no
+    # delivery path it cannot be turned off either.
+    on = sorted(n for n, f in flags.items()
+                if str(f.get("effective") or "").strip().strip("'").lower()
+                in ("true", "1", "yes"))
+    print(f"[flag-state] ON in this container: {on or 'none'}")
+    print(f"[flag-state] undeliverable: {report.get('no_delivery_path')}")
+
+    return {"last_success_date": _today(),
+            "flags_with_reader": counts.get("with_read_sites"),
+            "flags_undeliverable": counts.get("no_delivery_path"),
+            "flags_on": len(on),
+            "evidence": fname}
+
+
 def job_nightly_etl() -> dict:
     yesterday = (datetime.now(SYD).date() - timedelta(days=1)).strftime("%Y-%m-%d")
     for script, args in (("nsw_sectional_collector.py", ("--date", yesterday)),
@@ -1336,6 +1451,9 @@ JOBS = {
     "llm-proof": job_llm_proof,
     "consensus-proof": job_consensus_proof,
     "panel-proof": job_panel_proof,
+    # Reads source and os.environ, writes nothing: the one job that is safe
+    # beside any other, on any day.
+    "flag-state": job_flag_state,
     "nightly-etl": job_nightly_etl,
     "weekly-digest": job_weekly_digest,
 }

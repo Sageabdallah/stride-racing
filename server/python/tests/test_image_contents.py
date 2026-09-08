@@ -80,6 +80,37 @@ def test_root_modules_loaded_by_path_are_copied_into_the_image():
         f"swallowed into an empty result. Add a COPY line.")
 
 
+def test_non_module_paths_read_at_runtime_are_copied_into_the_image():
+    """The same defect, one class wider: repo files read by path that are not
+    .py modules.
+
+    flag_state.py reads infra/01_secrets.sh and infra/jobs/handler.py to answer
+    "could this flag be set at all". Neither was in the image, and each
+    accessor returns an empty set on a missing path, so the report named every
+    secret-deliverable flag as undeliverable — the opposite of the truth — and
+    the job exited 0. The module-level check above could not see it because
+    neither is a module.
+
+    .github/workflows is the third source and is deliberately NOT copied:
+    inside the image it would put every YAML edit in IMAGE_PATHS and make the
+    deploy-freshness gate alarm on config that cannot change image behaviour.
+    flag_state treats it as optional and proves, where it can read it, that no
+    gate-able flag depends on it alone.
+    """
+    copied = _copied_sources()
+    required = {
+        "infra/01_secrets.sh": "flag_state.secret_keys",
+        "infra/jobs": "flag_state.handler_setters (as jobs/ in the image)",
+    }
+    missing = {path: reader for path, reader in required.items() if path not in copied}
+    assert not missing, (
+        f"read at runtime by path but never COPYed into the image: {missing}. "
+        f"Present in every checkout and CI runner, absent from the one place "
+        f"the job runs. Add a COPY line to infra/Dockerfile.")
+    for path in required:
+        assert (ROOT / path).exists(), f"{path} is COPYed but missing from the repo"
+
+
 def test_root_modules_loaded_by_path_exist_in_the_repo():
     """A COPY of a file that has been renamed away fails the build, not the run,
     but the reverse — a rename that leaves the loader pointing at nothing —

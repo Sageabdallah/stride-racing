@@ -56,6 +56,7 @@ IMAGE_PATHS = (
     "migrations/",
     "infra/jobs/",
     "infra/entrypoint.sh",
+    "infra/01_secrets.sh",
     "infra/Dockerfile",
     "racing_system_v8.3_mc.py",
 )
