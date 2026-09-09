@@ -94,6 +94,50 @@ BUCKET_WEIGHTS = {
 DAILY_TAVILY_CAP = 50     # panel extract (up to 35+ active sources)
 DAILY_CLAUDE_CAP = 200    # batched panel extraction (~40) + web search research (~40) + buffer
 
+# The floor under consensus yield, as a fraction of scored horses carrying at
+# least one mention.
+#
+# The old contract tested mentions == 0 and nothing else. On 2026-09-05, with
+# Perplexity already dark, the panel scored two stray horses out of 779 across
+# 55 races — 0.26% — so mentions == 0 was False, the run exited 0, and the
+# collapse reported success for four more days. It was only caught on
+# 2026-09-09 because the panel happened to hit nothing at all that morning.
+# Whether the alarm fired was a coin flip on panel noise, not a change in
+# system state: a cliff at zero passes the exact failure it guards against.
+#
+# 5% is deliberately far below the observed healthy band. Measured from the
+# tips artifacts, horses carrying mentions ran 18-33% across 2026-08-27 to
+# 2026-09-02 and fell to 0.26% on 2026-09-05, so this fires on a collapse and
+# keeps ~3.6x headroom against the worst healthy day seen (17.9%, 2026-08-28).
+# Those shares are pick-level, measured from the tips artifacts, while this
+# floor is the health dict's horse-level ratio — adjacent populations, not the
+# same one, which is another reason to treat it as provisional. It is a floor
+# rather than a
+# target: raise it once _write_health has banked a real distribution of
+# yield_rate, which every run now records whether it passes or fails.
+#
+# STRIDE_CONSENSUS_MIN_YIELD overrides it; 0 disables the check.
+DEFAULT_MIN_YIELD = 0.05
+
+
+def min_yield() -> float:
+    """The configured yield floor, or the default. Out-of-range values are
+    ignored rather than obeyed — a typo'd 50 would fail every day forever."""
+    raw = os.environ.get("STRIDE_CONSENSUS_MIN_YIELD", "").strip()
+    if not raw:
+        return DEFAULT_MIN_YIELD
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"[CONSENSUS] STRIDE_CONSENSUS_MIN_YIELD={raw!r} is not a "
+              f"number; using {DEFAULT_MIN_YIELD}", file=sys.stderr)
+        return DEFAULT_MIN_YIELD
+    if not 0.0 <= value <= 1.0:
+        print(f"[CONSENSUS] STRIDE_CONSENSUS_MIN_YIELD={value} is outside "
+              f"0..1; using {DEFAULT_MIN_YIELD}", file=sys.stderr)
+        return DEFAULT_MIN_YIELD
+    return value
+
 
 # ── Extraction model ──
 # Read from env, never hardcoded. The previous hardcoded id
@@ -244,6 +288,30 @@ def _check_cap(usage: dict, key: str, cap: int) -> bool:
     return usage.get(key, 0) < cap
 
 
+def search_optional() -> bool:
+    """Running without the web-research leg, on purpose.
+
+    Mirrors STRIDE_PANEL_OPTIONAL: local dev and CI have no Perplexity credit,
+    and "absent by design" has to be a thing you can say, or the guard just
+    gets deleted the first time it is inconvenient.
+    """
+    return os.environ.get(SEARCH_OPTIONAL_ENV, "").strip().lower() in (
+        "true", "1", "yes")
+
+
+def _pplx_record(usage: dict, outcome: str) -> None:
+    """Tally what Perplexity actually returned, not just what was asked of it.
+
+    Deliberately NOT the "perplexity_" prefix: search_race_tips_perplexity_multi
+    sums every key starting with that to decide its spend warning, and an
+    outcome tally read as spend would be worse than no tally. These land in
+    health["api_calls"], which is what lets a zero-yield exit name the leg that
+    went dark instead of reporting the symptom (issue #176).
+    """
+    key = f"pplx_{outcome}"
+    usage[key] = usage.get(key, 0) + 1
+
+
 def is_content_usable(
     content: str, url: str, field_names: list[str]
 ) -> tuple[bool, str]:
@@ -308,6 +376,31 @@ def match_horse_to_field(extracted_name: str, field_names: list[str]) -> str | N
 
 
 PANEL_OPTIONAL_ENV = "STRIDE_PANEL_OPTIONAL"
+SEARCH_OPTIONAL_ENV = "STRIDE_SEARCH_OPTIONAL"
+
+# Auth and billing. Perplexity's own docs put "an account which ran out of
+# credits" under 401 alongside a deleted key, and 402 under exhausted credits;
+# 403 is the same family. None of them is transient: retrying spends four more
+# doomed calls per race and reaches the same place with the card burned.
+#
+# 429 is deliberately NOT here. Rate limiting IS transient, and treating it as
+# fatal would kill a healthy day the first time a burst got throttled.
+PPLX_FATAL_STATUSES = frozenset({401, 402, 403})
+
+
+class SearchUnavailable(RuntimeError):
+    """Perplexity refused the run for auth or billing. Fatal by design.
+
+    Between 2026-09-02 and 2026-09-05 the account ran out of credits. Every
+    query 4xx'd, search_race_tips_perplexity_multi returned an empty summary,
+    claude_research_race turned that into {"horses_found": []}, and the run
+    carried on to the end of the card before reporting a generic zero yield.
+    The web-research leg is one of only two mention sources and the panel has
+    measured 3/16 usable since 2026-08-06, so losing it loses the day. Say so
+    on the first race instead of the last.
+
+    Set STRIDE_SEARCH_OPTIONAL=true to run panel-only on purpose.
+    """
 
 
 class PanelUnavailable(RuntimeError):
@@ -742,7 +835,27 @@ def search_race_tips_perplexity_multi(
     """
     perplexity_key = os.getenv("PERPLEXITY_API_KEY")
     if not perplexity_key:
-        print("    [PERPLEXITY_MULTI] No API key — falling back", file=sys.stderr)
+        # There is no fallback. claude_research_race returns an empty result
+        # the moment this returns an empty summary, so this branch is the
+        # entire web-research leg going dark for every race of the day — and
+        # with the panel measured at 3/16 usable, that is the whole yield. The
+        # old wording said the opposite of what the code does.
+        _pplx_record(usage, "nokey")
+        print("    [PERPLEXITY_MULTI] No PERPLEXITY_API_KEY — web research is "
+              "DISABLED for this race; there is no fallback", file=sys.stderr)
+        if not search_optional():
+            # Same abort as an auth/billing refusal, and it has to be here as
+            # well: an ABSENT key never makes an HTTP call, so it never sees a
+            # 401/402/403. Guarding only the refusal path would have left the
+            # commonest configuration fault — a key missing from the container
+            # environment — burning the whole card exactly as before, which is
+            # the opposite of what this guard claims to do.
+            raise SearchUnavailable(
+                "PERPLEXITY_API_KEY is not set in the container environment, "
+                "so the web-research leg is dark for every race. This is a "
+                "secrets-delivery fault, not a provider fault: the key never "
+                "reached the task. Refusing to score a card without it. Set "
+                f"{SEARCH_OPTIONAL_ENV}=true to run panel-only on purpose.")
         return "", 0, {}
 
     field_lines_list = []
@@ -805,13 +918,32 @@ def search_race_tips_perplexity_multi(
             )
 
             if response.status_code != 200:
-                print(f"    [PERPLEXITY_MULTI] {label} error {response.status_code}", file=sys.stderr)
+                # The body, as search_race_tips_perplexity above already keeps
+                # it. A bare status cannot tell a retired model id from a
+                # revoked key from a spent quota, and on 2026-09-08 that was
+                # the whole distance between "which dependency broke" and
+                # "something did" (issue #176).
+                _pplx_record(usage, f"err_{response.status_code}")
+                print(f"    [PERPLEXITY_MULTI] {label} error "
+                      f"{response.status_code}: {response.text[:200]}",
+                      file=sys.stderr)
                 per_query_counts[label] = 0
+                if (response.status_code in PPLX_FATAL_STATUSES
+                        and not search_optional()):
+                    raise SearchUnavailable(
+                        f"Perplexity returned {response.status_code} for "
+                        f"{track} R{race_number} ({label}): "
+                        f"{response.text[:200]}. Auth or billing — not "
+                        f"transient. Check the API key and the account credit "
+                        f"balance. Refusing to spend the rest of the card "
+                        f"proving it. Set {SEARCH_OPTIONAL_ENV}=true to run "
+                        f"panel-only on purpose.")
                 continue
 
             data = response.json()
             content = data["choices"][0]["message"]["content"]
             citations = data.get("citations", [])
+            _pplx_record(usage, "ok")
 
             for c in citations:
                 if isinstance(c, str):
@@ -830,9 +962,15 @@ def search_race_tips_perplexity_multi(
             time.sleep(1)
 
         except _requests.exceptions.Timeout:
+            _pplx_record(usage, "timeout")
             print(f"    [PERPLEXITY_MULTI] {label} timeout — skipping", file=sys.stderr)
             per_query_counts[label] = 0
+        except SearchUnavailable:
+            # Must outrun the catch-all below, which exists to keep one bad
+            # query from killing a race. This is not one bad query.
+            raise
         except Exception as e:
+            _pplx_record(usage, f"exc_{type(e).__name__}")
             print(f"    [PERPLEXITY_MULTI] {label} failed: {e}", file=sys.stderr)
             per_query_counts[label] = 0
 
@@ -1370,6 +1508,11 @@ def build_health(date_str: str, results_by_race: dict, usage: dict,
         for d in r.values() if isinstance(d, dict) and d.get("total_mentions", 0) > 0
     )
     ok = sum(1 for e in panel_log if e.get("fetch_status") == "SUCCESS")
+    # The ratio the old contract never looked at. Recorded on every run, pass
+    # or fail, so the floor below can eventually be set from data instead of
+    # from one incident.
+    yield_rate = (scored / horses) if horses else 0.0
+    floor = min_yield()
     return {
         "race_date": date_str,
         "dry_run": dry_run,
@@ -1386,7 +1529,41 @@ def build_health(date_str: str, results_by_race: dict, usage: dict,
         # The condition that must never again pass silently. A dry run makes no
         # extraction calls, so zero mentions is its expected result, not a fault.
         "zero_yield": (not dry_run) and races > 0 and mentions == 0,
+        "yield_rate": round(yield_rate, 4),
+        "min_yield": floor,
+        # Strictly the band ABOVE zero_yield: mentions > 0 but too few to be
+        # worth anything. Kept as its own flag so the two failures stay
+        # distinguishable in the health file and in the alert.
+        "low_yield": ((not dry_run) and races > 0 and horses > 0
+                      and mentions > 0 and floor > 0
+                      and yield_rate < floor),
     }
+
+
+def _zero_yield_breakdown(h: dict) -> str:
+    """One line naming which of the two mention sources produced nothing.
+
+    Reads only what build_health already recorded — no new state, no second
+    pass. Kept short on purpose: it travels to SNS inside a bounded stderr
+    tail, and a breakdown that overruns that bound is a breakdown nobody woken
+    at 05:37 gets to read.
+    """
+    calls = h.get("api_calls") or {}
+    attempted = sum(v for k, v in calls.items() if k.startswith("perplexity_"))
+    ok = calls.get("pplx_ok", 0)
+    failures = sorted((k[len("pplx_"):], v) for k, v in calls.items()
+                      if k.startswith("pplx_") and k != "pplx_ok")
+    detail = ", ".join(f"{name}={n}" for name, n in failures) or "none recorded"
+    return (
+        f"panel {h.get('panel_fetch_success', 0)}/"
+        f"{h.get('panel_fetch_attempted', 0)} sources fetched OK | "
+        f"perplexity {attempted} queries, {ok} returned content ({detail}) | "
+        f"claude extraction calls {calls.get('claude', 0)} | "
+        f"tavily {calls.get('tavily', 0)} | "
+        f"yield {h.get('horses_with_mentions', 0)}/{h.get('horses_scored', 0)} "
+        f"({h.get('yield_rate', 0):.2%} vs floor {h.get('min_yield', 0):.0%}) | "
+        f"model {h.get('extraction_model', '?')}"
+    )
 
 
 def _write_health(date_str: str, health: dict) -> None:
@@ -1468,12 +1645,22 @@ def run_consensus_agent(
     tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
-    if not tavily_key:
-        print("[CONSENSUS] ERROR: TAVILY_API_KEY not set in .env", file=sys.stderr)
-        return {}
-    if not anthropic_key:
-        print("[CONSENSUS] ERROR: ANTHROPIC_API_KEY not set in .env", file=sys.stderr)
-        return {}
+    # Raised, not returned. `return {}` left LAST_RUN_HEALTH empty, so main()'s
+    # exit contract found no zero_yield, skipped the db_mirror branch on a
+    # falsy health dict, and fell off the end — exit 0. A consensus run with no
+    # API keys reported SUCCESS, wrote no consensus file, and left every
+    # downstream pick to degrade to NO_BET with no alarm anywhere: the silent
+    # no-op class, in the one job whose absence is hardest to see. It gets the
+    # same treatment the DATABASE_URL check below already has (issue #176).
+    missing = [name for name, val in (("TAVILY_API_KEY", tavily_key),
+                                      ("ANTHROPIC_API_KEY", anthropic_key))
+               if not val]
+    if missing:
+        raise RuntimeError(
+            f"{', '.join(missing)} not set — consensus cannot fetch the panel "
+            f"or extract picks, so every race would score zero mentions. "
+            f"Failing before any spend rather than reporting an empty run as "
+            f"a successful one.")
 
     # Presence check only — no connection is opened here, or anywhere before
     # the write site. A missing DATABASE_URL used to crash at startup; the
@@ -1890,7 +2077,9 @@ def run_consensus_agent(
     print(
         f"[CONSENSUS] Complete. API calls: Tavily={usage.get('tavily', 0)}, Claude={usage.get('claude', 0)} | "
         f"mentions={health['total_mentions']} across {health['races']} races "
-        f"({health['horses_with_mentions']}/{health['horses_scored']} horses)",
+        f"({health['horses_with_mentions']}/{health['horses_scored']} horses, "
+        f"yield {health.get('yield_rate', 0):.2%} vs floor "
+        f"{health.get('min_yield', 0):.0%})",
         file=sys.stderr,
     )
     return results_by_race
@@ -2006,6 +2195,13 @@ def main():
         # number means one thing however consensus was invoked.
         print(f"[CONSENSUS] FATAL: {e}", file=sys.stderr)
         sys.exit(6)
+    except SearchUnavailable as e:
+        # 7: the OTHER mention source is gone. Distinct from 6 because the
+        # repair is different — 6 is a staging problem, 7 is a key or a credit
+        # balance — and distinct from 4 because 4 says "we looked and found
+        # nothing" where this says "we were never able to look".
+        print(f"[CONSENSUS] FATAL: {e}", file=sys.stderr)
+        sys.exit(7)
 
     # Exit contract. A day that scored races but found nothing is a broken run,
     # not a quiet one, and the pipeline must be able to tell: without a non-zero
@@ -2017,6 +2213,30 @@ def main():
             f"Treating as a failed run, not a quiet day.",
             file=sys.stderr,
         )
+        # Last line before the exit, so it is the line the alert's stderr tail
+        # is guaranteed to carry. Six distinct faults reach exit 4 — no
+        # Perplexity key, Perplexity 4xx, a spent Claude cap, unparseable
+        # extraction JSON, a panel below the usable floor, a horse matcher that
+        # matches nothing — and on 2026-09-08 the operator's entire
+        # notification was "consensus_agent.py exited 4" (issue #176). The
+        # numbers that separate them were already in the health dict.
+        print(f"[CONSENSUS] zero-yield breakdown: {_zero_yield_breakdown(h)}",
+              file=sys.stderr)
+        sys.exit(4)
+    if h.get("low_yield"):
+        # Same exit code as zero yield: downstream, "consensus produced nothing
+        # usable" is one condition and job_consensus_agent's handling of 4 is
+        # already right for it. The message is what separates them.
+        print(
+            f"[CONSENSUS] FATAL: {h['horses_with_mentions']}/"
+            f"{h['horses_scored']} horses carried a mention "
+            f"({h['yield_rate']:.2%}), below the {h['min_yield']:.0%} floor. "
+            f"A collapse this size used to exit 0 because mentions were not "
+            f"exactly zero — that is how 2026-09-05 reported success.",
+            file=sys.stderr,
+        )
+        print(f"[CONSENSUS] low-yield breakdown: {_zero_yield_breakdown(h)}",
+              file=sys.stderr)
         sys.exit(4)
     if h and not h.get("db_mirror_ok", True):
         print("[CONSENSUS] FATAL: DB mirror failed after retries.", file=sys.stderr)
