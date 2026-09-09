@@ -587,9 +587,16 @@ call.**
   concurrently and *all* `tool_result`s return in one user message; a failed
   tool returns `is_error: true` rather than being dropped. `stop_reason`
   handling: `max_tokens` → retry once with a larger cap; `refusal` → the
-  fixed refusal answer, no retry; `pause_turn` → continue. `max_tokens` is
-  at least 16,000 with streaming — the prototype's 4,000 truncates a
-  two-table answer. Adaptive thinking on; no `temperature`; no prefill.
+  fixed refusal answer, no retry; `pause_turn` → continue. **`max_tokens` is
+  64,000 with streaming** — a backstop, not a tuning knob. The model never
+  sees it, and hitting it truncates mid-thought and costs a retry: Anthropic's
+  published coding runs had a 16,384 cap end 15 % of Claude Opus 5's attempts,
+  none of them solved, so the capped runs spent less per attempt and bought
+  proportionally fewer completions. The prototype's 4,000 is far too low and
+  v5's 16,000 was still a lowball. To shorten what the user reads, specify the
+  output shape in the prompt; to shorten reasoning, use `effort` (§10.5).
+  Treat `stop_reason: "max_tokens"` as a failed turn, not something to retry
+  at the same cap. Adaptive thinking on; no `temperature`; no prefill.
 - **Volatile context** (`now_in_user_tz`, `calendar_state`,
   `session_entities`, `capability_profile`, `pipeline_coverage`) goes after
   the cache breakpoint (§3.4). The per-turn usage line records
@@ -879,7 +886,9 @@ roughly US$0.21 a turn. Deterministic block assembly (§7) avoids it.
 | 1,000 | ~US$3,600/mo | ~US$6,300/mo |
 
 These are estimates from a worked example, not measurements; Tier 1 (§15.2)
-records the real number before any cap is set.
+records the real number before any cap is set. They are also **pre-optimisation**
+figures: §10.5 ranks the levers that act on them, the largest of which is worth
+a measured 16x on the dominant input component and costs nothing in quality.
 
 The AWS side needs more care than v5's "a few dollars" (§23 finding 20).
 `infra/03_notifications.sh` records steady state at about US$0.03 a day, so
@@ -915,6 +924,88 @@ composer is on at all; measure before switching.
 Briefings: cached per user per day, zero PF calls, generated through the
 Batch API. `GET /bootstrap`: shared part cacheable per minute; per-user part
 never in a shared cache. SSE replay: last K events per job, short TTL.
+
+### 10.5 Cost levers, ranked — free wins before tradeoffs
+
+Ranked by savings ceiling, **not** application order. Everything here is a
+code-read estimate: no chat code exists yet, so there are no `usage` logs and
+no measured baseline. The ceilings are therefore relative buckets, and the
+Tier 1 run (§15.2) is what turns them into numbers.
+
+| # | Lever | Type | Ceiling | Basis |
+|---|---|---|---|---|
+| 1 | Project tool results to the fields the answer needs | free win | **largest** | Measured on `examples/sample_race.json` |
+| 2 | Answer templated questions from the read model with no model call | free win | large | Design |
+| 3 | Prompt caching, two breakpoints (§14) | free win | large | Prefix measured at 1.5–6 k tokens |
+| 4 | Deterministic block assembly instead of a composer call | free win | medium | §22 finding 2, already applied |
+| 5 | Batch API for briefings | free win | medium, on that class only | Guide: 50 % on every token |
+| 6 | `max_tokens` as a backstop at 64,000 | free win | small, and it is a *saving* not a cost | §7 |
+| 7 | Effort sweep | **tradeoff — needs an eval** | large | Published curves |
+| 8 | Task budgets | **tradeoff — needs an eval** | medium | Published: ~18 % for ~2.7 points |
+| 9 | Model choice | **tradeoff — needs an eval** | large | Last, deliberately |
+
+**1. Tool-result projection is the biggest lever, and it is free.** One
+9-runner race in the day artifact is 48,305 bytes, roughly 12,000 tokens.
+**71 % of that is prose the pipeline's own LLM wrote** (`ai_insight` and
+`brief_assessment`), and the file carries 16 runner objects for a 9-horse
+field because the same runner repeats across `top_picks`, `raw_model_leader`,
+`bet_pick`, `coverage_pick`, `primary_pick` and `full_field`. Handing that to
+Claude raw would spend 12,000 input tokens to convey about 760 tokens of
+racing. Projected to one row per runner with the fields an answer actually
+uses, the same race is 3,046 bytes — a **16x reduction on the dominant input
+component**, before any other lever runs. Rules that follow from it:
+
+- Tools return projections, never raw artifact objects. `ai_insight` reaches
+  the model only when the user asked for the pipeline's own commentary, and
+  then for one runner, not a field.
+- Every list tool takes `limit` and `fields`. Narrow accessors over data
+  dumps.
+- Stage values (§8.1) are a dozen floats per runner; include them only for
+  the runners under discussion, not the field.
+- Cap every tool result and say so in the result when it truncates.
+
+**2. Not every question needs a model.** "What is racing today", "what did
+you rate her in race 5", "how did last week's tips go" are read-model lookups
+with a fixed answer shape. A deterministic classifier that recognises the top
+templated questions and renders blocks directly costs zero tokens and returns
+in milliseconds. Anything it does not recognise falls through to the
+orchestrator unchanged. This is the same principle as §10.1's
+`budget_exhausted` fallback, promoted from a degraded mode to the fast path,
+and it is measured as **cost per completed task** rather than per call.
+
+**3. Caching** is §14. Note the honest ceiling: this workload's input is
+mostly per-request payload, which can never cache. The published 2.5x to 3.7x
+agent-loop figures come from workloads with large stable prefixes. Here the
+win is concentrated in the loop's repeated tool results, which is why §14 puts
+a breakpoint after them.
+
+**7–9. The tradeoffs stay proposals until an eval exists.** There is no
+harness that scores the block contract today (§23 finding 16), so a saving
+cannot be told apart from a regression. Once there is one, sweep in this
+order, one change at a time, cells byte-identical except the variable:
+effort first, then task budgets, then model. Two published expectations worth
+carrying into that sweep: on research and knowledge workloads the effort
+curve is nearly flat, with `medium` matching the default's accuracy at 70–85 %
+of its cost, and a chat workload is closer to that shape than to coding; and
+before building any cheap-model cascade, price the strong model at lower
+effort on the same tasks, because a cascade also forfeits cache reuse across
+its models.
+
+**Levers deliberately skipped, so they are not re-litigated:** context editing
+and compaction (the loop is capped at 8 rounds and sessions hold 12 messages,
+so neither trigger is reached, and the guide records context editing costing
+more than it saved); tool search with `defer_loading` (schemas measure about
+800 tokens, far under the ~10 k where the search step pays); programmatic tool
+calling (incompatible with `strict: true`, which is load-bearing here); the
+advisor and orchestrator patterns (no bulk fan-out — a chat turn is one
+dependent chain); and fast mode (a premium, the opposite direction).
+
+**What would turn these estimates into measurements**, in order of how cheap
+they are: the Console usage figures for the Anthropic key the consensus agent
+already spends on, which is a real baseline for a real workload in this
+account; an Admin API key, which makes the usage and cost reports readable
+directly and costs no tokens; and, once any chat code runs, the per-turn
+`usage` line §9.4 already specifies, which carries all four token counts.
 
 ---
 
@@ -1035,11 +1126,37 @@ predictions in the read model, settlement in the pipeline's own
 
 ---
 
-## 14. Caching (v5)
+## 14. Caching (v5.2)
 
-- Prompt cache: tools + system prompt as the stable prefix; volatile context
-  after the breakpoint; the default 5-minute TTL, or the 1-hour TTL if
-  traffic is sparse enough that the 5-minute cache keeps expiring.
+- **Prompt cache — two breakpoints, and it stays on permanently.**
+  1. *Explicit, on the static prefix*: tool schemas then the system prompt,
+     rendered in that order and byte-frozen. Measured from the prototype this
+     is about 1,500 tokens today and 4,000 to 6,000 once v5's track profiles,
+     band vocabulary and voice rules are added — comfortably over Claude Opus
+     5's 512-token minimum. Because every user shares one system prompt and
+     one tool list, and caches are per workspace, **any user's turn keeps the
+     prefix warm for everyone**. That is the one place this workload's shape
+     helps rather than hurts.
+  2. *Rolling, after the tool results of each round*: the loop resends the
+     whole growing conversation every round, so with an 8-round cap the first
+     round's tool results can be billed eight times. A breakpoint after them
+     reprices the repeats at 0.1x. This is worth more here than the static
+     prefix, because the prefix is small and the tool results are not.
+  Volatile per-turn context (time, calendar state, session entities) goes
+  after the last breakpoint, never inside the cached prefix.
+- **TTL: start on the 5-minute default, and pre-warm rather than pay for an
+  hour.** A read refreshes the entry at no cost, and the lifetime runs from
+  the *start* of the writing request, so generation time counts against it.
+  Traffic here is bursty: clustered on race mornings, near-silent overnight.
+  Inside a burst, turns start well under five minutes apart and the default
+  TTL is strictly cheaper. Across the gap to the next burst, a 1-hour TTL
+  would double every write to cover a window that is usually hours wide
+  anyway. If measurement shows the gaps sitting in the five-to-sixty-minute
+  band, switch to the 1-hour TTL for that window only. **Verify from
+  `usage.cache_read_input_tokens`, never from code review**: on a warm loop
+  reads should dominate regular input tokens and `cache_creation_input_tokens`
+  should be about one round's worth. Zero reads across repeated turns means a
+  breakpoint has something dynamic above it.
 - Read model: hot per container in module scope, refreshed on a version
   stamp the materialiser writes.
 - PuntingForm: per-key in-memory TTL cache only (§10.3). **No shared PF
