@@ -1,4 +1,4 @@
-# Stride — Backend Plan v4
+# Stride — Backend Plan v5 (v4, audited)
 
 **Vision: the go-to place to ask anything about Australian horse racing.**
 
@@ -7,9 +7,27 @@ plain English. Stride answers from three grounded sources — PuntingForm data
 (user's key), Stride's own ML models (pre-computed race predictions), and
 cited web search — with explicit provenance on every claim.
 
-Priorities: **credential security > UX > robustness**. v3 made UX lead; v4
-adds a shared-access key for keyless users and gives the model ensemble a
-voice.
+Priorities: **licence compliance > credential security > UX > robustness**.
+v4 put credential security first; v5 adds one rung above it, because a
+product that breaches the data licence it runs on has no UX left to protect
+(§9, §16).
+
+**What v5 is.** v4 audited on 2026-09-09 against the two repositories it has
+to run in — `stride-racing` (the pipeline and the AWS estate) and `stride-app`
+(the web app, its chat, its eval suite and four unmerged `chat/*` branches) —
+and against the 2026-09-03 audit of the earlier "chat Lambda" plan
+(`docs/chat/CHAT_LAMBDA_ARCHITECTURE_AUDIT.md`). Every locked decision was
+checked. Where v4 assumed something that does not exist, v5 names what does
+exist and re-bases the decision on it. Where v4 was missing a control, v5
+adds it. Nothing in v5 is implemented; §15 is how it will be tested, §16 is
+what must be true before it can function, §19 is the change log with the
+evidence for each change, §20 is the list of decisions only the operator can
+make.
+
+**Read this first if you read nothing else.** v4 references "v2 §6", "v2
+§7", "v2 §13" and "v3" as if they stand. They are not in either repository
+(`git log --all -- '*plan*'` finds only this file). v5 inlines what it needs
+from them so the plan is self-contained.
 
 ---
 
@@ -22,58 +40,106 @@ voice.
    well-set numbers are the aesthetic.
 3. **Honesty is a feature.** Saying "my model doesn't cover this meeting" or
    "your plan doesn't include sectionals" plainly builds more trust than a
-   smooth non-answer. The honesty gradient (§10) is brand, not fallback.
+   smooth non-answer. The honesty gradient (§11) is brand, not fallback.
 4. **Probabilities, not tips.** Model output is framed as analysis with a
-   responsible-gambling notice — never as "bets" or "tips".
+   responsible-gambling notice — never as "bets" or "tips". *(v5 note: the
+   pipeline's own product surface is a BET/NO_BET contract and a `selections`
+   table the existing app displays as tips. This principle is a positioning
+   decision for the chat surface; it does not rename the pipeline's output,
+   and the chat must not pretend the bet contract does not exist when asked.
+   See §20 Q1.)*
 5. **The racing calendar is the home screen.** The product breathes with the
    real racing week. Ambient, current, specific — never a generic empty box.
+6. **(v5) Spend is a security property.** Every model call sits behind
+   authentication and a budget. An unauthenticated chat is an open invoice
+   (§9, §10).
+7. **(v5) Reuse before build.** The estate rule is to reuse current
+   infrastructure and document a reason for any new AWS service
+   (`docs/decision-learning/01_GLOBAL_RULES.md` rule 28;
+   `16_CLAUDE_CODE_EXECUTION_PROTOCOL.md` "AWS Change Protocol"). Most of v4's
+   new services had no reason that survives §1; v5 removes them.
 
 ---
 
-## 1. Locked decisions
+## 1. Starting point — what already exists (v5, all new)
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| LLM | Claude (Anthropic Messages API) | Tool-use with strict schemas (parseable plans); server-side web search returns source URLs natively |
-| Web fallback | Claude web search tool | ChatGPT-style citations without operating a search API |
-| Key encryption | AWS KMS envelope encryption behind `KeyProvider` | Per-user encryption context; CloudTrail decrypt audit; local dev provider refuses `ENV=production` |
-| Multi-tenancy | Single shared FastAPI, OIDC/JWT | No per-user VMs |
-| Model output | Win/place probabilities per runner (XGB+LGBM+CatBoost ensemble) + fair odds | Natural conversational unit; exotics later |
-| Prediction production | Batch pipeline, pre-computed for upcoming races | Chat path = DB read; matches "races in the pipeline" |
-| Model features | Stride-owned pipeline PuntingForm key | Tier-independent model answers; **ToS gate (§15)** |
-| **Key-optional onboarding (v3)** | Product works without a key (model + web tiers); key unlocks personal-data tier | Value-first onboarding; key ask happens at the moment it's useful (§2.1) |
-| **Answer contract (v3)** | Block-based structured answers, not markdown strings | Native rendering, consistent quality, frontend stays dumb (§2.2) |
-| **Shared access key (v4)** | Keyless users are served PuntingForm data through a Stride-owned pool key — budget-capped, cache-first, disclosed | Value-first without a key wall; security identical to user/pipeline keys (§8). **ToS gate (§15)** |
-| **Model voice (v4)** | The ensemble's internal state (member agreement, calibration, data confidence) deterministically drives tone | The voice *is* the honesty — no manufactured personality (§2.9, §7) |
+v4 reads as if the backend is a blank page. It is not. Everything below was
+read from the repositories on 2026-09-09; paths are given so the reader can
+check.
+
+| Concern | What exists today | Where | What it means for this plan |
+|---|---|---|---|
+| Web app | Express + React (Vite). Served by Express on the operator's own machine (`PORT` 5000). **No per-user auth**: a `users` table exists, no route uses it, no `passport.*` call anywhere. Rate limits per IP: 20/min on chat routes, 120/min on `/api`. Sentry. | `stride-app` `server/index.ts`, `server/routes.ts`, `shared/schema.ts` | A multi-tenant product cannot run on a laptop with no login. Hosting and identity are prerequisites, not details (§16). |
+| Chat, on `main` | TypeScript orchestrator (~300 KB): 21 intents, 20 evidence sources, Claude synthesis, Perplexity search, JSON contracts. Pinned to the **retired** `claude-sonnet-4-20250514`, passes `temperature` (rejected on current models). Sessions in-memory, 30-min TTL, last 12 messages. Feedback to `chat_feedback`. | `server/chatOrchestrator.ts:40`, `server/strideChatService.ts:57` | The browser contract (`ChatCompletionRequest`/`Response`, trace sections, `citations[]`) is what the client renders today. v4's block contract is a client change too (§13, §16). |
+| Chat, unmerged branches `chat/01-hygiene` … `chat/04-streaming` (2026-07-29 → 08-02) | An agent loop with **five typed tools, `strict: true`** (`lookup_horse`, `get_race_card`, `get_stride_tips`, `query_results`, `get_performance`); `web_search_20260209` + `web_fetch_20260209`; a citation allowlist shared by server and client; 8-iteration cap; SSE route `POST /api/chat/stream`; per-IP + per-session limiter; an `STRIDE_CHAT_AGENT` flag gate; a `stride_chat_ro` read-only Neon role migration with `statement_timeout = '5s'`; a shared app-password gate for deployed instances; model default `claude-opus-5` via `ANTHROPIC_CHAT_MODEL` (`claudeConfig.ts` on the aws branch). | `server/chatAgent.ts`, `server/chatStream.ts`, `server/chatRateLimit.ts`, `migrations/app/chat_readonly_role.sql`, `server/authGate.ts` (branch `claude/frontend-public-repo-aws-pqjkty`) | v4's "orchestrator + toolbelt + bounded loop + SSE" exists as a prototype in TypeScript. v5 keeps its tool names, its citation invariant and its eval contract, whatever language the production loop ends up in (§7). |
+| Eval suite | 30 golden cases (db_tips, horse_lookup, performance, chained, web, honest_miss, followup) + 16 injection cases (prompt_exfil, sql_probe, jailbreak, data_as_instruction, adversarial_page, link_injection, schema_probe, off_domain). Offline by construction; live mode is operator-only and refuses without two env vars. | `stride-app/evals/chat/`, `scripts/eval_chat.ts` | This is the acceptance test v4 §14 asks for, already written. It is 46 cases, not the ~300 v4 wants; the gap is authoring, not tooling (§15). |
+| Prior audit (2026-09-03) | Decisions: port, don't rewrite; a slim Python 3.12 **zip Lambda behind a Function URL** (not API Gateway, not Fargate+ALB, not VPC-attached, not the jobs image); Neon read-only **pooled** role; typed tools, no SQL tool by default; `stride/chat/*` secrets + a **separate Anthropic key**; Express proxies to the Function URL with a bearer; DynamoDB sessions; reserved concurrency 3; daily cap; 8-round cap; a `chat-proof` content smoke. | `docs/chat/CHAT_LAMBDA_ARCHITECTURE_AUDIT.md` §3 | v5 adopts all of it. v4 contradicted four of these (a shared FastAPI service, Redis, an always-on API, no spend cap) without saying why. |
+| AWS estate | One container image for 4 Lambdas + 10 Fargate tasks; EventBridge Scheduler (Sydney tz); DynamoDB `stride_run_state`; S3 `stride-models-<acct>` (private) and `stride-evidence-<acct>/artifacts/` (the day-artifact relay); Secrets Manager `stride/prod` (**one blob holding Betfair credentials and the write `DATABASE_URL`**); SNS `stride-alerts`; a **US$20/month cost tripwire** on the AWS Free Plan (ends 2027-02-01); deploys from GitHub Actions through an OIDC role that carries `AdministratorAccess`. **No KMS key, no Redis, no Cognito, no API service.** | `infra/*.sh`, `infra/jobs/handler.py`, `.github/workflows/deploy-infra.yml`, `infra/09_bootstrap_oidc.sh:52` | New resources can be created by `deploy-infra` (the role allows it). Anything always-on (ALB, NAT, ElastiCache, a Fargate service) breaks the tripwire on its own (§10). |
+| Pipeline outputs | `tips_<date>.json` per race: `top_picks`, `raw_model_leader`, `bet_pick`, `coverage_pick`, `full_field`; per runner: `win_pct` (**market-anchored** published probability), `raw_model_pct` (pre-anchor model opinion), `place_pct`, `fair_odds` (**= 100 / de-vigged market probability — the market's fair price, not the model's**), `edge_pct`, `key_factors`, `ai_insight` (LLM prose), and `prediction_stages` with `base_xgb`, `base_lightgbm`, `base_catboost`, `ensemble`, `mc_raw`, `mc_recalibrated`, …, `final_decision`. `prediction_audit` holds every scored runner (MC-stage win/place prob, `market_odds`, `edge`, `final_win_prob`). `selections` holds bet-worthy picks only. | `examples/sample_race.json`, `server/python/run_tips_pipeline.py:985` (`fairOdds = 100/true_market`), `:2361`, `:3304`, `server/python/prediction_stages.py`, `migrations/final_prob_audit.sql` | Per-member probabilities v4 wants to *add* are already produced (§8). The names v4 uses (`predictions`, `model_registry`) do not exist; the semantics of `fair_odds` differ from v4's example (§8, §11). |
+| Coverage and timing | Only `TARGET_TRACKS` are scored (env-overridable list; ~one day in three is quiet). Tips job starts **10:00 Sydney**; duration scales with the card: ~17 min midweek, a measured 39-race day spent 9,053 s in Monte Carlo, and `verify-jobs.yml` records a 55-race Saturday proof at **4–5 hours**. The day JSON is written atomically at the end of the run. | `server/python/target_tracks.py`, `infra/README.md`, `docs/02-daily-pipeline.md`, `.github/workflows/verify-jobs.yml` (`tracks` input) | "My model doesn't cover this meeting" is the common case, not the edge case. On the biggest racing day, predictions may not exist until early afternoon (§3.6, §8). |
+| PuntingForm | Starter tier. Auth is the **`apiKey` query parameter** on every call. Rate limits **unpublished** (client paces 0.4 s). Data reachable **~31 days** back (sliding). Sectionals need the Modeller tier. Ratings use the same `apiKey`. No endpoint reports plan, quota or remaining calls. Licence note recorded by the operator: *"personal use only. No redistribution; revisit before any public/commercial tips output."* **One physical key**: it is the pipeline's key. Cards carry **no odds**; prices are injected from Betfair. | `server/python/pf_client.py`, `PUNTINGFORM_MIGRATION.md:15`, `:412`, `server/python/betfair_enrich_racecard.py` | v4's onboarding copy ("Pro plan… ~400 requests left today") cannot be produced (§3.1). The "three-key separation" is two keys until a second subscription exists (§9). Any user other than the operator needs the licence conversation first (§16). |
+| Prices | Betfair Exchange, **delayed** app key (the live key was never activated); captures only from an AU IP (GitHub-hosted runners are geo-blocked); snapshot history begins 2026-08-02; phantom sub-$1.20 rows from unformed books must be fenced. | `scripts/BETFAIR_KEYS_STATUS.md`, `docs/decision-learning/02_ARCHITECTURE_AND_CONTRACTS.md` (data limitations) | `divergence` is real but its price side is delayed data with a licence of its own (§8, §16). |
+| Claude API (verified 2026-09-09 against the `claude-api` skill, docs cache 2026-06-24) | `web_search_20260209` server-side with citations (`web_search_result_location`); `strict: true` tools; `output_config.format` structured JSON — no recursion, no numeric `minimum`/`maximum`, `additionalProperties: false` required, **incompatible with citations (400)**; `claude-opus-5` US$5/US$25 per MTok, `claude-sonnet-5` US$2/US$10; adaptive thinking on by default on Opus 5; `temperature` rejected; no prefill; prompt caching is a prefix match; Batch API at 50%; web search US$10 per 1,000 searches. | skill `shared/tool-use-concepts.md`, `shared/managed-agents-core.md:196` | v4's two LLM claims hold (strict schemas, native citations). Structured output and citations do not mix in one call, which fixes the composer's shape (§7). |
 
 ---
 
-## 2. UX surfaces (the v3 meat)
+## 2. Locked decisions (v5)
 
-### 2.1 First run: value before the key — three access modes
+| Decision | v4 | v5 | Why (evidence in §1 / §19) |
+|---|---|---|---|
+| LLM | Claude Messages API | **Keep.** `claude-opus-5` by default, read from `ANTHROPIC_CHAT_MODEL` (already in `stride/prod`), preflighted at cold start with a four-token call the way `consensus_agent.preflight_extraction_model()` does; abort loudly on a dead id or a rejected parameter. `claude-sonnet-5` is allowed for the composer only after the evals say quality holds. No `temperature`, no prefill, adaptive thinking. | Both v4 claims verified. The preflight exists because a retired model id once silenced the consensus agent for six weeks. |
+| Web fallback | Claude web search tool | **Keep**, as `web_search_20260209` plus `web_fetch_20260209` for cited pages; `max_uses` per turn; an `allowed_domains`/`blocked_domains` policy owned by the operator; searches counted against a budget (US$10 per 1,000). | Verified; the unmerged `chat/03-web-citations` branch already wires it with a citation allowlist. |
+| Compute | "Single shared FastAPI" | **One Python Lambda `stride-chat` behind a Function URL in `RESPONSE_STREAM` mode**, packaged as a zip on the managed `python3.12` runtime with the Lambda Web Adapter layer (`AWS_LWA_INVOKE_MODE=response_stream`). FastAPI is fine *as the in-process ASGI framework*; it is not a service. Reserved concurrency as the spend and connection cap. Not API Gateway, not Fargate + ALB, not VPC-attached, not the `stride-jobs` image. | Prior audit §2.3–2.4; the US$20 tripwire; LWA README verified 2026-09-09 (FastAPI streaming examples, `AWS_LWA_INVOKE_MODE`). API Gateway's 29-s ceiling can now be raised by quota request on regional REST APIs (2024 change; **unverified from this session**, egress blocked) — the Function URL still wins on cost and hops. |
+| Key encryption | AWS KMS envelope behind `KeyProvider` | **Keep**, made concrete in §9: one customer-managed key, `GenerateDataKey` per stored key, per-user encryption context, decrypt only inside the executor, plaintext never cached beyond the request, local provider refuses `ENV=production`. | KMS does not exist in the estate yet; `deploy-infra` can create it. |
+| Identity | "OIDC/JWT" (unspecified) | **Amazon Cognito user pool** (hosted UI, OIDC, JWTs verified in the Lambda against the pool's JWKS), MFA optional, step-up = `auth_time` within 5 minutes or an MFA challenge. Any OIDC provider would do; Cognito is in-account, deploys from the same scripts, and has a free tier (**pricing unverified here**; verify before committing). | Nothing authenticates the app today (§1). "Step-up auth" needs a mechanism, not a phrase. |
+| Session memory, SSE replay | Postgres + Redis | **DynamoDB with TTL** for sessions, entity memory, replay buffer and budget counters. No Redis. | DynamoDB is in the estate; ElastiCache's smallest node alone (~US$12/month, **unverified**) is more than half the tripwire. |
+| Model output | Win/place probabilities + fair odds | **Keep, with defined semantics** (§8): `win_pct` (published, market-anchored), `raw_model_pct` (model opinion, pre-anchor), `place_pct`, `market_fair_odds` (today's `fair_odds`), `model_fair_odds` (= 100 / `raw_model_pct`), member stages from `prediction_stages`. | `fair_odds` in the artifact is the market's de-vigged price. v4's example ("31% (fair $3.20)") quoted the model's. Both are useful; they must be named. |
+| Prediction production | Batch, pre-computed | **Keep.** Add a **chat read model** `chat_predictions` materialised from `tips_<date>.json` when the tips job lands, plus a `scoring_in_progress` state for the hours before it does. | The `predictions` table v4 reads from does not exist; the JSON and `prediction_audit` do. |
+| Model features / pipeline key | Stride-owned PuntingForm key; ToS gate | **Keep.** | Unchanged. |
+| Key-optional onboarding | Modes A, B, C | **Modes A and C ship. Mode B (pool key) is deferred** until (1) written PF clearance and (2) a second PF subscription exists so pool traffic cannot take the pipeline down with it. | One physical key today; licence note says personal use only (§1, §9, §16). |
+| Answer contract | Block-based | **Keep.** The composer is a second, tool-free call using `output_config.format`; the orchestrator call uses tools and may carry citations. | Structured output + citations in one call returns 400. |
+| Model voice | Ensemble internal state drives tone | **Keep in spirit, corrected in mechanism** (§8): agreement is measured across MC, ML and market stages; per-member percentages are quoted only from calibrated outputs; tone bands are derived from the served distribution, not guessed. | `base_*` stage values are raw class-weight-inflated booster scores unless `STRIDE_ML_APPLY_ISOTONIC` is on ("a true 10% runner reads ~50%", `ml_model.py`). |
+| Frontend (new) | (not in v4) | The block renderer, SSE client, key-entry UI and Cognito login live in `stride-app`. Hosting moves off the operator's machine: static client behind CloudFront with the Function URL as the API, *or* Express kept as a thin proxy on a small always-on host. **Operator decision** (§20 Q3). | A "backend plan" whose contract the client cannot render is not a plan for a product. |
+| Licence (new) | ToS as an open risk | **A written PF answer is a launch gate for any user other than the operator**, and it determines which blocks may contain PF-derived data, whether a per-user cache is allowed, and whether Mode B can exist at all. Betfair's data terms are checked before prices appear on a public surface. | `PUNTINGFORM_MIGRATION.md:15`; prior audit §2.5. |
+
+---
+
+## 3. UX surfaces (v4 text kept; v5 corrections marked)
+
+### 3.1 First run: value before the key — access modes
 
 Asking for an API key is the highest-friction, highest-anxiety moment in the
 product — so no user ever hits it as a wall.
 
 - **Mode A — own key.** Full personal-data tier against the user's own quota
   and subscription. The best experience; always offered, never forced.
-- **Mode B — Stride shared access (default when no key).** PuntingForm-backed
-  answers are served through a **Stride-owned pool key** — budget-capped per
-  user and globally, cache-first, abuse-monitored (§8, §9). The user is told
-  plainly: *"answered via Stride's data access — add your own PuntingForm key
-  for full limits."* When their shared allowance is exhausted, answers
-  degrade to model/web tiers with disclosure and a natural upsell moment.
-- **Mode C — keyless.** Model + web tiers only (e.g., global pool budget
-  exhausted). Still genuinely useful on raceday.
+- **Mode C — keyless.** Model + web tiers only. Still genuinely useful on
+  raceday. **(v5) This is the default for keyless users at launch.**
+- **Mode B — Stride shared access. (v5) Deferred**, not deleted. It returns
+  when the two conditions in §2 are met. Until then the copy for a keyless
+  user is *"add your PuntingForm key for form data and sectionals"*, with no
+  mention of a shared pool.
 
-The pool key is infrastructure, never identifiable as an individual's key;
-to users it is simply "Stride's data access." Key entry UX (when they choose
-it): explain why in one sentence, validate instantly with a friendly probe —
-*"Key works. You're on the Pro plan: form data and sectionals included, ~400
-requests left today."* Existing hard rules unchanged: step-up auth for key
-operations, one-click delete, KMS envelope encryption.
+**(v5) Key entry UX, corrected to what PuntingForm can actually tell us.**
+The friendly probe in v4 — *"You're on the Pro plan… ~400 requests left
+today"* — cannot be built: there is no plan, quota or remaining-calls
+endpoint in the documented API (`pf_client.py`, `PUNTINGFORM_MIGRATION.md`
+Phase A inventory), "Pro" is not a tier (Starter, Modeller, Professional
+are), and rate limits are unpublished. What the probe *can* say, honestly:
 
-### 2.2 The chat experience: block-based answers
+- *"Key works"* — `meetingslist` for today returned 200 with a payload.
+- *"Your tier includes X"* — inferred by probing one tier-gated endpoint
+  (sectionals → 403 on Starter) and reported as an inference.
+- *"Data reaches back about a month"* — the ~31-day wall, measured at
+  runtime the way `pf_window.py` does, never assumed.
+- *"PuntingForm doesn't tell us how many calls you have left; if you hit a
+  limit we'll say so and fall back to my model."*
+
+Existing hard rules unchanged: step-up auth for key operations, one-click
+delete, KMS envelope encryption, the key is never sent back to the browser
+(status shows the last four characters only).
+
+### 3.2 The chat experience: block-based answers
 
 The backend returns **typed blocks**, not a markdown string. The frontend
 renders native components; quality is enforced by the contract, not by
@@ -82,38 +148,51 @@ prompt luck. Block types:
 | Block | Content | Example moment |
 |---|---|---|
 | `prose` | Grounded natural language | The analytical voice |
-| `field_table` | Race field with p_win, fair odds, top factor per runner | "Who wins R5?" — a quiet, well-set table, not a wall of text |
+| `field_table` | Race field with `win_pct`, `raw_model_pct`, `model_fair_odds`, `market_fair_odds`, price (source + `captured_at`), top factor per runner | "Who wins R5?" — a quiet, well-set table, not a wall of text |
 | `form_guide` | Line-per-start career form | "How did she go last prep?" |
 | `comparison` | Side-by-side runners or model-vs-market | "Him vs the favourite" |
-| `divergence` | Where model probability exceeds market-implied probability | "Where's your model disagree with the market today?" — the killer feature, framed as data observation with RG notice |
-| `briefing_card` | Morning briefing payload (§2.6) | App open |
-| `capability_prompt` | Contextual key/tier ask | Key-optional flow (§2.1) |
-| `notice` | Staleness, tier, partial-result disclosures | "Scored 09:12, before the scratching of X" |
+| `divergence` | Where `raw_model_pct` exceeds the de-vigged market probability | "Where's your model disagree with the market today?" — framed as data observation with RG notice |
+| `briefing_card` | Briefing payload (§3.6) | App open |
+| `capability_prompt` | Contextual key/tier ask | Key-optional flow (§3.1) |
+| `notice` | Staleness, tier, coverage, `scoring_in_progress`, partial-result disclosures | "Scored 09:12, before the scratching of X" |
+| `generated_note` **(v5)** | The pipeline's own LLM prose (`ai_insight`, `brief_assessment`), labelled as generated | Never a source; never quoted as data |
 | `sources` | Provenance + citations | Every answer |
 
-Every answer also carries 2–3 **grounded follow-ups** (§2.3) and a
+Every answer also carries 2–3 **grounded follow-ups** (§3.3) and a
 `confidence` grade. Provenance tiers: `puntingform | stride_model | hybrid |
 web_fallback | model_unverified | none`.
 
-### 2.3 Follow-ups and conversation memory
+**(v5)** Every numeric token in a `prose` block must trace to a tool result
+or a block cell (§15 anti-hallucination lint). `ai_insight` text in the day
+JSON is *itself* LLM output (Groq or Claude, `llm_post_scorer.py`) and
+contains numbers; it is presented as `generated_note`, never as a fact
+source, and its numbers are not "tool results" for the lint.
+
+### 3.3 Follow-ups and conversation memory
 
 Racing conversation is naturally contextual: *"Who wins R5?" → "What about
 the second fave?" → "Has it won here before?"*
 
-- **Session entity memory** (Postgres): horses, races, tracks, dates mentioned
-  in the session, plus the last resolved `race_id`. Passed to the orchestrator
-  each turn so pronouns and ordinal references resolve correctly.
+- **Session entity memory** (**v5: DynamoDB**, keyed by session, TTL 30 min,
+  alongside the last 12 messages — the constants the existing chat uses):
+  horses, races, tracks, dates mentioned in the session, plus the last
+  resolved `race_id`. Passed to the orchestrator each turn so pronouns and
+  ordinal references resolve correctly.
 - **Grounded follow-up suggestions**: the orchestrator emits 2–3 next
   questions, each validated against (a) the user's capability profile and
   (b) pipeline coverage — we never suggest a question we can't answer.
-  Discoverability without clutter; the cheapest fallback is the one never
-  needed.
-- **Fuzzy entity resolution**: horse names from memory are often near-misses
-  ("Nature Strip" vs "Nature Stripe"); tracks have nicknames ("Headquarters"
-  = Flemington). Resolver does alias + fuzzy matching, and uses `clarify`
-  with ranked candidates rather than guessing.
+- **Fuzzy entity resolution** (**v5: reuse, don't rewrite**):
+  `identity_normalization.normalize_runner_key` / `normalize_track_key`
+  carry the approved track aliases (Randwick/Royal Randwick, Kensington,
+  Rosehill, Ascot WA, Sandown circuits kept distinct);
+  `horse_names.horse_name_match` does the > 0.85 sequence match;
+  `target_tracks` documents why loose contains-matching beat canonical keys
+  on 95 stored cards. The estate rule is *"never write a new normalizer"*
+  (`02_ARCHITECTURE_AND_CONTRACTS.md`). `chat_entity_aliases` is seeded from
+  these plus distinct names in `race_results_history` and PF payloads, and
+  the resolver uses `clarify` with ranked candidates rather than guessing.
 
-### 2.4 Time and racing-calendar awareness
+### 3.4 Time and racing-calendar awareness
 
 Racing is intensely temporal. Every orchestrator call is temporally grounded:
 user timezone, current time, racing calendar state (what's on today, what's
@@ -121,283 +200,584 @@ upcoming, what just ran). "Saturday at Flemington" resolves to a concrete
 meeting; "last spring" triggers `clarify` on year. Freshness is disclosed
 habitually: *"Model scored 09:12; track now Soft 6 after the 11:40 update."*
 
-### 2.5 Model explainability as conversation
+**(v5)** Calendar sources, in order: `race_schedule` (seeded from the day's
+racecard by `seed_race_schedule.py`), the racecard JSON in the S3 relay, and
+PF `meetingslist` for meetings outside `TARGET_TRACKS`. Track condition
+comes from PF `/Updates/Conditions`; scratchings from `/Updates/Scratchings`
+(timestamped, with deductions) — both Starter-tier, both already wrapped in
+`pf_client.py`.
 
-"Why do you rate her?" is the product's soul. Answers use precomputed top-k
-SHAP contributions in prose ("first-up record, the weight drop, and the
-barrier"), and each factor is **drillable**: *"the weight drop"* → follow-up
-pulls the actual weight history via the user's key (or a `capability_prompt`
-if keyless). Explanation is a conversation that descends into data, not a
-static dump.
+**(v5, prompt caching)** The per-turn context bundle is volatile by
+construction (time, calendar, entities). It must go **after** the cache
+breakpoint — as the first user content of the turn, or as a
+mid-conversation `role: "system"` message, which Opus 5 supports without a
+beta — never inside the cached system prompt, or every turn pays full price
+for the prefix.
 
-### 2.6 Morning briefing & watchlists (the retention loop)
+### 3.5 Model explainability as conversation
+
+"Why do you rate her?" is the product's soul. **(v5) The explanation surface
+is what the pipeline already computes**, not SHAP:
+
+- `key_factors` (DB-enriched strings: C&D record, sectional z-scores,
+  franking, first-up peak…), the intelligence adjustments (franking, prep
+  cycle, barrier edge, sectional trend, trainer synergy — `docs/07`), the
+  Monte Carlo factor inputs, and `RacingMLModel.explain_prediction` (top-5
+  by global importance × feature value — a heuristic, labelled as such).
+- Per-runner SHAP is **not produced at serve**; `shap` is used only at
+  training for global importance (`train_ml_enhanced.py:1193`). It is
+  feasible later (tree explainers are cheap) but it is a pipeline change
+  under the staged-artifact rules, and it would explain only the ML arm,
+  which carries 20–40 % of the pre-anchor probability (`docs/09` §1). Say
+  so in the voice rather than pretend.
+- Each factor stays **drillable**: *"the weight drop"* → a follow-up pulls
+  weight history via the user's key (or a `capability_prompt` if keyless).
+
+### 3.6 Briefing & watchlists (the retention loop)
 
 - **Watchlists**: follow horses (and tracks). Stored per user.
-- **Morning briefing**: per-user, generated when the pipeline finishes
-  scoring (or on first open after): today's meetings with model coverage,
-  top-rated runner per meeting, any watched horse racing today, overnight
-  scratchings affecting scored races, one `divergence` highlight where odds
-  are available. One quiet screen. No push noise unless the user opts in.
-- **Watch events**: when the pipeline scores a race containing a watched
-  horse, a `briefing_card` update is queued. "A horse you follow is racing
-  today at Randwick — rated 28%." This is what brings people back, and it's
-  entirely data-grounded.
+- **Briefing**: per user, generated when the tips job lands (or on first open
+  after): today's meetings with model coverage, top-rated runner per
+  meeting, any watched horse racing today, overnight scratchings affecting
+  scored races, one `divergence` highlight where odds are available. One
+  quiet screen. No push noise unless the user opts in.
+- **(v5) "Morning" is a promise the pipeline cannot always keep.** Scoring
+  starts 10:00 Sydney and on a full Saturday can run into the afternoon
+  (§1). The briefing therefore has an explicit `scoring_in_progress` state
+  — *"Randwick and Caulfield scored; Doomben still running, ~40 min"* —
+  driven by which tracks' merges have landed, and it re-renders when the
+  final JSON lands. If the operator wants scored races published as they
+  complete, that is a pipeline change (per-race publication before the
+  atomic write) and goes through the pipeline's own review rules; the chat
+  must not assume it.
+- **Watch events**: fire from the same completion signal (§5). *"A horse you
+  follow is racing today at Randwick — rated 28 %."*
+- **(v5) Generation path**: briefings are pure model + cached public data,
+  zero PF calls, and are a natural fit for the **Message Batches API** (50 %
+  cost, results keyed by `custom_id`), because they are produced for every
+  opted-in user at once after scoring, not interactively.
 
-### 2.7 Errors as conversation
+### 3.7 Errors as conversation
 
 Errors arrive inside the chat voice, with recovery actions, and degrade into
 alternative value: *"You're rate-limited on PuntingForm for ~20 minutes —
 meanwhile my model's already rated today's cards. Want the Randwick
-preview?"* The error taxonomy (§11) gains `key_not_connected` (→
-`capability_prompt`) and keeps the v2 set. A failure is a routing decision,
-not a dead end.
+preview?"* The error taxonomy (§12) gains `key_not_connected` (→
+`capability_prompt`) and, in v5, `budget_exhausted`, `auth_required`,
+`step_up_required`, `scoring_in_progress` and `licence_restricted`. A
+failure is a routing decision, not a dead end.
 
-### 2.8 Speed and streaming
+### 3.8 Speed and streaming
 
 - `GET /bootstrap` on app open: today's meetings, model coverage flags,
-  briefing status, key status. First meaningful paint without a round-trip
-  storm; race resolution becomes effectively instant.
+  briefing status, key status. **(v5)** Assembled from DynamoDB and S3, not
+  the LLM; the shared part (meetings, coverage) is cached per minute; the
+  per-user part (key status, briefing status) is never in a shared cache.
 - SSE status lines are **meaningful and specific** ("checking the Golden
-  Eagle field", "consulting Stride model v1.4.0"), never "loading…".
+  Eagle field", "consulting Stride model 2026-09-08"), never "loading…".
+  They come from tool events, not from thinking output.
 - SSE resume: events carry sequence ids; a dropped connection replays from
-  last-seen id. Chat that survives a tunnel on the way to the track.
+  last-seen id. **(v5)** Replay buffer is a DynamoDB item per job (last K
+  events, short TTL); the resume endpoint is authenticated and
+  owner-checked (§9). Streaming is Lambda response streaming through the
+  Function URL (`RESPONSE_STREAM`, up to the function timeout — **limits
+  unverified here**, see §19).
 
-### 2.9 The model's voice (giving the ensemble a brain)
+### 3.9 The model's voice (giving the ensemble a brain)
 
-Design question: *if XGBoost, LightGBM and CatBoost could answer, how would
-they sound?* Like what they are — measurement instruments. Not tipsters, not
-hype men. Three principles make the voice emerge from real model internals
-rather than manufactured quirk:
+Design question: *if the engine could answer, how would it sound?* Like what
+it is — a measurement instrument. Not a tipster. Three principles, corrected
+in v5 so the voice reflects what the pipeline actually computes:
 
-1. **Agreement is confidence.** Every prediction stores per-member
-   probabilities. When the three models agree, the tone is assured: *"all
-   three models land within two points of each other."* When they diverge,
-   the answer says so and says why: *"headline 27%, but my models are split —
-   CatBoost has him at 33% on class, XGBoost at 21%, mostly the wide gate."*
-   Disagreement is surfaced, never averaged away silently — the average is
-   shown, the split is told. This is the most honest voice possible: it is
-   literally the ensemble's internal state rendered as language.
-2. **Calibration is tone.** Language bands are a deterministic function of
-   calibrated probability: ≥0.40 "strongly fancied by the model"; 0.25–0.40
-   "rates on top"; 0.15–0.25 "a genuine each-way profile"; 0.08–0.15 "a
-   roughie with one factor in its favour"; <0.08 "the model can't find much."
-   The LLM may not upgrade or soften a band — tone is a function of the
-   number, enforced by the composer and linted in CI (§14).
-3. **Humility is character.** The models only see their features: they don't
-   watch replays, don't hear stable mail, don't know intent. Asked beyond the
-   features, the voice says *"that's outside what I can measure"* and routes
-   to form data or web. A pipeline-computed **data-confidence flag**
-   (feature completeness) powers honest hedging: *"first-up, no public trials
-   in my data — treat this 22% cautiously."*
+1. **Agreement is confidence — measured at the right stages.** The published
+   number is a blend: Monte Carlo (`mc_raw` → `mc_recalibrated`) and the ML
+   ensemble (`ensemble`) combined into `wrapper_model_blend`, then anchored to
+   the de-vigged market with a price-dependent weight (`docs/09` §1). So the
+   honest "agreement" story has three voices, not three boosters: *does the
+   simulation agree with the trees, and does the model agree with the
+   market?* All of these stage values already ride in `prediction_stages`.
+   **Per-member booster percentages are quoted only when they are calibrated
+   probabilities** — i.e. once `STRIDE_ML_APPLY_ISOTONIC` is promoted and the
+   artifact carries all three calibrators. Until then the raw `base_*`
+   values are class-weight-inflated scores (a true 10 % runner can read
+   ~50 %), and quoting them as "CatBoost has him at 33 %" would be a false
+   statement. Before promotion, member disagreement is expressed as **rank
+   agreement** ("the three trees rank him 1st, 1st and 3rd") or as a spread
+   band, never as percentages. Disagreement is surfaced, never averaged away
+   silently.
+2. **Calibration is tone — bands derived, not guessed.** v4's thresholds
+   (≥ 0.40 "strongly fancied", 0.25–0.40 "rates on top", …) do not match the
+   served distribution: the README calibration table shows 8 runners out of
+   3,396 above 0.30, because `win_pct` is market-anchored. Bands are
+   **fitted once from `prediction_audit.final_win_prob` quantiles** (per
+   field-size bucket), named for the probability they apply to (`win_pct`,
+   not `raw_model_pct`), versioned, and enforced by the composer and the CI
+   lint (§15). The LLM may not upgrade or soften a band.
+3. **Humility is character.** The models only see their features. A
+   pipeline-computed **data-confidence flag** (§8) powers honest hedging:
+   *"first-up, no public trials in my data — treat this 22 % cautiously."*
+   Asked beyond the features, the voice says *"that's outside what I can
+   measure"* and routes to form data or web.
 
 Persona texture: a measured Australian racing analyst — fluent in the
 vernacular (get-out stakes, swoopers, blackbookers, midweeks, the carnivals)
 without performing it; dry rather than cute; explains jargon gently for
 newcomers; never tipping language ("moral", "good thing", "can't lose").
-First person as Stride; internals quoted as "my models." Numbers always from
-tool results — inventing a figure is a release-blocking eval failure (§14).
+First person as Stride; internals quoted as "my model" / "my simulation".
+Numbers always from tool results — inventing a figure is a release-blocking
+eval failure (§15).
 
-Worked examples of the voice:
+Worked examples of the voice (v5, using stages that exist):
 
-- *Agreement:* "I rate King's Legacy clearly on top — 38%, and all three
-  models land within two points. It's the weight drop and the barrier doing
-  the work."
-- *Disagreement:* "Headline 27%, but my models are split — CatBoost has him
-  at 33% on class, XGBoost at 21%, mostly the wide gate. Read that as a
-  genuine each-way profile, not a confident top pick."
-- *Humility:* "She's first-up with no trials in my features — my 22% is thin
-  on data, so treat it cautiously. Want me to check the web for trial
+- *Agreement:* "I rate King's Legacy clearly on top — 38 % published, and
+  the simulation and the trees land within two points of each other. The
+  market has him at 31 %, so that's a genuine disagreement with the price."
+- *Disagreement:* "Headline 27 %, but my simulation and my trees are split —
+  the simulation likes him more than the trees do, and the trees don't
+  agree among themselves on rank. Read that as a genuine each-way profile,
+  not a confident top pick."
+- *Humility:* "She's first-up with no trials in my features — my 22 % is
+  thin on data, so treat it cautiously. Want me to check the web for trial
   reports?"
 
-### 2.10 Shareable answers
+### 3.10 Shareable answers
 
 `POST /share` snapshots an answer (blocks + provenance) to an immutable,
-public, read-only card — the organic growth loop ("look what Stride rates in
-the Cup"). Shares **strip all user-specific material**: no key status, no
-tier info, no quota, no session data. Model provenance (version, scored_at)
-stays — it's the credibility. This is a marketing surface, so the
-anti-extraction caps (§7.5) apply to shared field tables too.
+public, read-only card — the organic growth loop. Shares **strip all
+user-specific material**: no key status, no tier info, no quota, no session
+data. Model provenance (release id, scored_at) stays — it's the
+credibility.
+
+**(v5) Shares are model-derived content only.** No `form_guide`, no PF
+field data, no `generated_note`, and no Betfair price unless the Betfair
+terms are confirmed to allow it: a public card that redistributes licensed
+data is redistribution regardless of whose key fetched it. The sanitizer is
+an **allowlist of block types and fields**, not a denylist; share ids are
+≥ 128-bit random; `GET /share/{id}` is rate-limited, `noindex`, and the
+anti-extraction caps (§9.5) apply.
 
 ---
 
-## 3. Invariants
+## 4. Invariants
 
 1. **Two-key separation.** User key never in any LLM prompt/response/log/
    trace/error. Claude sees schema + question only.
-2. **Three-key separation.** Pipeline key managed identically (KMS envelope,
-   service-scoped context, canary-tested); never enters the chat path.
-3. **SSRF containment.** Executor reaches allowlisted PuntingForm hosts only.
+2. **Three-key separation — (v5) honestly counted.** Today there are two
+   kinds of key: user keys, and *the* Stride key, which is the pipeline's
+   Starter subscription. The Stride key is managed in `stride/prod`, is never
+   read by the chat, and is never a pool key. A third kind (a pool key)
+   exists only when a second subscription does.
+3. **SSRF containment.** The executor reaches `api.puntingform.com.au` only
+   (`pf_client.BASE` is a constant, not a parameter) plus Anthropic. The
+   Lambda never fetches a user-supplied URL; `web_fetch` runs on Anthropic's
+   side.
 4. **Quota protection.** Internal budgets kill malformed loops before they
    touch user quota. Model lookups cost zero user quota.
 5. **Honest provenance.** Every claim sourced: PuntingForm, Stride model
-   (version + timestamp), cited web, or explicit "unverified". Never blended.
+   (release id + timestamp), cited web, or explicit "unverified". Never
+   blended.
 6. **Probabilities, not tips.** RG notice on all model answers.
-7. **(v3) No dead ends.** Every error, gap, or limitation routes to the best
+7. **No dead ends.** Every error, gap, or limitation routes to the best
    remaining tier with disclosure.
-8. **(v4) Pool key = service key.** The shared access key receives identical
-   KMS, canary, and in-memory treatment as user and pipeline keys, plus
-   stricter budgets. It is never identifiable as an individual's key.
+8. **Pool key = service key (deferred).** When Mode B exists, the pool key
+   receives identical KMS, canary and in-memory treatment as user keys, plus
+   stricter budgets, and is never identifiable as an individual's key.
+9. **(v5) Auth before spend.** No Anthropic call, no PuntingForm call and no
+   SSE stream without a verified JWT. `healthz`/`readyz` and `GET /share/{id}`
+   are the only unauthenticated routes, and neither can trigger spend.
+10. **(v5) Subject-scoped resources.** Every key, watchlist, briefing,
+    session, job id and replay buffer is stored under the authenticated
+    subject and read back only by it. Ids are opaque and unguessable.
+    Cross-user access is a 404, never a 403 that confirms existence.
+11. **(v5) The key never travels through a log.** PuntingForm auth is a query
+    parameter, so a logged URL *is* a logged key. No component logs a
+    request URL. Every log sink (CloudWatch, Sentry, test capture) runs a
+    redaction filter for `apiKey=` and for the stored last-four pattern, and
+    a canary key must never appear in any sink (§15).
+12. **(v5) Tool output is data.** PuntingForm fields, web pages, database
+    text and the pipeline's own generated prose arrive delimited and marked
+    untrusted, never in the instruction position. No free-text SQL tool. No
+    link in an answer that is not in `citations[]`.
+13. **(v5) Licensed data stays with its licensee.** Data fetched with a
+    user's key is cached only for that key and served only to that user.
+    No PF-derived block enters a share card or another user's briefing.
+    Pipeline-derived PF facts (fields, scratchings) are shown to other users
+    only within whatever the written PF answer allows.
+14. **(v5) The chat cannot reach the pipeline's secrets or write its
+    tables.** It reads `stride/chat/*` only, connects to Neon as a read-only
+    role on the pooled host, and keeps all chat-owned state in its own
+    DynamoDB tables. A compromised chat cannot corrupt a prediction, a
+    ledger row or a schedule.
+15. **(v5) Numbers come from tool results.** Generated text (`ai_insight`)
+    is labelled generated and is not a number source.
+16. **(v5) Content over exit codes.** Every scheduled chat job (read-model
+    materialiser, briefing generator) declares a content postcondition and
+    registers with the missing-run watch in the PR that creates it. A job
+    that exits 0 having written nothing is the bug (CLAUDE.md, "the silent
+    no-op class").
 
 ---
 
-## 4. Architecture
+## 5. Architecture (v5 — drawn on the estate that exists)
 
 ```
-                 OFFLINE (pipeline)                       PER-USER JOBS
- ┌────────────────────────────────────────┐   ┌──────────────────────────┐
- │ Scoring pipeline (pipeline key,        │   │ Briefing generator        │
- │ executor-grade client, KMS in-memory): │──▶│ (on scoring completion /  │
- │ features → XGB/LGBM/CatBoost ensemble  │   │  first open after)        │
- │ → p_win/p_place/fair odds → top-k SHAP │   │ watchlist matcher         │
- └───────────────┬────────────────────────┘   │ settlement & calibration  │
-                 ▼                             └───────────┬──────────────┘
-   predictions / races / model_registry / settlements      │
-                                                           ▼
-                                            briefings / watch_events
+ OFFLINE — the existing AWS chain, unchanged (Sydney time)
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │ 05:30 racecard-collect (Fargate, pipeline PF key) ──┐                              │
+ │ 06:00 intelligence-build                            │  S3 stride-evidence/artifacts/ │
+ │ 07:00 consensus-agent (panel + Perplexity + Claude) ├─► racecard_<d>.json,          │
+ │ 08:00 morning-odds (Betfair delayed, AU IP)         │  consensus_<d>.json,          │
+ │ 10:00 tips-pipeline ── tips_<d>.json (atomic) ──────┘  market_signals_<d>.json,     │
+ │        └─ Neon: prediction_audit.final_win_prob, selections, race_schedule …        │
+ └───────────────────────────────────────────────────────────────────────────────────┘
+                     │ S3 ObjectCreated on artifacts/racecards/tips_<d>.json
+                     ▼
+ NEW, OFFLINE ── chat-materialise (zip Lambda): tips JSON ─► DynamoDB stride_chat_predictions
+                 (postcondition: rows == runners in the file; registers with missing-run watch)
+                 └─► scoring_done ─► briefing generator (Batch API) ─► stride_chat_briefings,
+                                                                          stride_chat_watch_events
 
-                 ONLINE (chat path)
- POST /chat (SSE) ──► ┌──────────────────────────────────────────────┐
-                      │ Orchestrator (Claude, keyless)                │
-                      │  • temporal grounding (calendar, timezone)    │
-                      │  • session entity memory (horses/races/tracks)│
-                      │  • intent router + race/entity resolver       │
-                      │  • bounded agent loop (max N steps)           │
-                      │  • answer composer → block contract           │
-                      │  • grounded follow-up generator               │
-                      └──┬─────────┬───────────────┬─────────────────┘
-               toolbelt: │         │               │
-                  query_model  query_puntingform  web_fallback / clarify
-                         │         │               │
-                         ▼         ▼               ▼
-                   Model Svc   Validator+       Claude + web
-                   (DB read)   Executor         search (citations)
-                               (user key,
-                                KMS, budgets)
-                         └────┬───┴───────────────┘
-                              ▼
-                  blocks + provenance → SSE (resumable) → client
-
- Key Service (separate module): user keys + pipeline key, KMS, validation,
- tier probing, audit. Nothing else imports it.
+ ONLINE
+ Browser ──► static client (CloudFront/S3)  ─or─  Express (thin proxy, bearer to the URL)
+    │  Cognito hosted UI ──► JWT (OIDC)
+    ▼
+ POST /chat (SSE) ──► Lambda stride-chat  [FastAPI under Lambda Web Adapter, Function URL RESPONSE_STREAM,
+                      python3.12 zip, reserved concurrency N, role: stride-chat-role]
+                      ├─ auth: JWT vs Cognito JWKS; step-up for /keys
+                      ├─ budgets: DynamoDB atomic counters (user/day, global/day, searches)
+                      ├─ session memory + entity memory + replay buffer: DynamoDB (TTL)
+                      ├─ orchestrator turn (Claude, tools, citations)
+                      │    ├─ get_stride_tips / get_race_card / lookup_horse / query_results / get_performance
+                      │    │      └─ DynamoDB read model + Neon (stride_chat_ro, pooled) + S3 artifacts
+                      │    ├─ puntingform(endpoint enum) ─► executor: KMS decrypt in-process, allowlisted host,
+                      │    │      0.4 s pacing, per-key TTL cache, PFAuthError → key_invalid
+                      │    ├─ web_search / web_fetch (Anthropic server-side, citations)
+                      │    └─ clarify (ends the turn with ranked candidates)
+                      ├─ composer turn (Claude, no tools, output_config.format = block schema)
+                      ├─ lints: numbers ⊆ tool results; band consistency; citations allowlist
+                      └─ blocks + provenance ─► SSE events with seq ids ─► client
+ Key Service (module inside the same Lambda; the only importer of KMS):
+   user keys (KMS envelope, per-user encryption context) · validation probe · tier inference · audit trail
+ Secrets: stride/chat/anthropic · stride/chat/database_ro · stride/chat/proxy_bearer   — never stride/prod
 ```
+
+What is deliberately *not* in the picture: API Gateway, an ALB, a NAT
+gateway, Redis, a VPC attachment, a second container image, a Postgres
+write role for the chat, and the `stride-jobs` image (multi-gigabyte, pulls
+pandas at import; wrong artifact for an interactive endpoint — prior audit
+§2.3).
 
 ---
 
-## 5. Backend changes driven by UX (traceability)
+## 6. Backend changes driven by UX (traceability)
 
-| UX surface | Backend change |
+| UX surface | Backend change (v5) |
 |---|---|
-| Value-first onboarding (§2.1) | Intent router works keyless; tools that need a key emit `capability_prompt` instead of failing |
-| Block answers (§2.2) | **Answer contract rewrite**: composer outputs typed blocks; per-block schema validation; per-block provenance mapping |
-| Follow-ups (§2.3) | `session_entities` table + resolver input; follow-up generator constrained by capability profile × pipeline coverage |
-| Entity resolution (§2.3) | Alias/fuzzy index over horses/trainers/jockeys/tracks (seeded from pipeline + PuntingForm); clarify candidates |
-| Time awareness (§2.4) | Calendar service (meetings, race status); user timezone in profile; grounding injected into every orchestrator call |
-| Drillable explanations (§2.5) | Model Service exposes factor→data pointers; orchestrator chains them through the executor when keyed |
-| Briefing & watchlists (§2.6) | Briefing generator job; `watchlists`, `briefings`, `watch_events` tables; pipeline-completion hook |
-| Errors as value (§2.7) | Error taxonomy returns `fallback_offer` payloads, not just codes |
-| Speed (§2.8) | `GET /bootstrap` aggregate; SSE sequence ids + replay buffer (Redis) |
-| Share (§2.10) | `POST /share` → sanitized immutable snapshot; public read endpoint; share-scoped anti-extraction caps |
-| Shared access (§2.1) | Key-selection layer in the executor: own key → pool key → keyless tiers; pool budgets, cache-first policy, abuse detection |
-| Model voice (§2.9) | Per-member probabilities + disagreement + data-confidence stored by the pipeline; composer tone-band mapping + band-consistency lint |
+| Value-first onboarding (§3.1) | Intent router works keyless; tools that need a key emit `capability_prompt` instead of failing; key probe reports only what PF can tell us |
+| Block answers (§3.2) | Composer as a second, tool-free call under `output_config.format`; per-block schema validation (client-side range checks); per-block provenance mapping; `generated_note` for pipeline prose |
+| Follow-ups (§3.3) | Session + entity memory in DynamoDB; follow-up generator constrained by capability profile × pipeline coverage |
+| Entity resolution (§3.3) | `stride_chat_entity_aliases` seeded from `identity_normalization`, `horse_names`, `race_results_history`, PF names; clarify candidates |
+| Time awareness (§3.4) | Calendar service over `race_schedule` + S3 racecard + PF `meetingslist`/`Conditions`/`Scratchings`; user timezone in prefs; grounding injected **after the cache breakpoint** |
+| Drillable explanations (§3.5) | Read model carries `key_factors`, intelligence adjustments, `explain_prediction` output and stage values; factor → data pointers chained through the executor when keyed |
+| Briefing & watchlists (§3.6) | Materialiser + briefing generator (Batch API) triggered by the tips JSON landing; `scoring_in_progress` state; DynamoDB tables |
+| Errors as value (§3.7) | Error taxonomy returns `fallback_offer` payloads, not just codes |
+| Speed (§3.8) | `GET /bootstrap` aggregate from DynamoDB/S3; SSE sequence ids + DynamoDB replay buffer; Lambda response streaming |
+| Share (§3.10) | `POST /share` → allowlist sanitizer (model-derived blocks only) → immutable DynamoDB item; public read endpoint, rate-limited, `noindex` |
+| Shared access (§3.1, deferred) | Key-selection layer own key → keyless tiers today; pool key layer added only with a second subscription |
+| Model voice (§3.9) | Stage values from `prediction_stages` + `data_confidence` + fitted bands; composer tone mapping + band-consistency lint |
 
 ---
 
-## 6. Orchestrator (updated)
+## 7. Orchestrator (v5)
 
-Unchanged core (§4 of v2): toolbelt, five intents, bounded loop, race
-resolution. v3 additions:
+Unchanged core: toolbelt, five intents, bounded loop, race resolution. The
+prototype in `stride-app` `chat/02-agent-loop` … `chat/04-streaming` is the
+reference behaviour; v5 fixes its shape where the API requires it.
 
-- **Context bundle per turn**: `{question, now_in_user_tz, calendar_state,
-  session_entities, capability_profile, pipeline_coverage}`. Cheap to
-  assemble; transformative for correctness.
-- **Keyless planning**: planner knows which tools need a key; when unkeyed,
-  it plans around them and emits `capability_prompt` at the natural moment.
-- **Composer as separate stage**: tool results → typed blocks (schema-
-  validated) → prose glue with per-claim provenance. Deterministic table
-  rendering; LLM only writes prose around grounded numbers.
-- **Follow-up generator**: 2–3 suggestions, filtered against capability ×
-  coverage, deduped against conversation history.
+**One turn = one orchestrator call chain + one composer call.**
+
+- **Orchestrator call.** System prompt and tool list are the stable, cached
+  prefix (`cache_control` on the last system block; tools before system in
+  render order). Tools, all custom ones `strict: true` with
+  `additionalProperties: false`:
+  - `get_stride_tips(date, track?, race?)`, `get_race_card(date, track,
+    race)`, `lookup_horse(name, n)`, `query_results(filters)`,
+    `get_performance(window, group_by)` — the names the eval suite already
+    asserts; backed by the DynamoDB read model, the read-only Neon role and
+    the S3 artifacts; zero user quota.
+  - `puntingform(endpoint, …)` with an `endpoint` enum over the `pf_client`
+    accessors (`meetings_for_date`, `meeting_detail`, `results_for_meeting`,
+    `scratchings`, `conditions`, `speedmaps_for_meeting`,
+    `ratings_for_meeting`, `strike_rates`). Never raw REST. Keyless →
+    returns a `key_not_connected` result the planner turns into a
+    `capability_prompt`.
+  - `web_search` (`web_search_20260209`) and `web_fetch`
+    (`web_fetch_20260209`), server-side; `max_uses` set per turn.
+  - `clarify(candidates[])` — a client-side tool that ends the turn.
+  - No `run_readonly_sql`. (An operator-only escape hatch may exist off by
+    default, as the prior audit allowed; it is not a product tool.)
+- **Loop rules.** At most 8 rounds. Parallel `tool_use` blocks are executed
+  concurrently and *all* `tool_result`s return in one user message; a failed
+  tool returns `is_error: true` rather than being dropped. `stop_reason`
+  handling: `max_tokens` → retry once with a larger cap; `refusal` → the
+  fixed refusal answer, no retry; `pause_turn` → continue. `max_tokens` is
+  at least 16,000 with streaming — the prototype's 4,000 truncates a
+  two-table answer. Adaptive thinking on; no `temperature`; no prefill.
+- **Volatile context** (`now_in_user_tz`, `calendar_state`,
+  `session_entities`, `capability_profile`, `pipeline_coverage`) goes after
+  the cache breakpoint (§3.4). The per-turn usage line records
+  `cache_read_input_tokens`; a zero across repeated turns is a bug, not a
+  cost.
+- **Composer call.** No tools. `output_config.format` carries the block
+  schema (no recursion, no numeric min/max — those are validated
+  client-side, as the SDK does). Inputs are the orchestrator's final text,
+  every tool result, and the citations, all framed as data. One retry on
+  schema failure, then a `prose` + `notice` fallback — never a raw dump.
+- **Lints before streaming.** (1) Every numeric token in `prose` matches a
+  number in a tool result or a block cell (rounding tolerance). (2) Band
+  consistency: the adjectives used for a runner match the fitted band for
+  its `win_pct`. (3) Every link is in `citations[]` (the existing
+  `chatCitations` normalisation, shared with the client). A lint failure
+  downgrades the answer (drop the sentence, add a `notice`), and is counted.
+- **Tool results are untrusted.** Each result is wrapped in a delimited
+  block tagged with its source and trust level; the system prompt says so
+  (the prototype prompt already carries the rule — keep its wording, bump
+  the version).
+- **Session memory**: DynamoDB, session id → last 12 turns + entity memory,
+  30-minute TTL (the existing constants).
+- **Keyless planning** and the **follow-up generator** as v4.
 
 ---
 
-## 7. Model layer (unchanged core + drill-down)
+## 8. Model layer (v5)
 
-As v2: batch pipeline, ensemble, registry, staleness flags, settlement loop.
-v3 adds:
+### 8.1 What the pipeline already produces, per runner
 
-- **Factor pointers**: each top-k factor stores how to fetch its evidence
-  (e.g., `weight_drop` → horse weight history endpoint + params), powering
-  §2.5 drill-downs.
-- **Divergence support**: where market odds are available (pipeline pull or
-  user's tier), store market-implied probabilities alongside model
-  probabilities; the `divergence` block compares them with the RG notice.
-- Briefing-completion hook publishes `scoring_done(meeting_date)` events.
+| Field (read model name) | Source today | Semantics |
+|---|---|---|
+| `win_pct` | `run_tips_pipeline.calibrate_and_score` → `tips_<d>.json`, `prediction_audit.final_win_prob` | Published probability, **market-anchored** (model weight 0.30–0.80 by price) |
+| `raw_model_pct` | `rawModelProb` → JSON only | The model's own opinion: isotonic MC blended with the ML ensemble, before the anchor |
+| `place_pct` | MC place probability → JSON; `prediction_audit.predicted_place_prob` (MC stage) | |
+| `market_fair_odds` | `fairOdds = 100 / true_market` (`run_tips_pipeline.py:985`) | The de-vigged **market** price |
+| `model_fair_odds` | derived: `100 / raw_model_pct` | The model's price; **not stored today** — derived in the read model and named so it cannot be confused with the above |
+| `edge_pct` | `win_pct − true_market` | Edge on the calibrated basis |
+| `price`, `price_source`, `captured_at` | Betfair via `betfair_enrich_racecard.py`; `runner_odds_snapshots` | Delayed data; provenance rides with the number |
+| stage values | `prediction_stages`: `base_xgb`, `base_lightgbm`, `base_catboost`, `ensemble`, `mc_raw`, `mc_recalibrated`, `sectional_blend`, `ml_adjustment`, `combined_adjustment`, `wrapper_pre_calibration`, `wrapper_model_blend`, `market_context_probability`, `selection_score`, `final_decision` | `base_*` are **raw booster scores unless `STRIDE_ML_APPLY_ISOTONIC` is on** |
+| `key_factors`, `ai_insight`, `confidence`, `staking`, convergence fields | JSON | `ai_insight` is generated prose |
+| release context | `output["release"]` = `{release_id, manifest_sha256, source_commit, image_digest}` written by `run_tips_pipeline.py:3695` from `release_manifest.release_context_from_env`; `source_commit` is `STRIDE_IMAGE_SHA`, stamped into the container | The `model_version` v4 wanted. `release_id` reads `UNRESOLVED` until the release-manifest slot is activated (decision-learning Phase 8), so the read model versions on `source_commit` + `scored_at` until then, exposed as `model_release_id` |
 
-v4 adds (the voice, §2.9):
+### 8.2 What is missing and how it is added
 
-- **Per-member probabilities** (`member_probs`: xgb / lgbm / catboost) and a
-  **disagreement score** (spread across members) stored per runner.
-- **Data-confidence flag** per runner (feature completeness — e.g., first-up
-  with no trials → low).
-- The composer maps `(p_win, disagreement, data_confidence, calibration)` to
-  a deterministic tone band; prose must stay inside the band (linted, §14).
+- **`data_confidence`** (new artifact field, pipeline PR): the share of
+  `FEATURE_COLUMNS` the served row actually carried, computed where the row
+  is built (`serve_features.py` / `ml_model.prepare_features`), counting
+  NaN-by-contract (`nan_contract.PHASE2_FEATURES`) and absent inputs as
+  missing, and **excluding the by-design constants** (the 15
+  `ZERO_AT_SERVE` features are constants until `STRIDE_SERVE_LIVE_FEATURES`
+  flips — a runner must not read "complete" because of them). Plus three
+  named flags: `first_up`, `no_trials`, `no_sectionals`. Shipped behind a
+  default-off flag, byte-identical when off, with its own test, in its own
+  PR — the house rule of one change at a time.
+- **Calibrated member probabilities**: not a chat change. They arrive when
+  `STRIDE_ML_APPLY_ISOTONIC` is promoted after its shadow week and the
+  artifact carries all three calibrators. Until then §3.9's rank-agreement
+  wording applies.
+- **Tone bands**: fitted from `prediction_audit.final_win_prob` quantiles
+  (a read-only query, operator approval for the prod read per the house
+  rule), stored as a versioned JSON the composer and the lint both read.
+- **Per-runner SHAP**: deferred (§3.5).
+
+### 8.3 The read model
+
+`stride_chat_predictions` (DynamoDB): partition key `race_date#track_key`,
+sort key `race_number#runner_key`; item = the runner fields above + stages
++ `data_confidence` + `model_release_id` + `scored_at` + `scratched` +
+`tracks_merged_so_far`; a GSI on `runner_key` for `lookup_horse`. Written by
+`chat-materialise` from the S3 event the relay already produces
+(`_sync_up("racecards", "tips_*.json")`), idempotent on re-upload,
+postcondition `items_written == runners_in_file`. `scoring_in_progress` is
+true for a date between the racecard landing and the tips JSON landing.
+
+Why DynamoDB and not a `predictions` table in Neon: the chat then needs no
+Postgres write role at all (§4 inv. 14), the query pattern is by
+race/date/horse, and the table is in the estate. If the operator prefers
+SQL for chat-owned state, the alternative is a dedicated `stride_chat`
+schema with its own role; the decision is §20 Q4.
+
+### 8.4 Divergence
+
+`divergence = raw_model_pct − true_market_pct`, shown only where a real
+price exists (`has_real_market_odds`), with `price_source` and
+`captured_at`, the unformed-book fence applied, and the RG notice. It is a
+data observation, not a recommendation.
+
+### 8.5 Rules for touching the pipeline
+
+Every pipeline addition above follows the pipeline's own rules, not this
+plan's: a staged artifact never promoted directly, one change at a time,
+flags delivered through the secrets path, and **never** a change to the
+consensus agent, convergence tiers or franking thresholds (CLAUDE.md).
 
 ---
 
-## 8. Security design (deltas only; v2 §6 stands)
+## 9. Security design (v5 — full, replaces v4's deltas)
 
-- **Share privacy (new)**: share snapshots are built by a dedicated
-  sanitizer that allows only answer blocks + model/web provenance; unit
-  tests assert no user identifiers, key status, tier, or quota fields can
-  appear. Share URLs are unguessable ids.
-- **Briefing/watch jobs** run with the user's authority context but never
-  decrypt the user's key (briefings use model + cached public data only —
-  personal-data pulls happen live in chat, not in background jobs).
-- **Shared pool key (v4, §2.1 Mode B).** Stored in `service_keys` with
-  encryption context `{service: "shared_pool"}` — identical KMS envelope,
-  in-memory-only decrypt inside the executor, canary-shaped in CI. Key
-  selection order per request: user's own key → pool key (budget permitting)
-  → keyless tiers. Pool traffic runs in its own token buckets so it never
-  competes with own-key traffic; abuse detection (scraping patterns,
-  scripted enumeration) throttles or suspends shared access per user. The
-  pool key's identity is never exposed — responses and provenance say
-  "Stride's data access." Hard global daily ceiling with alerting; on
-  exhaustion, degrade to model/web tiers with disclosure.
-- Anti-extraction caps now cover chat, shares, and briefing payloads.
-- Canary suite extended to share sanitizer paths.
+### 9.1 Threat model
 
-## 9. Budgets (deltas; v2 §7 stands)
+| Asset | Threat | Control | Proof (test in §15) |
+|---|---|---|---|
+| User PF key at rest | Table dump, backup leak | KMS envelope (§9.2); ciphertext + wrapped data key in DynamoDB; plaintext never persisted | Item inspection shows no plaintext; canary never in any sink |
+| User PF key in flight inside Stride | It is a **query parameter**: any URL log, proxy log, Sentry breadcrumb or exception string with the URL leaks it | One function builds the URL; no component logs URLs; redaction filter on every handler; Sentry `beforeSend` scrub; a CloudWatch metric filter on `apiKey=` that alarms if it ever matches | Canary-key turn: pattern absent from logs, responses, traces |
+| User PF key in LLM context | Prompt or tool argument carries it | Tool schemas have no key field; executor resolves the key from the subject, never from the model | Test asserts every request body sent to Anthropic is free of the canary |
+| Anthropic spend | Unauthenticated or scripted use | JWT required before any model call; per-user and global daily caps; reserved concurrency; a **separate Anthropic key in its own Console workspace with a spend limit**; alarms at 80 % | Cap trip returns `budget_exhausted` with zero model calls (counted by the test double) |
+| PuntingForm quota / ban | Loops, abuse | 8-round cap; per-turn PF call cap; 0.4 s pacing; per-key TTL cache; own-key only (no shared key to ban) | Loop test: N rounds ⇒ ≤ M PF calls |
+| Prompt injection | PF text fields, web pages, DB prose, `ai_insight` | Delimited, trust-tagged tool results; no SQL tool; strict schemas; links only from `citations[]`; refusal on off-domain | The 16-case injection suite + "horse named *Ignore Previous Instructions*" in CI |
+| Cross-user access (IDOR) | Guessable ids, missing ownership checks | Every item keyed by subject; opaque ids; SSE resume owner-checked | User A → user B's key/watchlist/job/briefing ⇒ 404 |
+| SSRF | Model or user steers the executor | Constant host; no URL parameter anywhere; `web_fetch` is Anthropic-side | Executor refuses any other host in a unit test |
+| Share leakage | User data or licensed data in a public card | Allowlist sanitizer: model-derived block types and fields only; ≥ 128-bit ids; rate limit; `noindex` | Property test: arbitrary answer ⇒ share ⊆ allowlist; PF block ⇒ refused |
+| Licensed data across tenants | Shared cache serves A's PF data to B | Cache keyed by key id (hash of the key record id, not the key); no cross-user PF cache | B's request after A's identical request still calls upstream |
+| Pipeline secrets and data | Chat compromise reaches Betfair creds, the write DB role, models | Chat role reads `stride/chat/*` only; read-only Neon role on the pooled host with `default_transaction_read_only`, `statement_timeout`; no access to `stride/prod`, the models bucket, `stride_run_state` | IAM: `GetSecretValue` on `stride/prod` ⇒ AccessDenied; `INSERT` as the RO role ⇒ error |
+| Transport | Downgraded TLS to Neon | `sslmode=require&channel_binding=require` (as `.env.example`); never `rejectUnauthorized: false` (the Express `db.ts` does this today and must not be copied) | Config test |
+| Public repository | Real keys in fixtures, prompts with secrets | Canary-shaped test keys; secrets grep in CI (the OPS pack rule); `.env` and `.claude/` ignored | CI step |
+| Key operations | Session theft ⇒ key replaced or deleted | Step-up: `auth_time` ≤ 5 min or MFA challenge on `POST/DELETE /keys` | Stale token ⇒ `step_up_required` |
+| Availability coupling | Chat load exhausts the pipeline's PF key | Chat never uses the Stride key (Mode B deferred) | Static: no code path reads `PUNTINGFORM_API_KEY` in the chat |
+| Personal data | Emails, keys, chat history | Minimal PII (Cognito `sub`, email); one-click delete removes keys, sessions, watchlists, briefings and writes an audit record; retention stated in the privacy policy | Delete ⇒ zero items for the subject |
+| Gambling context | Product reads as tipping/inducement | RG notice on model surfaces; BetStop/self-exclusion link; no inducement language; the voice rules | Tone evals; legal review (§16, **unverified law**) |
 
-- Briefing generation: cached per user per day; zero PuntingForm calls.
-- `GET /bootstrap`: fully cacheable except key status; single-digit ms target.
-- SSE replay buffer: bounded (last K events per job, short TTL).
-- **Pool key budgets (v4):** global token bucket sized under PuntingForm's
-  rate limits; hard global daily ceiling (alert + auto-cutover to keyless
-  tiers); small per-user daily cap on pool-backed answers (it's for
-  evaluation/light use — heavy users are nudged to Mode A); cache-first
-  policy — pool requests must check the shared cache before any upstream
-  call, so repeated identical queries within TTL cost zero upstream.
+### 9.2 Key Service (the only module that talks to KMS)
 
-## 10. Provenance & honesty gradient
+- One customer-managed KMS key, alias `alias/stride-chat-keys`, annual
+  rotation on. Key policy grants `kms:GenerateDataKey` and `kms:Decrypt` to
+  `stride-chat-role` only, with a condition on
+  `kms:EncryptionContext:purpose = "puntingform"`.
+- **Store**: `GenerateDataKey(AES_256, EncryptionContext={user_id, purpose})`
+  → encrypt the API key with the plaintext data key (AES-GCM) → persist
+  `{ciphertext, wrapped_data_key, kms_key_id, created_at, last4,
+  validated_at, tier_inferred, window_days}`; discard the plaintext data key.
+- **Use**: `Decrypt(wrapped_data_key, EncryptionContext)` → unwrap → decrypt
+  → the executor uses the key for this request only; nothing caches the
+  plaintext across requests. CloudTrail therefore records one `Decrypt` per
+  keyed request with the user's context — the audit trail v4 asked for.
+- **Delete**: remove the item, write an audit record; CloudTrail shows no
+  later `Decrypt` for that context.
+- **Local dev provider**: AES-GCM with a key from the environment; refuses
+  to construct when `ENV=production`; same interface, same tests.
+- **Service key**: the pipeline's PF key stays in `stride/prod` and is never
+  referenced by chat code. Mode B's pool key, when it exists, is a second
+  subscription stored under `{purpose: "shared_pool"}` with the same
+  mechanics and stricter budgets.
+- Cost: approximately US$1/month per key plus US$0.03 per 10,000 requests
+  with a monthly free allowance (**pricing unverified from this session**).
+
+### 9.3 Secrets and IAM for the chat
+
+`stride-chat-role`: `secretsmanager:GetSecretValue` on the three
+`stride/chat/*` ARNs; `kms:*` as above; `dynamodb:GetItem/PutItem/
+UpdateItem/Query/DeleteItem` on the `stride_chat_*` table ARNs;
+`s3:GetObject` on `stride-evidence-<acct>/artifacts/*`; `sns:Publish` on
+`stride-alerts`; `logs:*` through the basic execution policy. Nothing on
+`stride/prod`, the models bucket, `stride_run_state`, ECS, or IAM. The
+Anthropic key for the chat is a **different key** from the pipeline's, in
+its own Console workspace with a spend limit, so it can be revoked without
+stopping the 07:00 consensus job.
+
+### 9.4 Logging
+
+One structured line per turn: subject hash, session id, turn id, model,
+input/output/cache tokens, tool names and durations, PF calls made,
+searches made, budget counters after, lint outcomes, `request-id`. Never
+the prompt, never a tool payload, never a URL. DEBUG-level payload capture
+exists only in local development and is scrubbed by the same filter.
+CloudWatch retention 60 days like the rest of the estate; low-cardinality
+metrics only (turns, tool errors, Anthropic 4xx/5xx, budget trips) — never
+per-race or per-horse dimensions (`14_TESTING_AND_OBSERVABILITY.md`).
+
+### 9.5 What v4 had that stands
+
+Share privacy (now an allowlist), background jobs never decrypting user
+keys (briefings are model + cached public data only), anti-extraction caps
+on chat, shares and briefing payloads, the canary suite extended to the
+sanitizer paths.
+
+---
+
+## 10. Budgets (v5)
+
+### 10.1 LLM spend (new — v4 had no LLM budget at all)
+
+| Control | Launch value (config, not code) | Enforcement |
+|---|---|---|
+| Per-user turns per day | 40 | DynamoDB atomic counter `user#<sub>#<date>` |
+| Global turns per day | 500 | counter `global#<date>`; alarm at 80 % |
+| Rounds per turn | 8 | loop cap |
+| Web searches per turn / per day | 3 / 300 | `max_uses`; counter |
+| Concurrency | reserved concurrency 3 at launch | bounds parallel Anthropic calls and Neon connections at once |
+| Console spend limit | set on the chat's own key | hard stop independent of our code |
+
+Past a cap the answer is the `budget_exhausted` error with a real
+alternative ("come back tomorrow" is not one; "here is today's coverage
+from the read model, no model call needed" is), and **no model call is
+made**.
+
+### 10.2 Cost model (why the caps exist)
+
+Per-turn worked example on `claude-opus-5` from the prior audit §7 (a
+two-round tool turn, 15 k cached prefix, 5 k fresh input, 3.5 k output and
+thinking): about **US$0.12 per turn**, plus US$0.01 per web search.
+
+| Turns per day | Anthropic per month (approx.) |
+|---:|---:|
+| 50 | US$180 |
+| 200 | US$720 |
+| 1,000 | US$3,600 |
+
+The AWS side at any of these volumes is a few dollars: three secrets, one
+KMS key, Lambda, DynamoDB on demand, logs. The only AWS lines that could
+break the US$20 tripwire are always-on services, and v5 has none. A Sonnet 5
+composer roughly halves the composer's share; measure before switching.
+
+### 10.3 PuntingForm
+
+- Own-key traffic: 0.4 s pacing per key; per-turn cap on PF calls; a
+  per-key in-memory TTL cache (scratchings 60 s, conditions 5 min, meeting
+  detail and results 10 min); the answer tells the user how many calls the
+  turn made (we can count our own calls even though PF reports no quota).
+- Pool key (deferred): global token bucket sized from **measured** limits
+  (a probe, recorded in `PUNTINGFORM_MIGRATION.md` like the wall
+  measurements), hard daily ceiling with alerting, small per-user daily cap,
+  cache-first, auto-cutover to keyless tiers.
+
+### 10.4 Other
+
+Briefings: cached per user per day, zero PF calls, generated through the
+Batch API. `GET /bootstrap`: shared part cacheable per minute; per-user part
+never in a shared cache. SSE replay: last K events per job, short TTL.
+
+---
+
+## 11. Provenance & honesty gradient
 
 Degradation ladder, each step disclosed: **stride_model → puntingform →
-web_fallback → model_unverified → honest "couldn't find it."** Mode B users
-reach tier 2 via the pool key (disclosed as "Stride's data access",
-budget-capped); fully keyless users start at tier 1/3. Hard rules stand: no
-verifiable link from memory; citations never fabricated; fallback opt-out
-per query.
+web_fallback → model_unverified → honest "couldn't find it."** Mode A users
+reach tier 2 with their own key; keyless users start at tier 1/3. Hard
+rules stand: no verifiable link from memory; citations never fabricated;
+fallback opt-out per query.
 
-Answer envelope v3 (abridged):
+Answer envelope v5 (abridged; the two fair prices are named, the release id
+and the price provenance travel with the numbers):
 
 ```json
 {
   "blocks": [
-    { "type": "prose", "text": "Stride's model rates Her Majesty 31% (fair $3.20) — first-up record, the weight drop, and the barrier are doing the work[M1]." },
-    { "type": "field_table", "race_id": "au.randwick.2026-09-12.r5",
-      "rows": [ { "runner": "Her Majesty", "p_win": 0.31, "fair_odds_win": 3.23, "top_factor": "first_up_record" } ],
-      "note": "Model v1.4.0, scored 09:12 AEST", "stale": false },
+    { "type": "prose", "text": "My model rates Her Majesty 31% before the market anchor (a fair $3.20 on that view); the de-vigged market has her at 24% ($4.10). First-up record, the weight drop and the barrier are doing the work[M1]." },
+    { "type": "field_table", "race_id": "2026-09-12#randwick#5",
+      "rows": [ { "runner": "Her Majesty", "win_pct": 28.4, "raw_model_pct": 31.0,
+                  "model_fair_odds": 3.23, "market_fair_odds": 4.10,
+                  "price": 3.90, "price_source": "betfair_delayed", "captured_at": "2026-09-12T00:45:10Z",
+                  "top_factor": "first_up_record", "data_confidence": 0.71 } ],
+      "note": "Release 2026-09-08-a, scored 09:12 AEST", "stale": false },
     { "type": "sources", "items": [
-        { "id": "M1", "type": "stride_model", "model_version": "1.4.0", "scored_at": "..." } ] }
+        { "id": "M1", "type": "stride_model", "model_release_id": "2026-09-08-a", "scored_at": "..." } ] }
   ],
   "follow_ups": ["Has she won at 1600m?", "Where does the model disagree with the market today?"],
   "provenance": { "tier": "stride_model", "fallback_reason": "none" },
@@ -406,102 +786,413 @@ Answer envelope v3 (abridged):
 }
 ```
 
-## 11. Error taxonomy (extended)
+---
+
+## 12. Error taxonomy (extended)
 
 | code | action |
 |---|---|
+| `auth_required` **(v5)** | `sign_in` |
+| `step_up_required` **(v5)** | `reauthenticate` (key operations only) |
+| `budget_exhausted` **(v5)** | `fallback_offer` from the read model, no model call; `retry_after` = midnight in the user's timezone |
 | `key_not_connected` | `connect_key` (renders `capability_prompt`) |
-| `key_invalid` (401) | `reenter_key` |
+| `key_invalid` (401/403, `PFAuthError`) | `reenter_key`, with PuntingForm's own reason text (the client already carries it) |
 | `rate_limited` (429) | `wait_retry_after` + `fallback_offer` |
-| `tier_restricted` (403) | `show_upgrade_note` + fallback answer |
+| `tier_restricted` (403 on a tier-gated endpoint) | `show_upgrade_note` + fallback answer |
+| `window_exceeded` **(v5)** (the ~31-day wall, HTTP 400) | answer from `race_results_history` where it reaches; disclose |
+| `scoring_in_progress` **(v5)** | show what has landed, say what has not, `retry_after` |
+| `licence_restricted` **(v5)** | feature withheld pending clearance; say so plainly |
 | `plan_failed` | `rephrase` |
 | `ambiguous_query` / `race_not_found` | `clarify` with options |
 | `no_prediction` / `prediction_stale` | answer via other tiers, disclosed |
 | `upstream_error` | `retry` |
 | `no_data_no_fallback` | `enable_fallback` |
 
-## 12. API surface & data model (v3)
+---
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /bootstrap` | Meetings + model coverage + briefing status + access mode (`own_key` / `stride_pool` / `keyless`), one call |
-| `POST /keys`, `GET /keys/status`, `DELETE /keys` | As v2 (step-up auth) |
-| `POST /chat`, `GET /chat/{job_id}/events?after={seq}` | SSE with replay |
-| `GET /suggestions` | Capability × coverage aware |
-| `GET /races/today` | Meetings/races with coverage flags |
-| `GET /briefing/today` | Personal morning briefing |
-| `POST /watchlist`, `DELETE /watchlist/{id}`, `GET /watchlist` | Follow horses/tracks |
-| `POST /share`, `GET /share/{id}` | Immutable sanitized answer cards |
-| `GET /healthz`, `/readyz` | Ops |
+## 13. API surface & data model (v5)
 
-```sql
--- v2 tables stand (users, api_keys, service_keys, audit_log, query_log,
--- cache, model_registry, races, predictions, results_settlements) plus:
-user_prefs(user_id, timezone, favourite_tracks jsonb, briefing_opt_in bool)
-session_entities(session_id, entities jsonb, updated_at)       -- horses/races/tracks
-entity_aliases(entity_type, alias, canonical_id)               -- fuzzy resolution
-watchlists(id, user_id, entity_type, entity_id, created_at)
-briefings(user_id, date, payload jsonb, generated_at)
-watch_events(id, user_id, race_id, runner_id, kind, payload jsonb, created_at, read_at)
-shares(id, payload jsonb /* sanitized blocks */, created_at)
-shared_usage(user_id, date, pool_calls int)                          -- pool budgets (v4)
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /bootstrap` | JWT | Meetings + model coverage + `scoring_in_progress` + briefing status + access mode (`own_key` / `keyless`) in one call |
+| `POST /keys`, `GET /keys/status`, `DELETE /keys` | JWT + step-up | Store / probe / delete; status returns last four characters, tier inference, validated_at — never the key |
+| `POST /chat` (SSE), `GET /chat/{job_id}/events?after={seq}` | JWT, owner-checked | Turn + replay |
+| `GET /suggestions` | JWT | Capability × coverage aware |
+| `GET /races/today` | JWT | Meetings/races with coverage flags |
+| `GET /briefing/today` | JWT | Personal briefing |
+| `POST /watchlist`, `DELETE /watchlist/{id}`, `GET /watchlist` | JWT | Follow horses/tracks |
+| `POST /share` | JWT | Sanitized immutable card |
+| `GET /share/{id}` | none, rate-limited, `noindex` | Public read |
+| `GET /healthz`, `/readyz` | none | Ops; `readyz` includes the cold-start model preflight result |
 
--- v4: predictions gains the voice signals (§2.9, §7):
---   member_probs jsonb          -- per-member p_win: {xgb, lgbm, catboost}
---   disagreement_score float    -- spread across ensemble members
---   data_confidence float       -- feature completeness (thin data → low)
-```
+**Chat-owned state — DynamoDB, on demand, TTL where noted**
 
-## 13. Caching (deltas)
+| Table | Key | Notes |
+|---|---|---|
+| `stride_chat_users` | `sub` | prefs: timezone, favourite tracks, briefing opt-in |
+| `stride_chat_keys` | `sub` | KMS envelope fields (§9.2) |
+| `stride_chat_key_audit` | `sub`, `ts` | store / probe / delete / decrypt-failure events |
+| `stride_chat_sessions` | `session_id` (TTL 30 min) | last 12 turns + entity memory; owner `sub` |
+| `stride_chat_events` | `job_id`, `seq` (TTL 1 h) | SSE replay buffer; owner `sub` |
+| `stride_chat_budgets` | `scope#date` | atomic counters |
+| `stride_chat_predictions` | `race_date#track_key`, `race_number#runner_key`; GSI `runner_key` | the read model (§8.3) |
+| `stride_chat_entity_aliases` | `entity_type#alias` | canonical id |
+| `stride_chat_watchlists` | `sub`, `entity_type#entity_id` | |
+| `stride_chat_briefings` | `sub`, `date` | payload + generated_at |
+| `stride_chat_watch_events` | `sub`, `ts` | race/runner/kind/payload/read_at |
+| `stride_chat_shares` | `share_id` | sanitized blocks + model provenance only |
+| `stride_chat_query_log` | `sub`, `ts` (TTL 90 d) | the per-turn usage line, for the operator |
 
-- Bootstrap payload: cacheable per minute except key status.
-- Briefings: per user per day; invalidated on scoring_done events.
-- Divergence data: TTL tied to odds freshness; disclosed when stale.
-- Rest as v2 (shared PuntingForm cache subject to ToS; answers never cached).
+**Pipeline data — Neon, read-only** through `stride_chat_ro` on the
+**pooled** host (`-pooler`, PgBouncer transaction mode: no session `SET`,
+no `LISTEN`, protocol-level prepared statements only — verified 2026-09-09
+from Neon's docs source). Grants as in
+`migrations/app/chat_readonly_role.sql` on `stride-app` branch `chat/01-hygiene` (`selections`,
+`race_results_history`, `sectional_times`, `franking_scores`,
+`blackbook_entries`, `stride_tip_results`, `race_schedule`,
+`prediction_audit`, `selection_results*`, `convergence_output`, …) plus
+`runner_odds_snapshots`, `betfair_odds_snapshots` and `consensus_scores`,
+with `default_transaction_read_only = on`, a `statement_timeout` (the branch
+file says 5 s, the prior audit 15 s — pick one and prove it against
+`get_performance`, the heaviest query) and
+`idle_in_transaction_session_timeout = '10s'`. Applied once through
+`apply-migration` with the typed `APPLY`.
 
-## 14. Testing & compliance (additions; v2 §13 stands)
+**Not created**: the v4 Postgres tables `users`, `api_keys`, `service_keys`,
+`audit_log`, `query_log`, `cache`, `model_registry`, `races`, `predictions`,
+`results_settlements`. Identity lives in Cognito, chat state in DynamoDB,
+predictions in the read model, settlement in the pipeline's own
+`selection_ledger` / `prediction_audit`.
 
-- [ ] **Block-contract tests**: every answer validates against the block
-      schema; every numeric token in prose traced to a tool result (anti-
-      hallucination lint)
-- [ ] **Routing + shape evals**: golden set (~300 racing questions across
-      personas) scored for intent, block choice, follow-up quality
-- [ ] **Tone evals**: persona conformance (measured, no hype, RG framing)
-- [ ] **Keyless journey tests**: full first-run with no key; capability
-      prompts appear at the right moments; no 401 ever shown raw
-- [ ] **Follow-up grounding**: suggestions always answerable given
-      capability × coverage
-- [ ] **Share sanitizer tests**: no user/tier/quota leakage; unguessable ids
-- [ ] **SSE replay tests**: reconnect mid-stream resumes without duplication
-- [ ] Briefing correctness: watched horse in scored race ⇒ event emitted;
-      no user-key decrypts in background jobs (assert via KMS audit)
-- [ ] Pool-key security (v4): canary shape in CI; budget enforcement (global
-      ceiling + per-user cap); cache-first assertion (identical query within
-      TTL ⇒ zero upstream calls); pool key identity never appears in any
-      response, error, or share card
-- [ ] Voice tests (v4): tone-band determinism (probability ⇒ fixed band);
-      band-consistency lint on prose; disagreement disclosed whenever spread
-      exceeds threshold; data-confidence hedging present on thin data
-- [ ] ToS review (launch blocker): credential storage, proxying, caching,
-      **pipeline key + commercial derived predictions** (§15)
-- [ ] RG review: disclosure placement on model/divergence/briefing surfaces
+---
 
-## 15. Open risks (updated)
+## 14. Caching (v5)
 
-1. **ToS on the shared pool key (v4) — now the biggest gate.** Serving many
-   users' queries through one Stride-owned key is very likely redistribution
-   under PuntingForm's terms. Before Mode B launches: obtain written
-   commercial clearance (or a partner/multi-tenant arrangement). Until
-   cleared, ship Mode B tightly capped or keep keyless = model/web only.
-   The same conversation should cover the pipeline key and derived
-   predictions.
-2. **Odds availability for divergence** — if odds data is tier-gated or
-   licensed out, `divergence` degrades to model-only gracefully.
-3. **Entity resolution quality** — horse-name fuzziness is the top clarify
-   trigger; measure and iterate.
-4. **Routing quality is the product** — the golden-set eval is the release
-   gate, not a nice-to-have.
-5. **Claude availability** — single point of failure for routing/planning/
-   fallback/composition; abstraction later if justified.
-6. **Model drift** — settlement loop + auto-pin mitigates; needs ownership.
-7. **Model extraction** — caps + monitoring mitigate, not eliminate.
+- Prompt cache: tools + system prompt as the stable prefix; volatile context
+  after the breakpoint; the default 5-minute TTL, or the 1-hour TTL if
+  traffic is sparse enough that the 5-minute cache keeps expiring.
+- Read model: hot per container in module scope, refreshed on a version
+  stamp the materialiser writes.
+- PuntingForm: per-key in-memory TTL cache only (§10.3). **No shared PF
+  cache across users** — the shared cache v4 §13 allowed is redistribution
+  and cross-tenant leakage until the licence says otherwise.
+- Bootstrap: shared part per minute; per-user part uncached.
+- Divergence data: TTL tied to the Betfair capture cadence; disclosed when
+  stale.
+- Answers: never cached.
+
+---
+
+## 15. Testing & verification — end to end
+
+### 15.0 The direct answer to "do we just send it to the cloud and test it there?"
+
+No. The cloud is where we prove the *deployment* (IAM, secrets, KMS,
+streaming, cold start, cost), not where we find out whether the logic
+works. Four tiers, each with an exit gate; nothing moves up a tier without
+its gate. The repository's own house rule applies at every tier: **verify
+content, not proxies** — a 200 with prose proves the endpoint answered, not
+that the answer was right (CLAUDE.md; `14_TESTING_AND_OBSERVABILITY.md`).
+
+### 15.1 Tier 0 — offline and hermetic (runs in CI on every push)
+
+Lives in `server/python/chat/tests/`, collected by the existing
+`python -m pytest server/python` step in `ci.yml`, and must stay hermetic
+the way that suite is: no `DATABASE_URL`, no keys, no network. The
+TypeScript side (client renderer, Express proxy) runs under the existing
+`vitest` and the offline `eval_chat.ts` mode.
+
+| Family | What it proves | What it would *still pass with* (the proxy check) — and the extra assertion that closes it |
+|---|---|---|
+| Block contract | Every composer output validates against the schema; ranges checked client-side | a valid but empty answer → assert required blocks per intent |
+| Anti-hallucination lint | Every numeric token in prose is in a tool result or block cell | prose with no numbers → golden cases require numbers where the intent needs them |
+| Band determinism | probability ⇒ one band; adjectives ⊆ band vocabulary | a composer that never uses adjectives → tone evals |
+| Key Service | envelope round-trip with a fake KMS (`moto`); context mismatch fails; local provider refuses `ENV=production` | — |
+| Redaction | a canary key placed in a URL, an exception, a tool error and a Sentry event never reaches any captured sink | a sink nobody captures → the test enumerates handlers |
+| Executor | host allowlist; pacing; `PFAuthError` → `key_invalid`; wall 400 → `window_exceeded`; recorded fixtures from `providers/fixtures/pf_*.json` | — |
+| Budgets | counters, caps, `budget_exhausted` with zero model calls (the Anthropic client is a test double that counts) | — |
+| Injection | the 16 existing cases + PF text-field cases (runner named "Ignore previous instructions", a `gearChanges` string with instructions) + a web page with instructions | fixtures the model never sees → the cases assert on tool framing *and* output |
+| Authorization | cross-subject reads are 404; SSE resume owner-checked | — |
+| Share sanitizer | property test: arbitrary answers ⇒ shares ⊆ allowlist; any PF-derived block ⇒ refused | — |
+| SSE framing | sequence ids monotonic; resume from `after` replays without duplication; heartbeat | — |
+| Entity resolver | alias hits, > 0.85 fuzzy hits, ambiguity ⇒ `clarify` | — |
+| Read model | materialiser on `examples/sample_race.json`-shaped input ⇒ items == runners; re-run idempotent; `model_fair_odds` derived correctly | a file with zero runners → postcondition fails loudly |
+| Pipeline additions | `data_confidence` byte-identical off; correct on a row with known missingness | — |
+
+### 15.2 Tier 1 — local, live, operator only
+
+- `python -m chat.cli` against: the read-only Neon role (a prod **read**,
+  which needs the operator's explicit approval each time per the house
+  rule), the operator's own PF key, the chat's own Anthropic key with a low
+  spend limit, the local `KeyProvider`, DynamoDB Local (or `moto`) for
+  state.
+- The golden and injection suites in live mode (`EVAL_LIVE_CONFIRM=yes`,
+  the existing double opt-in), with a cost cap on the run.
+- Measure and record per-turn tokens, cache hit rate, PF calls, latency.
+- **Gate**: injection 16/16; golden tool-choice ≥ 95 %; zero fabricated
+  numbers; zero unverified links; band lint failures < 2 %; median cost per
+  turn recorded.
+
+### 15.3 Tier 2 — cloud staging (same account, an alias, not a second stack)
+
+- `infra/10_chat_stack.sh` (new script, by reviewed PR — `infra/*.sh` is
+  never edited unattended) creates, idempotently: the KMS key and policy;
+  the Cognito user pool, domain and two app clients; `stride-chat-role`;
+  the three `stride/chat/*` secrets from GitHub secrets (the same
+  `--from-env` shape as `01_secrets.sh`); the `stride-chat` function with
+  the Lambda Web Adapter layer, `AWS_LWA_INVOKE_MODE=response_stream`, two
+  aliases (`staging`, `prod`) each with its own Function URL; the
+  `chat-materialise` function and its S3 trigger; the DynamoDB tables;
+  log groups with 60-day retention; alarms on `Errors`, `Throttles` and
+  `Duration` p95 to `stride-alerts`. Wired into `deploy-infra` behind a
+  `deploy_chat` input, off by default.
+- `chat-proof`, in the `verify-jobs` style, against the **staging** alias:
+  1. an authenticated canned turn ⇒ a `get_stride_tips` tool call that
+     returned ≥ 1 runner *and* a block set that validates (content, not a
+     200);
+  2. an own-key turn with the operator's key on a staging user ⇒ a
+     non-empty PF payload;
+  3. a **canary-key** turn (a fake key with a recognisable prefix) ⇒ the
+     `key_invalid` path *and* the canary absent from CloudWatch, the
+     response, and the SSE stream;
+  4. a budget trip ⇒ `budget_exhausted` with zero Anthropic requests (the
+     usage line count);
+  5. an SSE resume mid-stream ⇒ no duplicate events;
+  6. `readyz` reports the model preflight passed.
+- A load probe (`k6`, 20 sessions × 5 turns) recording p95 latency,
+  throttles, pooled Neon connections and spend; reserved concurrency and
+  the daily cap must be seen to trip.
+- **Gate**: all six proofs green with their evidence pasted into the PR;
+  cost per turn within 25 % of the Tier 1 figure.
+
+### 15.4 Tier 3 — production
+
+- Promote the `prod` alias; the client flips `STRIDE_CHAT_BACKEND` (or the
+  Express proxy target) to the prod URL.
+- Watchers, following the estate's pattern: a `chat-watch` workflow that
+  reads the query log daily (turns, error rate, lint failures, budget
+  trips) and opens an issue on anomalies; the materialiser registered with
+  `missing-run-watch`; alarms as above.
+- **The standing question** (`14_TESTING_AND_OBSERVABILITY.md`): *if this
+  component silently did nothing tomorrow, what would notice, and how
+  fast?*
+
+| Component | If it silently did nothing | What notices | How fast |
+|---|---|---|---|
+| chat-materialise | no read model for today | missing-run watch; `bootstrap` shows `scoring_in_progress` past 15:00 → chat-watch issue | same day |
+| briefing generator | no briefings | chat-watch (opt-ins with no briefing by 15:00) | same day |
+| Key Service | decrypts fail | `key_invalid` spike in the query log → chat-watch; `Errors` alarm | minutes / same day |
+| budgets | counters not written | chat-watch asserts counters == turns | same day |
+| web search | dark | `web_fallback` tier count zero on a day with web-intent turns → chat-watch | same day |
+
+### 15.5 Security tests (mapped to §9.1)
+
+Each row of the threat table names its proof; the proofs are Tier 0 where
+they can be and Tier 2 where they need AWS (IAM denial on `stride/prod`,
+KMS context enforcement, the CloudWatch metric filter firing on a planted
+`apiKey=`). A `security-review` pass on the chat directory before the first
+Tier 2 deploy; dependency pins for `anthropic`, `psycopg`, `boto3`.
+
+### 15.6 The eval programme
+
+The 46 existing cases are the seed. Grow to ~300 across personas (novice,
+form student, price hunter, keyless, own-key Starter, own-key Modeller),
+intents (the five tools × coverage states), and days (quiet day, scoring
+in progress, midweek, Saturday carnival). Score intent, tool choice, block
+choice, follow-up quality, tone, band conformance, RG framing. The
+existing rule stands: every prompt change bumps the prompt version and
+re-runs live before deploy. The eval is the release gate, not a
+nice-to-have.
+
+### 15.7 What is *not* tested in the cloud first
+
+Prompts, routing, the sanitizer, the lints, the resolver, the budgets'
+arithmetic — all Tier 0/1. If a Tier 2 proof is the first place a logic
+defect shows, that is a Tier 0 gap to close, not a reason to debug in AWS.
+
+---
+
+## 16. Prerequisites — what must be true before this can function
+
+Ordered by how much they block. "Proof" is what closes the item; a tick
+without the proof is the proxy failure this repository keeps a register of.
+
+| # | Prerequisite | Owner | Proof | Blocks |
+|---|---|---|---|---|
+| 1 | **Written PuntingForm answer** on: (a) Stride proxying a user's *own* key on the user's behalf; (b) caching that user's data server-side; (c) showing pipeline-derived predictions and field facts to other users; (d) a shared pool key | Operator | The reply filed with the private records; §20 Q5 resolved with a date | Every user other than the operator (Phase 4), Mode B (Phase 5), PF blocks in shares |
+| 2 | **Betfair data terms** for displaying delayed prices to other users / publicly | Operator | Same | Prices on shares and on other users' field tables |
+| 3 | **Identity**: Cognito user pool, hosted-UI domain, email sender, MFA policy, two app clients | Operator sitting + `10_chat_stack.sh` | Login round trip on staging; a JWT verified by the Lambda | Everything online |
+| 4 | **Client hosting decision** (§20 Q3): static + CloudFront, or Express as a proxy on a small host | Operator | Decision recorded here | Phase 3 |
+| 5 | **Read-only Neon role** `stride_chat_ro` on the pooled host, applied through `apply-migration` with `APPLY`; `CHAT_DATABASE_URL` in `stride/chat/database_ro` | Operator (typed confirmation) | A `SELECT` succeeds and an `INSERT` fails as that role | Phase 1 live tests, Phase 2 |
+| 6 | **Secrets**: `stride/chat/anthropic` (a new key in its own workspace with a spend limit), `stride/chat/database_ro`, `stride/chat/proxy_bearer` (if the proxy path is chosen) | Operator + deploy | The chat role reads all three; `stride/prod` ⇒ AccessDenied | Phase 2 |
+| 7 | **KMS key** and policy | `10_chat_stack.sh` | `GenerateDataKey` with context succeeds from the chat role; `Decrypt` without context fails | Key storage (Phase 2) |
+| 8 | **`infra/10_chat_stack.sh`** reviewed and merged; `deploy_chat` input in `deploy-infra`; `chat-proof` in `verify-jobs`; materialiser registered with `missing-run-watch` | PR | Deploy run id; proof run id | Phase 2 |
+| 9 | **Pipeline additions**, each its own PR, flag-gated, byte-identical off: `data_confidence` artifact field; per-track merge progress visible to the read model (check what the track-filtered merge writes today); `STRIDE_ML_APPLY_ISOTONIC` promotion (owned by the model programme, on its own evidence) | Pipeline PRs | Tests in `server/python/tests`; shadow-week evidence for the flag | Humility voice; member percentages |
+| 10 | **Read model materialiser** with its content postcondition | PR | Tier 0 test + Tier 2 proof | Everything that reads predictions |
+| 11 | **Chat service code** `server/python/chat/` (tools, Key Service, budgets, orchestrator, composer, schema, SSE, CLI) with Tier 0 tests | PR(s) | CI green; Tier 1 gate met | Phase 1 |
+| 12 | **Frontend**: Cognito login, block renderer, SSE client with resume, key UI, RG notice placement — in `stride-app` | PR(s) | Live evals through the UI | Phase 3 |
+| 13 | **Eval corpus** to ≥ 300; tone and band evals; bands fitted from `prediction_audit` (a prod read, approved) | Authoring | Corpus in the repo; the gate numbers in §15.2 | Release |
+| 14 | **Legal**: RG copy and placement, BetStop link, terms, privacy policy, deletion path; review of Australian state rules on tipping / betting-information services and gambling advertising (**not verified in this audit**) | Operator | Documents linked from the repo | Phase 4 |
+| 15 | **Decide the prototype's fate** (§20 Q2): port the `chat/*` TypeScript branches' behaviour to Python (the prior audit's direction) or finish them in TypeScript behind Express | Operator | Decision recorded here | Phase 1 |
+
+---
+
+## 17. Delivery phases (mapped to the estate)
+
+**Phase 0 — paper (this document).** Decisions in §20 taken; licence
+conversations opened; bands fitted; the prototype's fate decided. *Exit:*
+§20 answered.
+
+**Phase 1 — local, no AWS.** `server/python/chat/` with the tools over the
+read-only role and the S3 artifacts (local-directory fallback for
+development, the way the tips job reads its own files); the Key Service with
+the local provider; budgets; the two-call orchestrator; the block schema;
+the CLI; Tier 0 tests wired into `ci.yml`. *Exit:* Tier 0 green in CI;
+Tier 1 gate met with recorded cost per turn.
+
+**Phase 2 — cloud staging, additive.** The read-only role through
+`apply-migration`; `10_chat_stack.sh`; secrets; KMS; Cognito; the two
+functions and aliases; DynamoDB tables; alarms; the materialiser and its
+postcondition; `chat-proof`; the load probe. Nothing existing changes.
+*Exit:* Tier 2 gate met, evidence in the PR.
+
+**Phase 3 — the app, operator-only production.** Block renderer, login,
+key UI, SSE client; the hosting decision executed; the `prod` alias
+promoted; watchers registered. The audience is the operator alone, which
+is what the current PF licence covers. *Exit:* live evals green through
+the UI; a week of chat-watch with no silent-no-op findings.
+
+**Phase 4 — audience widening.** Only after §16 items 1, 2 and 14. Mode A
+for invited users; shares (model-derived only); briefings and watchlists;
+the Batch-API briefing job. *Exit:* the licence answer's conditions are
+implemented as tests, not as intentions.
+
+**Phase 5 — Mode B.** Only with a second PF subscription and written
+clearance. Pool budgets, abuse detection, cache-first policy, canary shape
+in CI. *Exit:* the pool-key security tests in §15 green.
+
+Each phase's PR carries its tests, per the estate rule; the acceptance
+script for each phase is runnable as one command and cited with output in
+the PR.
+
+---
+
+## 18. Open risks (updated)
+
+1. **Licence** — the gate on every audience wider than the operator (§16).
+   The pool key is the sharpest case, but BYOK proxying and per-user
+   caching are also questions to ask in writing, not to assume.
+2. **Anthropic spend** — the largest cost line by an order of magnitude at
+   any real volume (§10.2); mitigated by auth, caps, concurrency and a
+   separate key with a Console limit.
+3. **Coverage and timing** — target tracks only; scoring may finish in the
+   afternoon on a Saturday; the product must be honest about both (§3.6,
+   §8). Publishing races as they complete is a pipeline decision, not a
+   chat decision.
+4. **Raw member scores** — until the isotonic path is promoted, per-booster
+   percentages cannot be quoted (§3.9).
+5. **One PuntingForm key** — a chat that used it would couple the product's
+   availability to the pipeline's; Mode B is deferred for that reason as
+   much as for the licence.
+6. **Prices** — delayed key, AU-IP capture, unformed-book phantoms; the
+   live key needs Betfair Australia's activation; Betfair's terms are
+   unverified for redistribution.
+7. **Entity resolution quality** — horse-name fuzziness is the top clarify
+   trigger; measure and iterate; reuse the existing normalisers.
+8. **Routing quality is the product** — the eval is the release gate.
+9. **Claude availability** — single point of failure for routing and
+   composition; the read model still answers coverage questions without a
+   model call (`budget_exhausted` shape), which is also the outage shape.
+10. **Model drift** — settlement loop + staged retrain, owned by the
+    pipeline programme.
+11. **Model extraction** — caps + monitoring mitigate, not eliminate.
+12. **Free Plan end 2027-02-01** — the AWS cost picture changes then; v5's
+    "no always-on services" keeps the exposure small.
+13. **Two implementations drifting** — the TypeScript prototype branches
+    and a Python service would diverge; §20 Q2 exists so only one is
+    finished.
+14. **Unverified external figures** — the AWS and Cognito prices, Lambda
+    streaming limits and the API Gateway timeout change were not
+    verifiable from this session (egress blocked); none of them changes a
+    decision, but they must be checked before the infra script is written.
+
+---
+
+## 19. Audit log — what changed from v4 and the evidence
+
+| # | v4 said | Finding | Evidence | v5 change |
+|---|---|---|---|---|
+| 1 | "v2 §6 / §7 / §13 stand" | v2 and v3 are not in either repository | `git log --all -- '*plan*'` | §1 and §4 inline what is needed; v5 is self-contained |
+| 2 | Single shared FastAPI service, OIDC/JWT | No API service, no IdP, no auth exists; the prior audit chose a zip Lambda behind a Function URL; always-on compute breaks the US$20 tripwire | `02_ARCHITECTURE_AND_CONTRACTS.md:13`, `docs/chat/…AUDIT.md §2.3`, `infra/03_notifications.sh` | Lambda + Function URL + Lambda Web Adapter (FastAPI in-process is fine); Cognito named as the IdP |
+| 3 | Redis for SSE replay | No Redis; ElastiCache alone is more than half the tripwire | estate scripts | DynamoDB with TTL |
+| 4 | KMS envelope | No KMS key exists; the deploy role can create one | `infra/09_bootstrap_oidc.sh:52` | Kept; concrete design in §9.2; created by `10_chat_stack.sh` |
+| 5 | Tables `users, api_keys, service_keys, audit_log, query_log, cache, model_registry, races, predictions, results_settlements` | None exist; the real stores are `prediction_audit`, `selections`, `race_schedule`, `race_results_history`, `runner_odds_snapshots`, `selection_ledger`, the day JSONs in S3 | `docs/03-data-and-ingestion.md §6`, `migrations/` | Chat-owned state in DynamoDB; pipeline data via a read-only role; a read model materialised from the day JSON |
+| 6 | "Key works. You're on the Pro plan… ~400 requests left today" | No plan/quota endpoint; tiers are Starter/Modeller/Professional; limits unpublished | `pf_client.py`, `PUNTINGFORM_MIGRATION.md` Phase A, `:412` | Probe copy rewritten to what PF can tell us (§3.1) |
+| 7 | Three-key separation; pool traffic "never competes with own-key traffic" | One physical PF key, the pipeline's; pool traffic would compete with the 05:30 racecard job and share its ban risk | `.env.example`, `PUNTINGFORM_MIGRATION.md:15` | Mode B deferred until a second subscription and written clearance; invariant 2 re-counted |
+| 8 | Shared PuntingForm cache "subject to ToS" | Serving A's licensed data to B from a shared cache is redistribution and cross-tenant leakage | licence note | Per-key cache only (§14); invariant 13 |
+| 9 | Share cards carry field tables | PF-derived and Betfair-derived data on a public card is redistribution regardless of whose key fetched it | licence note; `betfair_enrich_racecard.py` | Shares are model-derived only; allowlist sanitizer (§3.10) |
+| 10 | No LLM spend budget | v4 §9 budgets cover PF, briefings and SSE only; a public chat is an open invoice | v4 §9 | §10.1 caps, reserved concurrency, separate key with Console limit; invariant 9 |
+| 11 | "Never in any log" | PF auth is a query parameter, so URL logging is key logging; Sentry is in the app | `pf_client.py:76`, `stride-app/server/index.ts` | Invariant 11; redaction filters; CloudWatch metric filter; canary proof |
+| 12 | Prompt injection not addressed | Tool text, web pages and the pipeline's own prose are untrusted; the eval suite already has 16 injection cases | `stride-app/evals/chat/injection.jsonl`, agent prompt on `chat/04-streaming` | Invariant 12; §9.1 row; CI gate |
+| 13 | Authorization unspecified | Multi-tenant resources need subject scoping; SSE resume needs an owner check | — | Invariant 10; tests |
+| 14 | `member_probs` "stored by the pipeline (v4 adds)" | Already produced per runner in `prediction_stages`; but raw unless `STRIDE_ML_APPLY_ISOTONIC` is on | `prediction_stages.py`, `run_tips_pipeline.py:2367,3310,3562`, `ml_model.py` comment | No new pipeline field; voice uses stage agreement and rank agreement until promotion (§3.9, §8) |
+| 15 | "precomputed top-k SHAP contributions" | No serve-time SHAP; `explain_prediction` is importance × value; SHAP only at training | `ml_model.py:806`, `train_ml_enhanced.py:1193` | Explanations from `key_factors`, intelligence adjustments, MC factors; SHAP deferred (§3.5) |
+| 16 | Tone bands ≥ 0.40 / 0.25 / 0.15 / 0.08 | Published probabilities are market-anchored; 8 of 3,396 runners above 0.30 in the last window | `README.md` calibration table, `docs/09 §1` | Bands fitted from `prediction_audit` quantiles, versioned (§3.9) |
+| 17 | "31% (fair $3.20)" | `fair_odds` in the artifact is `100/true_market`, the market's price | `run_tips_pipeline.py:985` | `model_fair_odds` vs `market_fair_odds` named (§8.1, §11) |
+| 18 | "Morning briefing … generated when the pipeline finishes scoring" | Tips start 10:00 Sydney; a full Saturday proof runs 4–5 h; the JSON is written atomically at the end | `infra/README.md`, `verify-jobs.yml`, `docs/02` | `scoring_in_progress` state; per-race publication flagged as a pipeline decision (§3.6) |
+| 19 | Entity aliases "seeded from pipeline + PuntingForm" | Normalisers with approved aliases and fuzzy matching already exist; the estate forbids new normalisers | `identity_normalization.py`, `horse_names.py`, `02_ARCHITECTURE… "never write a new normalizer"` | Reuse (§3.3) |
+| 20 | "context bundle per turn" | Placed in the system prompt it would bust the prompt cache every turn | `claude-api` skill, prompt caching rules | Volatile bundle after the breakpoint (§3.4, §7) |
+| 21 | Composer outputs typed blocks | `output_config.format` is incompatible with citations (400) | skill `shared/tool-use-concepts.md:510` | Two-call turn: orchestrator with tools/citations, composer with structured output (§7) |
+| 22 | Strict tool schemas; Claude web search with source URLs | Both verified; the prototype already uses `strict: true` and `web_search_20260209` | skill; `chat/04-streaming` `server/chatAgent.ts:261` | Kept; tool names aligned with the eval suite |
+| 23 | Divergence "where market odds are available" | Cards carry no PF odds; prices are Betfair delayed, AU-IP capture, history from 2026-08-02, phantom rows to fence | `betfair_enrich_racecard.py`, `BETFAIR_KEYS_STATUS.md`, `02_ARCHITECTURE…` limitations | §8.4 definition with provenance; Betfair terms as a prerequisite |
+| 24 | Data-confidence flag "pipeline-computed" | Not computed today; the serve row contains by-design constants that must not count as present | `serve_features.py`, `nan_contract.py`, `feature_liveness_audit.py` | §8.2 specification, flag-gated pipeline PR |
+| 25 | `GET /bootstrap` "fully cacheable except key status" | briefing status is per-user too | — | Shared vs per-user split (§3.8) |
+| 26 | Testing section is a checklist | No tiers, no gates, no answer to "where do we test" | — | §15 end to end; §16 prerequisites; §17 phases |
+| 27 | Unstated | The prototype branches in `stride-app` implement most of the loop already | `git ls-remote` on `stride-app`: `chat/01-hygiene` … `chat/04-streaming` | §1; §20 Q2 |
+
+**Verification status of external facts used above.** Verified from source
+in this session: the Claude API features and prices (skill cache dated
+2026-06-24), the Lambda Web Adapter's `AWS_LWA_INVOKE_MODE=response_stream`
+and FastAPI streaming support (README), Neon pooling behaviour (docs
+source). **Not verifiable** (egress to `aws.amazon.com`,
+`docs.aws.amazon.com`, `docs.anthropic.com`, `neon.com` and
+`puntingform.com.au` is blocked from this environment): KMS and Cognito
+prices, ElastiCache/ALB/NAT prices, Lambda streaming payload and duration
+limits, the 2024 API Gateway timeout change, PuntingForm's published terms.
+Each is marked where used; none changes a decision.
+
+---
+
+## 20. Questions for the operator (decisions only you can make)
+
+1. **Positioning.** The chat frames model output as probabilities, not tips,
+   while the pipeline's product is a BET/NO_BET contract the app displays as
+   tips. Should the chat surface the bet contract when asked ("what are you
+   backing?") with the same RG framing, or decline to? v5 assumes *surface
+   it, framed as the pipeline's decision, with the notice*.
+2. **The prototype's fate.** Port the `chat/*` branches' behaviour to
+   Python behind the Function URL (the prior audit's direction, one
+   language for tools that already exist in Python: `pf_client`,
+   `identity_normalization`, `result_margins`), or finish them in
+   TypeScript behind Express. v5 assumes *Python*, keeping the tool names
+   and the eval suite.
+3. **Client hosting.** Static client on S3 + CloudFront with the Function
+   URL as the API (cheapest, no always-on host), or Express kept as a thin
+   proxy on a small always-on host (keeps `chat_feedback` and the rate
+   limiter where they are; costs an always-on line). v5 assumes *static +
+   CloudFront*.
+4. **Chat-owned state store.** DynamoDB (v5's recommendation: no Postgres
+   write role for an internet-facing service) or a dedicated Postgres
+   schema with its own role.
+5. **PuntingForm.** Will you open the written licence conversation now, and
+   with which of the four questions in §16 item 1? Until answered, the
+   product's audience is you.
+6. **Betfair.** Delayed prices on other users' screens, and the live-key
+   activation through Betfair Australia's Automation Hub — pursue now or
+   after Phase 3?
+7. **Model for the composer.** Opus 5 everywhere at launch (v5's
+   assumption), with a measured trial of Sonnet 5 for the composer once the
+   evals exist.
+8. **Launch caps.** 40 turns per user per day and 500 global (v5's numbers)
+   — set the Console spend limit on the chat's key to match.
+
