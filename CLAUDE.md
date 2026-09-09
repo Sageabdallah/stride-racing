@@ -96,6 +96,16 @@ Consensus then runs panel-less and says so on stderr. CI does not execute
 `consensus_agent.py`, so it needs neither the variable nor a credential today;
 set the variable rather than staging a panel if that ever changes.
 
+**The web-research leg has the same contract.** `PERPLEXITY_API_KEY` absent from
+the container, or refused 401/402/403 by the provider, raises `SearchUnavailable`
+and exits 7 — on the first race, not after the card is spent. Same reasoning as
+the panel: the old behaviour logged "web research is DISABLED for this race" 32
+times and reported a generic zero yield at the end, which is how a dark leg
+looked identical to a quiet day. The escape is **`STRIDE_SEARCH_OPTIONAL=true`**,
+and it carries the same note as the panel variable — CI does not execute
+`consensus_agent.py`, so it needs neither the variable nor a Perplexity credit
+today; set the variable rather than provisioning a key if that ever changes.
+
 ## Commands
 - `/stride-full` — full daily pipeline run (results → health → build → tips → blackbook → performance)
 - `/stride-health` — health check dashboard
