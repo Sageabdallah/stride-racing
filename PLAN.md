@@ -1,4 +1,4 @@
-# Stride — Backend Plan v5.1 (v4, audited twice)
+# Stride — Backend Plan v5.2 (v4, audited three times)
 
 **Vision: the go-to place to ask anything about Australian horse racing.**
 
@@ -43,7 +43,9 @@ what must be true before it can function, §19 is the change log against v4,
 itself. Twelve findings: eleven corrections — claims that were wrong,
 over-scoped, or asserted without checking — and one claim that survived the
 challenge and is now recorded with the evidence that settles it. §22 logs
-each; the sections below carry the corrections. The largest is scope: v5's critical path put a
+each; the sections below carry the corrections. An independent adversarial pass then found
+twenty more, several of them serious; §23 logs those and the sections carry
+those corrections too. The largest self-audit finding is scope: v5's critical path put a
 Cognito user pool and a KMS key service in front of a first version that has
 exactly one user, who already has a working password gate. The first useful
 slice is roughly a third of what v5 implied (§17).
@@ -96,14 +98,14 @@ check.
 | Web app | Express + React (Vite). Served by Express on the operator's own machine (`PORT` 5000). **No per-user auth**: a `users` table exists, no route uses it, no `passport.*` call anywhere. Rate limits per IP: 20/min on chat routes, 120/min on `/api`. Sentry. | `stride-app` `server/index.ts`, `server/routes.ts`, `shared/schema.ts` | A multi-tenant product cannot run on a laptop with no login. Hosting and identity are prerequisites, not details (§16). |
 | Chat, on `main` | TypeScript orchestrator (~300 KB): 21 intents, 20 evidence sources, Claude synthesis, Perplexity search, JSON contracts. Pinned to the **retired** `claude-sonnet-4-20250514`, passes `temperature` (rejected on current models). Sessions in-memory, 30-min TTL, last 12 messages. Feedback to `chat_feedback`. | `server/chatOrchestrator.ts:40`, `server/strideChatService.ts:57` | The browser contract (`ChatCompletionRequest`/`Response`, trace sections, `citations[]`) is what the client renders today. v4's block contract is a client change too (§13, §16). |
 | Chat, unmerged branches `chat/01-hygiene` … `chat/04-streaming` (2026-07-29 → 08-02) | An agent loop with **five typed tools, `strict: true`** (`lookup_horse`, `get_race_card`, `get_stride_tips`, `query_results`, `get_performance`); `web_search_20260209` + `web_fetch_20260209`; a citation allowlist shared by server and client; 8-iteration cap; SSE route `POST /api/chat/stream`; per-IP + per-session limiter; an `STRIDE_CHAT_AGENT` flag gate; a `stride_chat_ro` read-only Neon role migration with `statement_timeout = '5s'`; a shared app-password gate for deployed instances; model default `claude-opus-5` via `ANTHROPIC_CHAT_MODEL` (`claudeConfig.ts` on the aws branch). | `server/chatAgent.ts`, `server/chatStream.ts`, `server/chatRateLimit.ts`, `migrations/app/chat_readonly_role.sql`, `server/authGate.ts` (branch `claude/frontend-public-repo-aws-pqjkty`) | v4's "orchestrator + toolbelt + bounded loop + SSE" exists as a prototype in TypeScript. v5 keeps its tool names, its citation invariant and its eval contract, whatever language the production loop ends up in (§7). |
-| Eval suite | 30 golden cases (db_tips, horse_lookup, performance, chained, web, honest_miss, followup) + 16 injection cases (prompt_exfil, sql_probe, jailbreak, data_as_instruction, adversarial_page, link_injection, schema_probe, off_domain). Offline by construction; live mode is operator-only and refuses without two env vars. | `stride-app/evals/chat/`, `scripts/eval_chat.ts` | This is the acceptance test v4 §14 asks for, already written. It is 46 cases, not the ~300 v4 wants; the gap is authoring, not tooling (§15). |
+| Eval suite | 30 golden cases (db_tips, horse_lookup, performance, chained, web, honest_miss, followup) + 16 injection cases (prompt_exfil, sql_probe, jailbreak, data_as_instruction, adversarial_page, link_injection, schema_probe, off_domain). Offline by construction; live mode is operator-only and refuses without two env vars. | `stride-app/evals/chat/`, `scripts/eval_chat.ts` | The **questions** are the acceptance test v4 §14 asks for, and they carry over. The **harness** does not, and v5 said "already written" without qualifying that (§23 finding 16): `eval_chat.ts` asserts substrings over a flat `response: string`, replays TypeScript-agent fixtures, and drives live mode by POSTing to `/api/chat`. This plan's contract is `blocks[]`, and §20 Q2 contemplates a Python service the harness cannot invoke. §15.6 additionally wants scoring on block choice, follow-up quality, tone, band conformance and RG framing, none of which the engine has. Treat the harness, the response contract and the assertion vocabulary as new work on the release-gate critical path (§15). |
 | Prior audit (2026-09-03) | Decisions: port, don't rewrite; a slim Python 3.12 **zip Lambda behind a Function URL** (not API Gateway, not Fargate+ALB, not VPC-attached, not the jobs image); Neon read-only **pooled** role; typed tools, no SQL tool by default; `stride/chat/*` secrets + a **separate Anthropic key**; Express proxies to the Function URL with a bearer; DynamoDB sessions; reserved concurrency 3; daily cap; 8-round cap; a `chat-proof` content smoke. | `docs/chat/CHAT_LAMBDA_ARCHITECTURE_AUDIT.md` §3 | v5 adopts all of it. v4 contradicted four of these (a shared FastAPI service, Redis, an always-on API, no spend cap) without saying why. |
 | AWS estate | One container image for 4 Lambdas + 10 Fargate tasks; EventBridge Scheduler (Sydney tz); DynamoDB `stride_run_state`; S3 `stride-models-<acct>` (private) and `stride-evidence-<acct>/artifacts/` (the day-artifact relay); Secrets Manager `stride/prod` (**one blob holding Betfair credentials and the write `DATABASE_URL`**); SNS `stride-alerts`; a **US$20/month cost tripwire** on the AWS Free Plan (ends 2027-02-01); deploys from GitHub Actions through an OIDC role that carries `AdministratorAccess`. **No KMS key, no Redis, no Cognito, no API service.** | `infra/*.sh`, `infra/jobs/handler.py`, `.github/workflows/deploy-infra.yml`, `infra/09_bootstrap_oidc.sh:52` | New resources can be created by `deploy-infra` (the role allows it). Anything always-on (ALB, NAT, ElastiCache, a Fargate service) breaks the tripwire on its own (§10). |
 | Pipeline outputs | `tips_<date>.json` per race: `top_picks`, `raw_model_leader`, `bet_pick`, `coverage_pick`, `full_field`; per runner: `win_pct` (**market-anchored** published probability), `raw_model_pct` (pre-anchor model opinion), `place_pct`, `fair_odds` (**= 100 / de-vigged market probability — the market's fair price, not the model's**), `edge_pct`, `key_factors`, `ai_insight` (LLM prose), and `prediction_stages` with `base_xgb`, `base_lightgbm`, `base_catboost`, `ensemble`, `mc_raw`, `mc_recalibrated`, …, `final_decision`. `prediction_audit` holds every scored runner (MC-stage win/place prob, `market_odds`, `edge`, `final_win_prob`). `selections` holds bet-worthy picks only. | `examples/sample_race.json`, `server/python/run_tips_pipeline.py:985` (`fairOdds = 100/true_market`), `:2361`, `:3304`, `server/python/prediction_stages.py`, `migrations/final_prob_audit.sql` | Per-member probabilities v4 wants to *add* are already produced, **per runner**: `mc_api` attaches the base/ensemble/MC stages inside its per-runner loop (`mc_api.py:7243-7265`, called at `:7862`) and `run_tips_pipeline` adds the wrapper stages for every horse (`:1077-1080`) before `finalise_stages` writes them onto each `full_field` entry (`:3310`). `examples/sample_race.json` predates the field and does not show it (§22 finding 8) (§8). The names v4 uses (`predictions`, `model_registry`) do not exist; the semantics of `fair_odds` differ from v4's example (§8, §11). |
-| Coverage and timing | Only `TARGET_TRACKS` are scored (env-overridable list; ~one day in three is quiet). Tips job starts **10:00 Sydney**; duration scales with the card: ~17 min midweek, a measured 39-race day spent 9,053 s in Monte Carlo, and `verify-jobs.yml` records a 55-race Saturday proof at **4–5 hours**. The day JSON is written atomically at the end of the run. | `server/python/target_tracks.py`, `infra/README.md`, `docs/02-daily-pipeline.md`, `.github/workflows/verify-jobs.yml` (`tracks` input) | "My model doesn't cover this meeting" is the common case, not the edge case. On the biggest racing day, predictions may not exist until early afternoon (§3.6, §8). |
+| Coverage and timing | Only `TARGET_TRACKS` are scored (env-overridable list; ~one day in three is quiet). The morning chain was **re-timed on 2026-08-06** so a Saturday card can finish before its own races: 04:00 racecard, 04:15 baseline-night, 04:20 intelligence, 05:30 consensus, 07:30 morning-odds, **08:05 tips**. At ~90 races the tips job still costs **3.4–6.2 h** and lands after midday whatever time it starts; the handler sizes its timeout at 8.5 h. On a quiet day the tips job returns early and `tips_<date>.json` is **never written**. | `infra/07b_fargate_schedules.sh:73-77` (retires the old names) and `:101-121` (the live chain and its measured costs); `infra/jobs/handler.py:953-959` (quiet day); `server/python/target_tracks.py`. **Not `infra/README.md`, which still lists the retired times** | "My model doesn't cover this meeting" is the common case, not the edge case. On the biggest racing day predictions land in the early afternoon, and on a third of days there is no artifact at all (§3.6, §8). |
 | PuntingForm | Starter tier. Auth is the **`apiKey` query parameter** on every call. Rate limits **unpublished** (client paces 0.4 s). Data reachable **~31 days** back (sliding). Sectionals need the Modeller tier. Ratings use the same `apiKey`. No endpoint reports plan, quota or remaining calls. Licence note recorded by the operator: *"personal use only. No redistribution; revisit before any public/commercial tips output."* **One physical key**: it is the pipeline's key. Cards carry **no odds**; prices are injected from Betfair. | `server/python/pf_client.py`, `PUNTINGFORM_MIGRATION.md:15`, `:412`, `server/python/betfair_enrich_racecard.py` | v4's onboarding copy ("Pro plan… ~400 requests left today") cannot be produced (§3.1). The "three-key separation" is two keys until a second subscription exists (§9). Any user other than the operator needs the licence conversation first (§16). |
 | Prices | Betfair Exchange, **delayed** app key (the live key was never activated); captures only from an AU IP (GitHub-hosted runners are geo-blocked); snapshot history begins 2026-08-02; phantom sub-$1.20 rows from unformed books must be fenced. | `scripts/BETFAIR_KEYS_STATUS.md`, `docs/decision-learning/02_ARCHITECTURE_AND_CONTRACTS.md` (data limitations) | `divergence` is real but its price side is delayed data with a licence of its own (§8, §16). |
-| Claude API (verified 2026-09-09 against the `claude-api` skill, docs cache 2026-06-24) | `web_search_20260209` server-side with citations (`web_search_result_location`); `strict: true` tools; `output_config.format` structured JSON — no recursion, no numeric `minimum`/`maximum`, `additionalProperties: false` required, **incompatible with citations (400)**; `claude-opus-5` US$5/US$25 per MTok, `claude-sonnet-5` US$2/US$10; adaptive thinking on by default on Opus 5; `temperature` rejected; no prefill; prompt caching is a prefix match; Batch API at 50%; web search US$10 per 1,000 searches. | skill `shared/tool-use-concepts.md`, `shared/managed-agents-core.md:196` | v4's two LLM claims hold (strict schemas, native citations). Structured output and citations do not mix in one call, which fixes the composer's shape (§7). |
+| Claude API (verified 2026-09-09 against the bundled Anthropic `claude-api` reference shipped with the tooling — **not** this repository's gitignored `.claude/skills/`, which holds STRIDE's own pipeline reference and is a different thing; its docs cache is dated 2026-06-24, so treat these as current-as-of that date rather than live) | `web_search_20260209` server-side with citations (`web_search_result_location`); `strict: true` tools; `output_config.format` structured JSON — no recursion, no numeric `minimum`/`maximum`, `additionalProperties: false` required, **incompatible with citations (400)**; `claude-opus-5` US$5/US$25 per MTok, `claude-sonnet-5` US$2/US$10; adaptive thinking on by default on Opus 5; `temperature` rejected; no prefill; prompt caching is a prefix match; Batch API at 50%; web search US$10 per 1,000 searches. | skill `shared/tool-use-concepts.md`, `shared/managed-agents-core.md:196` | v4's two LLM claims hold (strict schemas, native citations). Structured output and citations do not mix in one call, which fixes the composer's shape (§7). |
 
 ---
 
@@ -111,9 +113,9 @@ check.
 
 | Decision | v4 | v5 | Why (evidence in §1 / §19) |
 |---|---|---|---|
-| LLM | Claude Messages API | **Keep.** `claude-opus-5` by default, read from `ANTHROPIC_CHAT_MODEL` (already in `stride/prod`), preflighted at cold start with a four-token call the way `consensus_agent.preflight_extraction_model()` does; abort loudly on a dead id or a rejected parameter. `claude-sonnet-5` is allowed for the composer only after the evals say quality holds. No `temperature`, no prefill, adaptive thinking. | Both v4 claims verified. The preflight exists because a retired model id once silenced the consensus agent for six weeks. |
+| LLM | Claude Messages API | **Keep.** `claude-opus-5` by default, read from an `ANTHROPIC_CHAT_MODEL` **Lambda environment variable** set by `10_chat_stack.sh`. The same name exists in `stride/prod` (`infra/01_secrets.sh:20`), and the chat cannot read that secret (§9.3, invariant 14) — v5 cited it as the source and contradicted itself (§23 finding 4). The prior audit settles it: "`ANTHROPIC_CHAT_MODEL` is configuration, not a secret". Preflighted at cold start with a four-token call the way `consensus_agent.preflight_extraction_model()` does; abort loudly on a dead id or a rejected parameter. `claude-sonnet-5` is allowed for the composer only after the evals say quality holds. No `temperature`, no prefill, adaptive thinking. | Both v4 claims verified. The preflight exists because a retired model id once silenced the consensus agent for six weeks. |
 | Web fallback | Claude web search tool | **Keep**, as `web_search_20260209` plus `web_fetch_20260209` for cited pages; `max_uses` per turn; an `allowed_domains`/`blocked_domains` policy owned by the operator; searches counted against a budget (US$10 per 1,000). | Verified; the unmerged `chat/03-web-citations` branch already wires it with a citation allowlist. |
-| Compute | "Single shared FastAPI" | **One Python Lambda `stride-chat` behind a Function URL in `RESPONSE_STREAM` mode**, packaged as a zip on the managed `python3.12` runtime with the Lambda Web Adapter layer (`AWS_LWA_INVOKE_MODE=response_stream`). FastAPI is fine *as the in-process ASGI framework*; it is not a service. Reserved concurrency as the spend and connection cap. Not API Gateway, not Fargate + ALB, not VPC-attached, not the `stride-jobs` image. | Prior audit §2.3–2.4; the US$20 tripwire; LWA README verified 2026-09-09 (FastAPI streaming examples, `AWS_LWA_INVOKE_MODE`). API Gateway's 29-s ceiling can now be raised by quota request on regional REST APIs (2024 change; **unverified from this session**, egress blocked) — the Function URL still wins on cost and hops. |
+| Compute | "Single shared FastAPI" | **One Python Lambda `stride-chat` behind a Function URL in `RESPONSE_STREAM` mode**, packaged as a zip on the managed `python3.12` runtime with the Lambda Web Adapter layer (`AWS_LWA_INVOKE_MODE=response_stream`). FastAPI is fine *as the in-process ASGI framework*; it is not a service. Reserved concurrency is the spend and connection cap **and the concurrent-user ceiling**: §13 needs `GET /share/{id}` and `/healthz` unauthenticated, so the Function URL is `AuthType=NONE` and open to the internet, and an unauthenticated flood consumes every slot and every cold start before invariant 9's JWT check runs (§23 finding 12). Put the API behind the same CloudFront distribution §20 Q3 already proposes for the client, with a rate-limiting behaviour, or accept that the concurrency number is also an availability decision. Not API Gateway, not Fargate + ALB, not VPC-attached, not the `stride-jobs` image. | Prior audit §2.3–2.4; the US$20 tripwire; LWA README verified 2026-09-09 (FastAPI streaming examples, `AWS_LWA_INVOKE_MODE`). API Gateway's 29-s ceiling can now be raised by quota request on regional REST APIs (2024 change; **unverified from this session**, egress blocked) — the Function URL still wins on cost and hops. |
 | Key encryption | AWS KMS envelope behind `KeyProvider` | **Keep**, made concrete in §9: one customer-managed key, `GenerateDataKey` per stored key, per-user encryption context, decrypt only inside the executor, plaintext never cached beyond the request, local provider refuses `ENV=production`. | KMS does not exist in the estate yet; `deploy-infra` can create it. |
 | Identity | "OIDC/JWT" (unspecified) | **Amazon Cognito user pool** (hosted UI, OIDC, JWTs verified in the Lambda against the pool's JWKS), MFA optional, step-up = `auth_time` within 5 minutes or an MFA challenge. Any OIDC provider would do; Cognito is in-account, deploys from the same scripts, and has a free tier (**pricing unverified here**; verify before committing). | Nothing authenticates the app today (§1). "Step-up auth" needs a mechanism, not a phrase. |
 | Session memory, SSE replay | Postgres + Redis | **DynamoDB with TTL** for sessions, entity memory, replay buffer and budget counters. No Redis. | DynamoDB is in the estate; ElastiCache's smallest node alone (~US$12/month, **unverified**) is more than half the tripwire. |
@@ -266,14 +268,22 @@ is what the pipeline already computes**, not SHAP:
   scored races, one `divergence` highlight where odds are available. One
   quiet screen. No push noise unless the user opts in.
 - **(v5) "Morning" is a promise the pipeline cannot always keep.** Scoring
-  starts 10:00 Sydney and on a full Saturday can run into the afternoon
-  (§1). The briefing therefore has an explicit `scoring_in_progress` state
-  — *"Randwick and Caulfield scored; Doomben still running, ~40 min"* —
-  driven by which tracks' merges have landed, and it re-renders when the
-  final JSON lands. If the operator wants scored races published as they
-  complete, that is a pipeline change (per-race publication before the
-  atomic write) and goes through the pipeline's own review rules; the chat
-  must not assume it.
+  starts **08:05** Sydney and on a ~90-race Saturday costs 3.4 to 6.2 hours,
+  landing in the early afternoon (§1). The briefing therefore has an explicit
+  `scoring_in_progress` state — *"Randwick and Caulfield scored; Doomben
+  still running"* — and a `quiet_day` state for the third of days with no
+  target-track racing at all. It re-renders when the final file lands.
+- **(v5.2) Publishing meetings as they finish is closer than v5 said.**
+  `run_tips_pipeline.py` already takes positional track filters and
+  auto-merges a filtered run into the canonical `tips_<date>.json`
+  (`merge_tips_into_canonical`, called at `:3740`), and
+  `infra/07b_fargate_schedules.sh:117-123` names per-meeting publication as
+  the remaining lever and calls it "a handler change with its own rehearsal,
+  not a schedule change" — and `infra/jobs/**` is editable under the normal
+  rules. v5 described this as a pipeline change requiring the full model
+  review path; that overstated it (§23 finding 17). It is still not the
+  chat's decision to make, but it is a cheaper option than v5 implied, and
+  it would remove most of the `scoring_in_progress` machinery.
 - **Watch events**: fire from the same completion signal (§5). *"A horse you
   follow is racing today at Randwick — rated 28 %."*
 - **(v5) Generation path**: briefings are pure model + cached public data,
@@ -436,9 +446,18 @@ anti-extraction caps (§9.5) apply.
     is labelled generated and is not a number source.
 16. **(v5) Content over exit codes.** Every scheduled chat job (read-model
     materialiser, briefing generator) declares a content postcondition and
-    registers with the missing-run watch in the PR that creates it. A job
-    that exits 0 having written nothing is the bug (CLAUDE.md, "the silent
-    no-op class").
+    ships **its own never-ran watcher** in the PR that creates it. A job that
+    exits 0 having written nothing is the bug (CLAUDE.md, "the silent no-op
+    class"). v5 said "registers with `missing-run-watch`"; that watcher tests
+    four ECS-shaped signals — a RUNNING task in an ECS family, a log stream
+    under `/ecs/$FAMILY`, a STOPPED task, and a `stride_run_state` row —
+    against a hardcoded table of due times. A zip Lambda has no family, logs
+    to `/aws/lambda/*`, has no fixed due time (the tips file lands anywhere
+    from mid-morning to late afternoon, or never), and §9.3 deliberately
+    denies the chat role `stride_run_state`, which is the one signal it could
+    otherwise have written. Either extend that watcher with a Lambda-shaped
+    signal in the same PR, or give the chat its own. Do not claim reuse it
+    cannot deliver (§23 finding 7).
 
 ---
 
@@ -447,17 +466,20 @@ anti-extraction caps (§9.5) apply.
 ```
  OFFLINE — the existing AWS chain, unchanged (Sydney time)
  ┌───────────────────────────────────────────────────────────────────────────────────┐
- │ 05:30 racecard-collect (Fargate, pipeline PF key) ──┐                              │
- │ 06:00 intelligence-build                            │  S3 stride-evidence/artifacts/ │
- │ 07:00 consensus-agent (panel + Perplexity + Claude) ├─► racecard_<d>.json,          │
- │ 08:00 morning-odds (Betfair delayed, AU IP)         │  consensus_<d>.json,          │
- │ 10:00 tips-pipeline ── tips_<d>.json (atomic) ──────┘  market_signals_<d>.json,     │
+ │ 04:00 racecard-collect (Fargate, pipeline PF key) ──┐                              │
+ │ 04:15 baseline-night · 04:20 intelligence-build     │  S3 stride-evidence/artifacts/ │
+ │ 05:30 consensus-agent (panel + Perplexity + Claude) ├─► racecard_<d>.json,          │
+ │ 07:30 morning-odds (Betfair delayed, AU IP)         │  consensus_<d>.json,          │
+ │ 08:05 tips-pipeline (3.4-6.2h at ~90 races) ────────┘  market_signals_<d>.json,     │
+ │        └─ tips_<d>.json, written atomically; absent entirely on a quiet day         │
  │        └─ Neon: prediction_audit.final_win_prob, selections, race_schedule …        │
  └───────────────────────────────────────────────────────────────────────────────────┘
-                     │ (polled, not evented — see §22 finding 1)
+                     │ (polled, not evented — §22 finding 1; and the key is matched
+                     │  EXACTLY, never by glob — §23 finding 1)
                      ▼
  NEW, OFFLINE ── chat-materialise (zip Lambda, EventBridge Scheduler, ~10-min cadence
-                 through the racing afternoon): reads run-state + the relayed tips JSON
+                 through the racing day): reads run-state + the one relayed file whose
+                 key matches ^artifacts/racecards/tips_\d{4}-\d{2}-\d{2}\.json$
                  ─► DynamoDB stride_chat_predictions
                  (postcondition: rows == runners in the file; registers with missing-run watch)
                  └─► scoring_done ─► briefing generator (Batch API) ─► stride_chat_briefings,
@@ -539,6 +561,23 @@ call.**
     `ratings_for_meeting`, `strike_rates`). Never raw REST. Keyless →
     returns a `key_not_connected` result the planner turns into a
     `capability_prompt`.
+
+    **`pf_client` cannot be used as it stands, and v5 said it could** (§23
+    finding 10). Three defects, all in the same file. `_api_key()` reads the
+    process-global `PUNTINGFORM_API_KEY` (`pf_client.py:58`), so a per-user
+    key means mutating the process environment mid-request inside a
+    concurrent ASGI app: it races between interleaved users, leaves plaintext
+    in the environment, and breaks both §9.2's "nothing caches the plaintext
+    across requests" and §9.1's stated proof that no chat code path reads
+    that variable. `get()` sleeps 0.4 s after every call and 2 s upward on
+    retry (`:84`), which paces the **process**, not the key — so §10.3's
+    "0.4 s pacing per key" does not exist today, and under the Lambda Web
+    Adapter it stalls every co-resident request. And the ~31-day wall raises
+    a generic `PFError`, so §12's `window_exceeded` has nothing to key on.
+    The fix is one pipeline PR, byte-identical by default: an explicit
+    `api_key` parameter, an async transport with per-key pacing, and a
+    `PFWindowError` subclass. It is a prerequisite for any keyed tool
+    (§16B).
   - `web_search` (`web_search_20260209`) and `web_fetch`
     (`web_fetch_20260209`), server-side; `max_uses` set per turn.
   - `clarify(candidates[])` — a client-side tool that ends the turn.
@@ -664,10 +703,33 @@ sort key `race_number#runner_key`; item = the runner fields above + stages
 `tracks_merged_so_far`; a GSI on `runner_key` for `lookup_horse`. Written by
 `chat-materialise`, which **polls** rather than subscribing: an EventBridge
 Scheduler rule on the estate's existing pattern, firing every ten minutes
-through the racing afternoon, that compares the relayed `tips_<date>.json`
-(`_sync_up("racecards", "tips_*.json")`) and the `stride_run_state` row
-against what it has already materialised. It is idempotent on re-read, and
-its postcondition is `items_written == runners_in_file`. It does **not** use
+through the racing day, that compares the relayed tips file and the
+`stride_run_state` row against what it has already materialised. It is
+idempotent on re-read, and its postcondition is
+`items_written == runners_in_file`.
+
+**It matches the object key exactly, against
+`^artifacts/racecards/tips_\d{4}-\d{2}-\d{2}\.json$`, and exits on anything
+else** (§23 finding 1). The relay uploads by glob —
+`_sync_up("racecards", "tips_*.json")` at `infra/jobs/handler.py:266` — and
+three other files share that prefix and suffix: `tips_<date>_candidate.json`
+and `tips_<date>_cloudproof.json` from proof runs (`handler.py:1169`), and
+`tips_<date>.pre_merge_backup_<ts>.json` written beside the canonical file on
+every track-filtered run (`run_tips_pipeline.py:3737`). A candidate file is
+scored with a **non-production ensemble** under `STRIDE_ENSEMBLE_ARTIFACT`
+and can be run for an arbitrary date. Publishing one to users, stamped with a
+release id, would be the worst failure this product can have, and
+`handler.py:1165` already says in prose why the suffix exists: "so it can
+never be mistaken for the real `tips_<date>.json`". A prefix-and-suffix
+filter, on S3 events or on a glob, cannot make that distinction.
+
+**Quiet days** are a state, not a stall. On a day with no target-track racing
+the tips job returns early and never writes the file (`handler.py:953-959`,
+about one day in three), so a `scoring_in_progress` flag that clears only on
+the file's arrival would latch forever and its watcher would fire an issue
+every quiet day. The relay already uploads `quiet_<date>.json`
+(`handler.py:507`): the materialiser reads it and sets `quiet_day`, which the
+chat says plainly (§23 finding 6). It does **not** use
 an S3 event notification: `PutBucketNotificationConfiguration` is a
 full-replacement API on a bucket the retrain-gate evidence store shares, and
 full-replacement calls on shared live state are the hazard class `CLAUDE.md`
@@ -759,7 +821,7 @@ UpdateItem/Query/DeleteItem` on the `stride_chat_*` table ARNs;
 `stride/prod`, the models bucket, `stride_run_state`, ECS, or IAM. The
 Anthropic key for the chat is a **different key** from the pipeline's, in
 its own Console workspace with a spend limit, so it can be revoked without
-stopping the 07:00 consensus job.
+stopping the 05:30 consensus job.
 
 ### 9.4 Logging
 
@@ -817,17 +879,29 @@ roughly US$0.21 a turn. Deterministic block assembly (§7) avoids it.
 | 1,000 | ~US$3,600/mo | ~US$6,300/mo |
 
 These are estimates from a worked example, not measurements; Tier 1 (§15.2)
-records the real number before any cap is set. The AWS side at any of these
-volumes is a few dollars: secrets, Lambda, DynamoDB on demand, logs, and a
-KMS key once there is more than one user. The only AWS lines that could break
-the US$20 tripwire are always-on services, and this plan has none — but note
-the tripwire never sees the column that matters (see the spend posture note
-at the top). A Sonnet 5 composer roughly halves the composer's share, if the
+records the real number before any cap is set.
+
+The AWS side needs more care than v5's "a few dollars" (§23 finding 20).
+`infra/03_notifications.sh` records steady state at about US$0.03 a day, so
+roughly US$0.90 a month, and sets the tripwire at US$20 as a runaway
+detector calibrated to that. This plan adds a customer-managed KMS key (§9.2
+itself puts it near US$1 a month), a dozen DynamoDB tables, CloudFront and S3
+hosting, Cognito at Phase 4, and another log group at 60-day retention.
+Plausibly five to ten times current steady state — still far under US$20, but
+enough to make the FORECASTED-over-100 % notification fire routinely and
+desensitise the operator's only AWS runaway detector. **Set a target monthly
+AWS figure for the chat before Phase 2, and decide in §20 whether the
+tripwire moves with it.** A tripwire that cries wolf is worse than none,
+because the estate has exactly one and the daily pipeline depends on it.
+
+And the tripwire never sees the column that matters at all: see the spend
+posture note at the top. A Sonnet 5 composer roughly halves the composer's share, if the
 composer is on at all; measure before switching.
 
 ### 10.3 PuntingForm
 
-- Own-key traffic: 0.4 s pacing per key; per-turn cap on PF calls; a
+- Own-key traffic: 0.4 s pacing **per key**, which requires the `pf_client`
+  change in §7 — today's pacing is per process; per-turn cap on PF calls; a
   per-key in-memory TTL cache (scratchings 60 s, conditions 5 min, meeting
   detail and results 10 min); the answer tells the user how many calls the
   turn made (we can count our own calls even though PF reports no quota).
@@ -883,7 +957,7 @@ and the price provenance travel with the numbers):
 |---|---|
 | `auth_required` **(v5)** | `sign_in` |
 | `step_up_required` **(v5)** | `reauthenticate` (key operations only) |
-| `budget_exhausted` **(v5)** | `fallback_offer` from the read model, no model call; `retry_after` = midnight in the user's timezone |
+| `budget_exhausted` **(v5)** | `fallback_offer` from the read model, no model call; `retry_after` = **the counter's own rollover**, not "midnight in the user's timezone" as v5 said. The counter is keyed `scope#date`; if that date is UTC and the user is in Sydney, local midnight leaves them blocked another ten hours (§23 finding 19). Either key the counter on the user's local date or return the key's rollover instant |
 | `key_not_connected` | `connect_key` (renders `capability_prompt`) |
 | `key_invalid` (401/403, `PFAuthError`) | `reenter_key`, with PuntingForm's own reason text (the client already carries it) |
 | `rate_limited` (429) | `wait_retry_after` + `fallback_offer` |
@@ -921,8 +995,8 @@ and the price provenance travel with the numbers):
 | `stride_chat_users` | `sub` | prefs: timezone, favourite tracks, briefing opt-in |
 | `stride_chat_keys` | `sub` | KMS envelope fields (§9.2) |
 | `stride_chat_key_audit` | `sub`, `ts` | store / probe / delete / decrypt-failure events |
-| `stride_chat_sessions` | `session_id` (TTL 30 min) | last 12 turns + entity memory; owner `sub` |
-| `stride_chat_events` | `job_id`, `seq` (TTL 1 h) | SSE replay buffer; owner `sub` |
+| `stride_chat_sessions` | `session_id` | last 12 turns + entity memory; owner `sub`; `expires_at` enforced **on read** |
+| `stride_chat_events` | `job_id`, `seq` | SSE replay buffer; owner `sub`; `expires_at` enforced on read |
 | `stride_chat_budgets` | `scope#date` | atomic counters |
 | `stride_chat_predictions` | `race_date#track_key`, `race_number#runner_key`; GSI `runner_key` | the read model (§8.3) |
 | `stride_chat_entity_aliases` | `entity_type#alias` | canonical id |
@@ -931,6 +1005,12 @@ and the price provenance travel with the numbers):
 | `stride_chat_watch_events` | `sub`, `ts` | race/runner/kind/payload/read_at |
 | `stride_chat_shares` | `share_id` | sanitized blocks + model provenance only |
 | `stride_chat_query_log` | `sub`, `ts` (TTL 90 d) | the per-turn usage line, for the operator |
+
+**DynamoDB TTL is cleanup, not expiry** (§23 finding 19). Deletion is
+best-effort and routinely lags by hours, so an item stays readable past its
+timestamp. Every table above that v5 described as "TTL 30 min" or "TTL 1 h"
+stores an explicit `expires_at` that the code checks on read; the TTL
+attribute is set as well, purely so storage does not grow.
 
 **Pipeline data — Neon, read-only** through `stride_chat_ro` on the
 **pooled** host (`-pooler`, PgBouncer transaction mode: no session `SET`,
@@ -987,9 +1067,19 @@ that the answer was right (CLAUDE.md; `14_TESTING_AND_OBSERVABILITY.md`).
 
 Lives in `server/python/chat/tests/`, collected by the existing
 `python -m pytest server/python` step in `ci.yml`, and must stay hermetic
-the way that suite is: no `DATABASE_URL`, no keys, no network. The
-TypeScript side (client renderer, Express proxy) runs under the existing
-`vitest` and the offline `eval_chat.ts` mode.
+the way that suite is: no `DATABASE_URL`, no keys, no network — a property
+that suite's own comment records as verified, and that this work must not
+degrade. The TypeScript side (client renderer, any Express proxy) runs under
+the existing `vitest` and the offline `eval_chat.ts` mode.
+
+**`ci.yml` needs changes in the same PR, and v5 did not say so** (§23
+finding 15). It installs `numpy scipy pandas scikit-learn lightgbm pytest
+requests psycopg2-binary` — no `boto3`, no `moto` for the fake KMS, no
+`anthropic`, no `fastapi`. Collection fails at import without them. It also
+pins Python 3.11 and runs `compileall` over the whole repository, while §2
+targets the managed 3.12 runtime: either the chat stays 3.11-compatible or
+CI gains a second matrix entry. Decide it in the PR that adds the first
+test, not in the one that goes red.
 
 | Family | What it proves | What it would *still pass with* (the proxy check) — and the extra assertion that closes it |
 |---|---|---|
@@ -1034,8 +1124,18 @@ TypeScript side (client renderer, Express proxy) runs under the existing
   `chat-materialise` function and its EventBridge Scheduler rule (no S3
   notification — §22 finding 1); the DynamoDB tables;
   log groups with 60-day retention; alarms on `Errors`, `Throttles` and
-  `Duration` p95 to `stride-alerts`. Wired into `deploy-infra` behind a
-  `deploy_chat` input, off by default.
+  `Duration` p95 to `stride-alerts`. It runs from **its own
+  `deploy-chat.yml`**, assuming the same OIDC role — **not** as a step inside
+  `deploy-infra` (§23 finding 3). `deploy-infra.yml` is a single linear job:
+  a `deploy_chat` input would gate only the new step while every existing one
+  still ran, so each chat iteration would re-run `01_secrets.sh --from-env`
+  (which `put-secret-value`s the whole `stride/prod` blob and drops any key
+  absent from the process environment — the erasure that script's own comment
+  documents), `06_schedules.sh` and `07b_fargate_schedules.sh` (whose
+  `update-schedule` is full-replacement and which `CLAUDE.md` puts off
+  limits), a container image rebuild, and a live ECS smoke task. "Nothing
+  existing changes" is only true if the chat deploy does not go through that
+  workflow.
 - `chat-proof` — its **own** workflow, in the spirit of `verify-jobs` but not
   inside it. That dispatcher branches on `LAMBDA_JOBS` (container Lambdas
   invoked by name) and otherwise runs an ECS task definition; a zip Lambda
@@ -1045,18 +1145,31 @@ TypeScript side (client renderer, Express proxy) runs under the existing
   1. an authenticated canned turn ⇒ a `get_stride_tips` tool call that
      returned ≥ 1 runner *and* a block set that validates (content, not a
      200);
-  2. an own-key turn with the operator's key on a staging user ⇒ a
-     non-empty PF payload;
-  3. a **canary-key** turn (a fake key with a recognisable prefix) ⇒ the
+  2. a **canary-key** turn (a fake key with a recognisable prefix) ⇒ the
      `key_invalid` path *and* the canary absent from CloudWatch, the
-     response, and the SSE stream;
-  4. a budget trip ⇒ `budget_exhausted` with zero Anthropic requests (the
-     usage line count);
+     response, and the SSE stream. **There is deliberately no proof that
+     spends a real PuntingForm key** (§23 finding 2): there is one physical
+     key and it is the pipeline's, its rate limits are unpublished, and a
+     ban takes down the 04:00 racecard collect, which `missing-run-watch`
+     calls chain-fatal. A CI job that exercises the executor against the
+     live provider would violate this plan's own invariant 2 and the control
+     §9.1 states as "the chat never uses the Stride key". The canary proves
+     the executor path; the operator proves the live path by hand, once,
+     from Tier 1;
+  3. a budget trip against **staging's own counters** ⇒ `budget_exhausted`
+     with zero Anthropic requests (the usage line count). Counters and every
+     `stride_chat_*` item carry a `STRIDE_CHAT_ENV` key segment, so tripping
+     a cap on staging cannot exhaust production's global cap for the day —
+     v5 shared one counter set between the two aliases (§23 finding 14);
   5. an SSE resume mid-stream ⇒ no duplicate events;
   6. `readyz` reports the model preflight passed.
-- A load probe (`k6`, 20 sessions × 5 turns) recording p95 latency,
-  throttles, pooled Neon connections and spend; reserved concurrency and
-  the daily cap must be seen to trip.
+- A load probe (`k6`) recording p95 latency, throttles, pooled Neon
+  connections and spend, **sized to the cap it is meant to trip** — v5 asked
+  for 20 sessions of 5 turns, which is 100 turns and cannot reach a 500/day
+  global cap (§23 finding 14). Run it against a staging cap set deliberately
+  low. Reserved concurrency and the daily cap must both be seen to trip, and
+  the measured turn duration from this probe is what §10.1's concurrency
+  figure is then set from.
 - **Gate**: all six proofs green with their evidence pasted into the PR;
   cost per turn within 25 % of the Tier 1 figure.
 
@@ -1083,8 +1196,8 @@ TypeScript side (client renderer, Express proxy) runs under the existing
 
 | Component | If it silently did nothing | What notices | How fast |
 |---|---|---|---|
-| chat-materialise | no read model for today | missing-run watch; `bootstrap` shows `scoring_in_progress` past 15:00 → chat-watch issue | same day |
-| briefing generator | no briefings | chat-watch (opt-ins with no briefing by 15:00) | same day |
+| chat-materialise | no read model for today | its **own** watcher (§23 finding 7): `scoring_in_progress` still set after the tips job's own timeout has expired — 08:05 plus the handler's 8.5 h bound, so ~16:35, not the 15:00 v5 guessed from a retired 10:00 start — with quiet days excluded by the `quiet_day` state | same day |
+| briefing generator | no briefings | chat-watch: opted-in users with no briefing once the day's file has landed and been materialised, keyed off that event rather than a clock | same day |
 | Key Service | decrypts fail | `key_invalid` spike in the query log → chat-watch; `Errors` alarm | minutes / same day |
 | budgets | counters not written | chat-watch asserts counters == turns | same day |
 | web search | dark | `web_fallback` tier count zero on a day with web-intent turns → chat-watch | same day |
@@ -1137,13 +1250,15 @@ So the prerequisites split in two, and only table A is on the critical path.
 | # | Prerequisite | Owner | Proof |
 |---|---|---|---|
 | A1 | **Decide the prototype's fate** (§20 Q2): port the `chat/*` TypeScript branches to Python, or finish them in TypeScript behind Express | Operator | Decision recorded here |
-| A2 | **Read-only Neon role** `stride_chat_ro` on the pooled host, applied through `apply-migration` with the typed `APPLY`; connection string into `stride/chat/database_ro` | Operator (typed confirmation) | Through the **pooled** host: a `SELECT` succeeds and an `INSERT` fails as that role. Role-level `ALTER ROLE … SET` under PgBouncer transaction pooling is assumed, not verified (§22 finding 9) — this test is what establishes it |
+| A2 | **Read-only Neon role** `stride_chat_ro` on the pooled host. The DDL is copied into `stride-racing/migrations/chat_readonly_role.sql` creating the role **without a password**, and the password is set out of band with `ALTER ROLE … PASSWORD` from the operator's shell. Connection string into `stride/chat/database_ro` | Operator (typed confirmation, then a shell step) | Through the **pooled** host: a `SELECT` succeeds and an `INSERT` fails as that role. Role-level `ALTER ROLE … SET` under PgBouncer transaction pooling is assumed, not verified (§22 finding 9) — this test is what establishes it. **Not** the path v5 named (§23 finding 9): `apply-migration.yml` `cat`s the whole migration into the step log of a public repository, and the source file on the `stride-app` branch opens `CREATE ROLE … PASSWORD 'CHANGE_ME'`; that workflow also rejects any path containing a slash and reads only this repository's `migrations/` |
 | A3 | **Secrets**: `stride/chat/anthropic` (a **new** Anthropic key in its own Console workspace with a spend limit), `stride/chat/database_ro`, `stride/chat/puntingform` (the operator's own key, for a single-user deployment), `stride/chat/gate_password` | Operator + deploy | The chat role reads all four; `stride/prod` ⇒ AccessDenied |
 | A4 | **Chat service code** `server/python/chat/` — tools, budgets, orchestrator, deterministic block assembly, schema, SSE, CLI — with Tier 0 tests | PR(s) | CI green; the Tier 1 gate in §15.2 met, with a measured cost per turn |
 | A5 | **Read model materialiser** (polled, §8.3) with its content postcondition, registered with `missing-run-watch` | PR | Tier 0 test + Tier 2 proof |
 | A6 | **`infra/10_chat_stack.sh`** reviewed and merged; `deploy_chat` input on `deploy-infra`, default off; the `chat-proof` workflow (§15.3) | PR | Deploy run id; proof run id |
 | A7 | **Client hosting decision** (§20 Q3) and the client work it implies: block renderer, SSE client with resume, RG notice placement | Operator + PR(s) | Live evals through the UI |
 | A8 | **Chat spend watch** — the weekly workflow that reads the chat's own token totals and files an issue, because no existing watcher can see Anthropic spend (see the spend posture note at the top) | PR | A run that reports a real number |
+| A9 | **Tone bands fitted** on observed outcome frequency (§8.2). Not a release-time item: the band lint is a Tier 0 test that runs on every push and the block assembler reads the band file (§23 finding 13) | Authoring + a prod read, approved | The fitted file in the repo, with its coverage count and the minimum-row gate satisfied |
+| A10 | **`pf_client` made per-key and non-blocking** (§7): an explicit `api_key` parameter, async transport with per-key pacing, `PFWindowError`. Byte-identical by default. Needed as soon as any tool uses a key, including the operator's own | Pipeline PR | Existing `tests/test_pf_client.py` still green; a new test that two keys pace independently |
 
 ### 16B. Before any second user (the audience gate)
 
@@ -1154,7 +1269,7 @@ So the prerequisites split in two, and only table A is on the critical path.
 | B3 | **Legal review** — this becomes a consumer-facing service that supplies betting-related information in Australia. The specific questions for a lawyer, which this audit cannot answer: whether it is a betting-information or tipping service requiring licensing in any state; what the gambling advertising and inducement rules require of the copy; RG notice placement and the BetStop link; terms, privacy policy and the deletion path | Operator + counsel | Written advice; documents linked from the repo | Any second user |
 | B4 | **Identity**: Cognito user pool, hosted-UI domain, email sender, MFA policy, app clients — replacing the shared-password gate | Operator sitting + `10_chat_stack.sh` | Login round trip on staging; a JWT verified by the Lambda | Any second user |
 | B5 | **KMS key**, policy, and the per-user Key Service (§9.2) with step-up on key operations | `10_chat_stack.sh` + PR | `GenerateDataKey` with context succeeds from the chat role; `Decrypt` without context fails; the canary tests in §15 | Storing anyone else's PuntingForm key |
-| B6 | **Eval corpus** to ≥ 300; tone and band evals; bands fitted on observed outcome frequency from `prediction_audit` (a prod read, approved) | Authoring | Corpus in the repo; the gate numbers in §15.2 | Release to anyone |
+| B6 | **Eval corpus** to ≥ 300, with a harness that scores `blocks[]` — the existing runner asserts substrings over a flat string and cannot (§23 finding 16); tone and band evals | Authoring | Corpus in the repo; the gate numbers in §15.2 | Release to anyone |
 | B7 | **Pipeline additions** — `data_confidence` (built **last**, §8.2), per-track merge progress, `STRIDE_ML_APPLY_ISOTONIC` promotion (owned by the model programme, on its own evidence) | Pipeline PRs | Tests in `server/python/tests`; shadow-week evidence for the flag | Fuller humility voice; member percentages |
 
 ---
@@ -1164,12 +1279,23 @@ So the prerequisites split in two, and only table A is on the critical path.
 **Phase 0 — paper (this document).** Decisions in §20 taken; the licence
 conversation opened; the prototype's fate decided. *Exit:* §20 answered.
 
-**Phase 1 — local, no AWS.** `server/python/chat/`: the tools over the
-read-only role and the S3 artifacts (local-directory fallback for
-development, the way the tips job reads its own files); budgets;
+**Phase 1 — local, with two production touches.** v5 titled this "local, no
+AWS" while requiring the tools to run over the read-only Neon role, which is
+a production DDL change (§23 finding 13). It is honest to name the two:
+creating that role, and reading production data with the operator's
+approval. Everything else is local. Build `server/python/chat/`: the tools
+over the read-only role and the S3 artifacts, with a local-directory
+fallback for development the way the tips job reads its own files; budgets;
 the single-call orchestrator with deterministic block assembly; the block
-schema; the CLI; Tier 0 tests wired into `ci.yml`. No Key Service beyond
-reading the operator's own key from the secret, no Cognito, no KMS.
+schema; the CLI; Tier 0 tests wired into `ci.yml` with the dependency and
+runtime changes §15.1 names. No Key Service beyond reading the operator's own
+key from the secret, no Cognito, no KMS.
+
+The **tone bands** are fitted here, not at release: §15.1 runs the
+band-consistency lint as a Tier 0 test on every push, and the block assembler
+reads the band file, so nothing downstream works without it. v5 filed them
+under "blocks: release", which is a phase too late (§23 finding 13).
+
 *Exit:* Tier 0 green in CI; the Tier 1 gate met with a **measured** cost per
 turn — which is also the number every cap in §10.1 gets set from.
 
@@ -1218,10 +1344,12 @@ the PR.
 2. **Anthropic spend** — the largest cost line by an order of magnitude at
    any real volume (§10.2); mitigated by auth, caps, concurrency and a
    separate key with a Console limit.
-3. **Coverage and timing** — target tracks only; scoring may finish in the
-   afternoon on a Saturday; the product must be honest about both (§3.6,
-   §8). Publishing races as they complete is a pipeline decision, not a
-   chat decision.
+3. **Coverage and timing** — target tracks only; a third of days are quiet
+   and produce no artifact at all; scoring starts 08:05 and on a ~90-race
+   Saturday lands in the early afternoon. The product must be honest about
+   all three (§3.6, §8). Publishing meetings as they complete is a handler
+   change the pipeline owners can make more cheaply than v5 assumed, but it
+   is still their decision, not the chat's.
 4. **Raw member scores** — until the isotonic path is promoted, per-booster
    percentages cannot be quoted (§3.9).
 5. **One PuntingForm key** — a chat that used it would couple the product's
@@ -1261,7 +1389,7 @@ the PR.
 | 4 | KMS envelope | No KMS key exists; the deploy role can create one | `infra/09_bootstrap_oidc.sh:52` | Kept; concrete design in §9.2; created by `10_chat_stack.sh` |
 | 5 | Tables `users, api_keys, service_keys, audit_log, query_log, cache, model_registry, races, predictions, results_settlements` | None exist; the real stores are `prediction_audit`, `selections`, `race_schedule`, `race_results_history`, `runner_odds_snapshots`, `selection_ledger`, the day JSONs in S3 | `docs/03-data-and-ingestion.md §6`, `migrations/` | Chat-owned state in DynamoDB; pipeline data via a read-only role; a read model materialised from the day JSON |
 | 6 | "Key works. You're on the Pro plan… ~400 requests left today" | No plan/quota endpoint; tiers are Starter/Modeller/Professional; limits unpublished | `pf_client.py`, `PUNTINGFORM_MIGRATION.md` Phase A, `:412` | Probe copy rewritten to what PF can tell us (§3.1) |
-| 7 | Three-key separation; pool traffic "never competes with own-key traffic" | One physical PF key, the pipeline's; pool traffic would compete with the 05:30 racecard job and share its ban risk | `.env.example`, `PUNTINGFORM_MIGRATION.md:15` | Mode B deferred until a second subscription and written clearance; invariant 2 re-counted |
+| 7 | Three-key separation; pool traffic "never competes with own-key traffic" | One physical PF key, the pipeline's; pool traffic would compete with the 04:00 racecard job and share its ban risk | `.env.example`, `PUNTINGFORM_MIGRATION.md:15` | Mode B deferred until a second subscription and written clearance; invariant 2 re-counted |
 | 8 | Shared PuntingForm cache "subject to ToS" | Serving A's licensed data to B from a shared cache is redistribution and cross-tenant leakage | licence note | Per-key cache only (§14); invariant 13 |
 | 9 | Share cards carry field tables | PF-derived and Betfair-derived data on a public card is redistribution regardless of whose key fetched it | licence note; `betfair_enrich_racecard.py` | Shares are model-derived only; allowlist sanitizer (§3.10) |
 | 10 | No LLM spend budget | v4 §9 budgets cover PF, briefings and SSE only; a public chat is an open invoice | v4 §9 | §10.1 caps, reserved concurrency, separate key with Console limit; invariant 9 |
@@ -1272,7 +1400,7 @@ the PR.
 | 15 | "precomputed top-k SHAP contributions" | No serve-time SHAP; `explain_prediction` is importance × value; SHAP only at training | `ml_model.py:806`, `train_ml_enhanced.py:1193` | Explanations from `key_factors`, intelligence adjustments, MC factors; SHAP deferred (§3.5) |
 | 16 | Tone bands ≥ 0.40 / 0.25 / 0.15 / 0.08 | Published probabilities are market-anchored; 8 of 3,396 runners above 0.30 in the last window | `README.md` calibration table, `docs/09 §1` | Bands fitted from `prediction_audit` quantiles, versioned (§3.9) |
 | 17 | "31% (fair $3.20)" | `fair_odds` in the artifact is `100/true_market`, the market's price | `run_tips_pipeline.py:985` | `model_fair_odds` vs `market_fair_odds` named (§8.1, §11) |
-| 18 | "Morning briefing … generated when the pipeline finishes scoring" | Tips start 10:00 Sydney; a full Saturday proof runs 4–5 h; the JSON is written atomically at the end | `infra/README.md`, `verify-jobs.yml`, `docs/02` | `scoring_in_progress` state; per-race publication flagged as a pipeline decision (§3.6) |
+| 18 | "Morning briefing … generated when the pipeline finishes scoring" | Tips do not start in the morning as v4 assumed. v5 said 10:00 and **that was also wrong** — it came from `infra/README.md`, which is stale. The chain was re-timed on 2026-08-06 and tips start 08:05, running 3.4–6.2 h at ~90 races (§23 finding 5) | `infra/07b_fargate_schedules.sh:73-77`, `:101-121` | `scoring_in_progress` and `quiet_day` states (§3.6, §8.3) |
 | 19 | Entity aliases "seeded from pipeline + PuntingForm" | Normalisers with approved aliases and fuzzy matching already exist; the estate forbids new normalisers | `identity_normalization.py`, `horse_names.py`, `02_ARCHITECTURE… "never write a new normalizer"` | Reuse (§3.3) |
 | 20 | "context bundle per turn" | Placed in the system prompt it would bust the prompt cache every turn | `claude-api` skill, prompt caching rules | Volatile bundle after the breakpoint (§3.4, §7) |
 | 21 | Composer outputs typed blocks | `output_config.format` is incompatible with citations (400) | skill `shared/tool-use-concepts.md:510` | v5 answered with a two-call turn; **superseded by §22 finding 2** — blocks are assembled in code, the composer is optional (§7) |
@@ -1326,8 +1454,20 @@ Each is marked where used; none changes a decision.
 7. **Model for the composer.** Opus 5 everywhere at launch (v5's
    assumption), with a measured trial of Sonnet 5 for the composer once the
    evals exist.
-8. **Launch caps.** 40 turns per user per day and 500 global (v5's numbers)
-   — set the Console spend limit on the chat's key to match.
+8. **Launch caps.** 40 turns per user per day and 500 global were v5's
+   numbers, written before any measurement. Set them from the Tier 1 figure
+   instead, and set the Console spend limit on the chat's key to match.
+9. **The AWS tripwire.** The chat plausibly lifts AWS steady state five to
+   ten times, from about US$0.90 a month. Does the US$20 tripwire move with
+   it, and to what? Leaving it makes the forecast alarm routine, and a
+   tripwire that cries wolf is worse than none when the estate has one and
+   the daily pipeline depends on it (§10.2, §23 finding 20).
+10. **Per-meeting publication.** `run_tips_pipeline` already merges
+    track-filtered runs into the canonical file, and `07b` calls the
+    remaining work a handler change with a rehearsal. Do you want it? It
+    would let the chat answer about Randwick at 10:00 instead of waiting for
+    Doomben, and would remove most of the `scoring_in_progress` design
+    (§3.6, §23 finding 17).
 
 
 ---
@@ -1343,7 +1483,7 @@ is wrong — how do I stop it", and the answer must not be "redeploy".
 |---|---|---|
 | Chat function | Repoint the `prod` Lambda alias at the previous version. Aliases exist for exactly this; versions are immutable | seconds, no build |
 | Chat, entirely | Set the `deploy_chat` input off and repoint the client at the legacy path, or set reserved concurrency to 0 — the function stops answering and spends nothing, while the pipeline is untouched | seconds |
-| Runaway spend | Revoke the chat's Anthropic key in its own Console workspace. It is a different key from the pipeline's precisely so this does not stop the 07:00 consensus job (§9.3) | seconds |
+| Runaway spend | Revoke the chat's Anthropic key in its own Console workspace. It is a different key from the pipeline's precisely so this does not stop the 05:30 consensus job (§9.3) | seconds |
 | Read model | Materialiser is idempotent and the table is derived: delete the date's items and let the next poll rebuild. Nothing downstream of the pipeline reads it | one poll cycle |
 | Block schema / prompt | Prompt version is stamped on every answer; revert the version and redeploy the function. The evals are the gate that should have caught it | one deploy |
 | Neon read-only role | `REVOKE`/`ALTER ROLE … NOLOGIN` through `apply-migration`. The chat loses database tools and degrades to model + web, which is a designed tier, not an outage | one migration |
@@ -1383,3 +1523,54 @@ to be wrong, and no invariant in §4 was found to be unenforceable. The
 threat model, the tool surface, the licence position and the test tiers
 survive unchanged. The defects above are, with the exception of finding 1,
 errors of scope, arithmetic and over-claiming rather than of design.
+
+---
+
+## 23. Third audit — an independent adversarial pass over v5.1
+
+§22 was the author re-reading their own work. This section is a separate
+reviewer given one instruction: find what is wrong with v5, assume the author
+was competent but overconfident. It found twenty. The ones marked **verified
+here** were re-checked against the code before being acted on; the rest are
+recorded as reported.
+
+| # | v5 claimed | Finding | Evidence | Correction |
+|---|---|---|---|---|
+| 1 | The materialiser reads `tips_<date>.json` from the artifacts prefix | **The worst finding in either audit.** S3 filters and globs match prefix and suffix only, and three other files share both: `tips_<date>_candidate.json` and `tips_<date>_cloudproof.json` from proof runs, and `tips_<date>.pre_merge_backup_<ts>.json` from every track-filtered run. A candidate file is scored with a **non-production ensemble** for an arbitrary date. v5 would have published it to users stamped with a release id — and `handler.py:1165` already says in prose why the suffix exists: "so it can never be mistaken for the real `tips_<date>.json`" (**verified**) | `infra/jobs/handler.py:266`, `:1169`; `server/python/run_tips_pipeline.py:3737` | Exact-regex key match, exit on anything else (§5, §8.3) |
+| 2 | `chat-proof` includes "an own-key turn with the operator's key ⇒ a non-empty PF payload" | That is a CI job spending the pipeline's only PuntingForm key against a provider whose rate limits are unpublished. A ban takes down the 04:00 racecard collect. It violates this plan's own invariant 2 and the §9.1 control that says the chat never uses the Stride key, whose stated proof is that no chat code path reads it | v5 §15.3 vs §4 invariant 2, §9.1; `pf_client.py:68` | Proof deleted; the canary-key proof covers the executor (§15.3) |
+| 3 | `10_chat_stack.sh` wired into `deploy-infra` behind a `deploy_chat` input, "nothing existing changes" | `deploy-infra.yml` is one linear job. Gating the new step leaves every old one running: the whole-blob `stride/prod` rewrite, both full-replacement schedule scripts, an image rebuild and a live ECS smoke, on every chat iteration (**verified**) | `.github/workflows/deploy-infra.yml`; `infra/01_secrets.sh:28-31` | Its own `deploy-chat.yml` on the same OIDC role (§15.3) |
+| 4 | Model id read from `ANTHROPIC_CHAT_MODEL` "already in `stride/prod`" | The chat is denied `stride/prod` by §9.3 and invariant 14. Both halves are true of the secret and cannot both be true of the chat, and the prior audit already ruled it "configuration, not a secret" | v5 §2 vs §9.3; `infra/01_secrets.sh:20`; `docs/chat/…AUDIT.md:135` | A Lambda environment variable (§2, §16A A3) |
+| 5 | The morning chain is 05:30 / 06:00 / 07:00 / 08:00 / **10:00 tips** | Every time is stale. The chain was re-timed on 2026-08-06 to 04:00 / 04:15 / 04:20 / 05:30 / 07:30 / **08:05**, and the script retires the old schedule names by hand. v5 cited `infra/README.md`, which was not updated — the same failure v5 charged v4 with: trusting a document over the code. The error propagated into the `scoring_in_progress` premise and the watcher thresholds (**verified**) | `infra/07b_fargate_schedules.sh:73-77`, `:101-121` | Corrected in §1, §3.6, §5, §15.4, §18, §19 |
+| 6 | `scoring_in_progress` is true between the racecard landing and the tips JSON landing | On a quiet day the tips job returns early and the file is never written, so the flag latches forever and its watcher files a false issue on about one day in three — while v5 praises `missing-run-watch` for being quiet-day-proof (**verified**) | `infra/jobs/handler.py:953-959`, `:507` | `quiet_day` state read from `quiet_<date>.json` (§8.3) |
+| 7 | The materialiser "registers with `missing-run-watch`" | That watcher tests ECS-shaped signals against a hardcoded due-time table. A zip Lambda has no family, logs elsewhere, has no fixed due time, and §9.3 denies it the one signal it could have written | `.github/workflows/missing-run-watch.yml`; v5 §9.3 | Its own watcher, or extend that one in the same PR (§4 inv. 16, §15.4) |
+| 8 | Per-turn cost about US$0.12 | Same finding as §22 #2, reached independently, with the additional point that §10.2 had no row for the 500/day launch cap and never priced the 300 searches/day | `docs/chat/…AUDIT.md:498-512` | Already corrected in §10.2 |
+| 9 | The read-only role is applied "through `apply-migration` with the typed `APPLY`" | `apply-migration.yml` prints the whole migration into the step log of a **public** repository, and the source file opens `CREATE ROLE … PASSWORD 'CHANGE_ME'`. The workflow also rejects any path with a slash and reads only this repository's `migrations/`, so the cited file is not even reachable (**verified**) | `.github/workflows/apply-migration.yml:57,64,66`; `stride-app` `migrations/app/chat_readonly_role.sql` | Role created password-less by migration; password set out of band (§16A A2) |
+| 10 | The `puntingform` tool wraps the existing `pf_client` accessors | `_api_key()` reads the process-global environment variable, so per-user keys mean mutating the environment inside a concurrent app: a race between users, plaintext left in the process, and the failure of §9.1's own stated proof. `get()` sleeps 0.4 s per call process-wide, so §10.3's "per key" pacing does not exist. The 31-day wall raises a generic error, so `window_exceeded` has nothing to key on | `server/python/pf_client.py:58`, `:84` | A byte-identical-by-default pipeline PR: `api_key` parameter, async transport, `PFWindowError` (§7, §10.3, §16A A10) |
+| 11 | A composer call rewrites the prose while citations are "framed as data" | Citations attach to spans of the **orchestrator's** text. A separate call that rewrites the prose loses the span mapping, so §11's inline `[M1]` markers and §3.2's "provenance on every claim" have no mechanism. The §7 lint only checks links appear in `citations[]`, which by the plan's own standard passes with every citation on the wrong sentence | v5 §7 vs §3.2, §11 | Largely dissolved by §22 #2: blocks are assembled in code and the orchestrator's own text is the prose, so the spans survive. If the optional composer is ever enabled it must carry an immutable claim-id map, and the lint must resolve every marker |
+| 12 | Reserved concurrency 3 is a spend control | §13 requires unauthenticated routes, so the Function URL is open and an unauthenticated flood consumes every slot before the JWT check runs. It is an availability decision too | v5 §13 vs §10.1 | Stated as both; CloudFront with a rate-limiting behaviour proposed (§2) |
+| 13 | Phase 1 is "local, no AWS"; Cognito is ranked third by blocking; bands block release | Three ordering contradictions. Phase 1 requires a production DDL change. Cognito's proof needs the script that creates Cognito. The band lint is a Tier 0 test running from Phase 1, so bands cannot block release | v5 §16, §17 vs §15.1 | Phase 1 renamed and its two production touches named; bands moved to §16A A9; Cognito already moved by §22 #7 |
+| 14 | Staging and prod are two aliases over one set of tables | The budget counter is keyed `scope#date`, so tripping the cap on staging exhausts production's global cap for the day. The load probe's 100 turns also cannot trip a 500/day cap the gate says must be seen to trip | v5 §15.3 vs §10.1, §13 | `STRIDE_CHAT_ENV` key segment; probe sized to a deliberately low staging cap (§15.3) |
+| 15 | Chat tests are "collected by the existing `pytest server/python` step" | That step installs neither `boto3`, `moto`, `anthropic` nor `fastapi`, so collection fails at import; it pins Python 3.11 while §2 targets 3.12, and `compileall` runs over the whole repository (**verified**) | `.github/workflows/ci.yml` | Dependencies and the runtime split named in §15.1, to be decided in the PR that adds the first test |
+| 16 | The eval suite "is the acceptance test v4 asks for, already written" | The questions carry over; the harness does not. It asserts substrings over a flat string, replays TypeScript fixtures, and posts to `/api/chat`. This plan's contract is `blocks[]`, and §15.6 wants scoring the engine cannot do | `stride-app` `scripts/eval_chat.ts`, `evals/chat/*.jsonl` | Claim qualified in §1; the harness named as new work on the release-gate path |
+| 17 | Per-meeting publication is "a pipeline change through the model review path" | It is closer than that. `run_tips_pipeline` already merges track-filtered runs into the canonical file, and `07b` names it the remaining lever and calls it "a handler change with its own rehearsal, not a schedule change" — and `infra/jobs/**` is editable under the normal rules (**verified**) | `server/python/run_tips_pipeline.py:3740`, `:3820-3822`; `infra/07b_fargate_schedules.sh:117-123` | §3.6 corrected; put to the operator as §20 Q10 |
+| 18 | Over-scope | Reached independently and agreeing with §22 #7, with the additional point that a new pipeline flag also requires edits to `01_secrets.sh` (off limits unattended), `deploy-infra.yml` and `test_flag_plumbing.py`, none of which v5 mentioned — and that item 9 contained an open investigation ("check what the track-filtered merge writes today") masquerading as a prerequisite | `infra/01_secrets.sh`; `server/python/tests/test_flag_plumbing.py` | Already restructured by §22 #7; the flag-plumbing cost belongs in §16B B7 |
+| 19 | `retry_after` = midnight in the user's timezone; DynamoDB TTL as 30-minute expiry | The counter is keyed on a date that may be UTC, leaving a Sydney user blocked ten hours past the time they were told. And TTL deletion is best-effort and lags by hours, so "expired" items stay readable | v5 §12, §13 | Rollover returned from the counter; `expires_at` enforced on read (§12, §13) |
+| 20 | "The AWS side is a few dollars… the only lines that could break the tripwire are always-on services" | True as arithmetic, wrong as risk. Steady state is about US$0.90 a month and the US$20 tripwire is calibrated to it; adding a KMS key, a dozen tables, CloudFront and Cognito plausibly multiplies that five to ten times, which makes the forecast alarm routine and desensitises the estate's only AWS runaway detector | `infra/03_notifications.sh:7-9` | A target AWS figure before Phase 2, and §20 Q9 asks whether the tripwire moves |
+
+**What the independent pass confirmed as sound.** The structured-output and
+citation incompatibility; the `fair_odds` correction; the market-anchored
+calibration correction and the band consequence; the raw `base_*`
+rank-agreement workaround; the per-key-only PuntingForm cache; the reuse of
+`identity_normalization`, `horse_names`, `target_tracks` and
+`prediction_stages`, all confirmed standard-library-only and so genuinely fit
+for a slim zip package; and all eight `pf_client` accessor names in §7. It
+singled out §15.1's "what would this check still pass with" column as the
+best thing in the document and said it should be the template for the rest.
+
+**The pattern across all three audits.** Every serious finding is the same
+shape: a claim about the estate taken from a document rather than from the
+code that runs. v4 took it from plans that no longer existed; v5 took the
+schedule from `infra/README.md` and the migration path from a branch file it
+did not open. The repository's own rule covers this exactly — verify content,
+not proxies — and a plan is a proxy. **Before implementing any section of
+this document, re-read the code it names.**
