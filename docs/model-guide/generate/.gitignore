@@ -1,0 +1,8 @@
+# Generated intermediates — rebuilt by generate.sh, never committed
+facts.json
+groups.json
+zas.json
+chart_*.png
+node_modules/
+package.json
+package-lock.json
