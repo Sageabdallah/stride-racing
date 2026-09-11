@@ -1,6 +1,7 @@
 # STRIDE chatbot integration — plan
 
-Date: 2026-09-10. Status: proposed, not started. Supersedes nothing; it
+Date: 2026-09-10; status updated 2026-09-11 (§13). Phase 0 is built and
+phase 1 is built and waiting on the operator's APPLY. Supersedes nothing; it
 sits between the audit at
 [`CHAT_LAMBDA_ARCHITECTURE_AUDIT.md`](CHAT_LAMBDA_ARCHITECTURE_AUDIT.md)
 (2026-09-03) and the product plan at [`../../PLAN.md`](../../PLAN.md)
@@ -529,3 +530,53 @@ Phase 2 cannot start without 1 and 2.
 - It does not weaken any eval to pass. The 30 golden and 16 injection cases
   are the acceptance test as written; a case that fails is a defect in the
   agent, not in the case.
+
+---
+
+## 13. Status, 2026-09-11
+
+Steps 1 and 2 of the execution order (plan §6, phases 0 and 1) are built on
+branch `claude/peaceful-edison-62mpc1`. Nothing has touched AWS, Neon or
+`stride-app`.
+
+**Phase 0, built.** `server/python/chat/` holds the tool library: the eight
+typed tools of §4 plus the off-by-default SQL escape hatch, the read-only
+database layer, the artifact reader (S3 relay first, local checkout second),
+the Punting Form facade with the 31-day wall, the tool loop, prompt v3.0,
+the request and response contract, session memory, a CLI, and the eval
+runner with the 46 cases and 10 fixtures vendored from `stride-app` at
+`810e7c1`. 78 offline tests run under `python -m pytest server/python`
+with no credential, no network and none of `anthropic`, `boto3` or
+`pandas` imported at module scope. The offline eval suite reproduces the
+TypeScript runner's result: 10 pass (3 inverted controls), 36 live-only.
+
+**Phase 0 exit, not yet met.** The exit is the golden and injection suites
+green *live* against the CLI over a read-only Neon URL. That needs the role
+from phase 1 applied, `STRIDE_CHAT_DATABASE_URL`, an `ANTHROPIC_API_KEY`
+and the operator's `EVAL_LIVE_CONFIRM=yes`; it costs tokens and is the
+operator's call. Run: `python -m chat.eval_runner --live-cli`. The `web-*`
+and `inj-page-*` cases report `unsupported` until search is ported (§6,
+phase 5); they are not counted as passes.
+
+**Phase 1, built, waiting on APPLY.** `migrations/chat_readonly_role.sql`
+creates `stride_chat_ro` with `pg_read_all_data` and nothing else. The
+password never enters the repository: the file carries a token that
+`apply-migration.yml` replaces from a new repository secret,
+`STRIDE_CHAT_RO_PASSWORD`, at execution time. The same workflow run then
+connects as the new role and runs
+`server/python/chat/verify_readonly_role.py`, which fails the job unless
+every INSERT, UPDATE, DELETE and CREATE TABLE is refused for lack of
+privilege inside an explicitly READ WRITE transaction, so the role's
+read-only session default cannot pass for the grant. To apply: set the
+secret (20+ random characters), dispatch `apply-migration` with
+`migration=chat_readonly_role.sql` and `confirm=APPLY`, and read the proof
+step's output.
+
+**Corrections to this plan found while building.** `lookup_horse` reads
+`blackbook_entries` and `blackbook_entry_runs` with the columns pinned in
+`chat/tools/horse.py` and covered by a test; when the tables are absent
+the tool says so rather than failing the lookup (§8.1, first option, taken
+for now). The eval harness's live mode reads tool names from a `trace`
+array that the response contract does not have; the response therefore
+carries an additive `toolCalls` field (§5) and the Python runner reads
+that. Phase 4A's Express proxy must forward it.

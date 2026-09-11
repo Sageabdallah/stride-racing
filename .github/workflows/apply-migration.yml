@@ -10,7 +10,11 @@
 # rather than a hazard. That is a property of the current files, not a promise
 # about future ones: read the printed SQL before confirming.
 #
-# Requires the repository secret DATABASE_URL.
+# Requires the repository secret DATABASE_URL. migrations/chat_readonly_role.sql
+# also needs STRIDE_CHAT_RO_PASSWORD: the file carries the token
+# __STRIDE_CHAT_RO_PASSWORD__, which the apply step replaces with that secret at
+# execution time (driver-quoted, never printed), and the last step then connects
+# AS the new role and proves it cannot write.
 
 name: apply-migration
 
@@ -70,6 +74,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           MIGRATION: ${{ github.event.inputs.migration }}
+          STRIDE_CHAT_RO_PASSWORD: ${{ secrets.STRIDE_CHAT_RO_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -z "${DATABASE_URL}" ]; then
@@ -83,6 +88,20 @@ jobs:
           path = os.path.join("migrations", os.environ["MIGRATION"])
           with open(path) as fh:
               sql = fh.read()
+
+          # A migration that creates a login role carries a token where its
+          # password goes. The secret replaces it here, quoted by the driver so
+          # any character is safe, and the substituted text is never printed:
+          # the SQL shown in the previous step is the file, token and all.
+          TOKEN = "__STRIDE_CHAT_RO_PASSWORD__"
+          if TOKEN in sql:
+              secret = os.environ.get("STRIDE_CHAT_RO_PASSWORD", "")
+              if len(secret) < 20:
+                  sys.exit("::error::this migration needs the repository secret "
+                           "STRIDE_CHAT_RO_PASSWORD (at least 20 characters); it is "
+                           "unset or too short, so nothing was applied.")
+              from psycopg2.extensions import QuotedString
+              sql = sql.replace(TOKEN, QuotedString(secret).getquoted().decode())
 
           conn = psycopg2.connect(os.environ["DATABASE_URL"])
           try:
@@ -142,3 +161,28 @@ jobs:
           echo
           echo "The ledger table exists but nothing writes to it yet."
           echo "Set STRIDE_LEDGER_WRITE=true in the pipeline environment to begin recording."
+
+      - name: Prove the chat role cannot write
+        if: github.event.inputs.migration == 'chat_readonly_role.sql'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STRIDE_CHAT_RO_PASSWORD: ${{ secrets.STRIDE_CHAT_RO_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Connect AS THE ROLE the step above created, on the same host, and
+          # try to write. verify_readonly_role.py fails this job unless every
+          # INSERT, UPDATE, DELETE and CREATE TABLE is refused for lack of
+          # privilege, including inside an explicitly READ WRITE transaction,
+          # so default_transaction_read_only cannot pass for the grant. The
+          # role's URL is built here from DATABASE_URL's host and never printed.
+          export STRIDE_CHAT_DATABASE_URL="$(python - <<'PY'
+          import os
+          from urllib.parse import quote, urlsplit, urlunsplit
+          u = urlsplit(os.environ["DATABASE_URL"])
+          host = u.hostname or ""
+          port = f":{u.port}" if u.port else ""
+          netloc = f"stride_chat_ro:{quote(os.environ['STRIDE_CHAT_RO_PASSWORD'], safe='')}@{host}{port}"
+          print(urlunsplit((u.scheme, netloc, u.path, u.query, u.fragment)))
+          PY
+          )"
+          python server/python/chat/verify_readonly_role.py
