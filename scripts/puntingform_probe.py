@@ -153,9 +153,9 @@ def main():
             ("form", f"https://api.puntingform.com.au/v2/form/form?meetingId={meeting_id}&apiKey={API_KEY}"),
             ("meeting+races", f"https://api.puntingform.com.au/v2/form/meeting?meetingId={meeting_id}&apiKey={API_KEY}"),
             ("fields", f"https://api.puntingform.com.au/v2/form/fields?meetingId={meeting_id}&apiKey={API_KEY}"),
-            ("scratchings", f"https://api.puntingform.com.au/v2/form/scratchings?apiKey={API_KEY}"),
-            ("conditions", f"https://api.puntingform.com.au/v2/form/conditions?apiKey={API_KEY}"),
-            ("speedmaps", f"https://api.puntingform.com.au/v2/form/speedmaps?meetingId={meeting_id}&apiKey={API_KEY}"),
+            ("scratchings", f"https://api.puntingform.com.au/v2/Updates/Scratchings?apiKey={API_KEY}"),
+            ("conditions", f"https://api.puntingform.com.au/v2/Updates/Conditions?apiKey={API_KEY}"),
+            ("speedmaps", f"https://api.puntingform.com.au/v2/User/Speedmaps?meetingId={meeting_id}&raceNo=0&apiKey={API_KEY}"),
         ]
         for label, u in samples:
             st, ctype, body = fetch(u)
