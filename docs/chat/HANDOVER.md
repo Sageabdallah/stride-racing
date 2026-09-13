@@ -19,7 +19,7 @@ Last updated 2026-09-13.
 | Phase (plan §6) | State | Evidence |
 |---|---|---|
 | 0 — the tool library | **Built** | PR #179; 78 offline tests green, no credential, no network |
-| 0 — exit (live evals) | **Not closed: 37 of 38 on `main`, one refusal worded outside the accepted list** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, on the fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, on `main` at `51c9d1b`, PR #186 merged), `inj-scope-01` |
+| 0 — exit (live evals) | **Green on the v3.2 branch; the run on `main` (run #6) is in progress** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, `main` at `d8cf80c`, result to be recorded) |
 | 1 — read-only role | **Closed, proved** | `apply-migration` run #6, 2026-09-13 05:35 UTC, on `40b698b` |
 | 2 — the fork decision | **BLOCKED — operator** | §11 questions 1 and 2, unanswered |
 | 3A — AWS | Not started, and must not be | §6: "Do not build AWS resources before this" |
@@ -70,8 +70,20 @@ That is the `miss-02` shape again: the prompt says "say that you can only help
 with racing and STRIDE questions" and the model paraphrases it. The fix is the
 same as v3.1's for misses — pin the sentence, so the off-domain refusal opens
 with "I can only help with Australian racing and STRIDE's records" — and it
-is not in this change; it needs its own run to validate, which spends tokens.
-The exit stays open until a run on `main` executes 38 and passes 38.
+is prompt v3.2, PR #187.
+
+**Run #5 on the v3.2 branch (`34754428003`, 11:26 UTC, at `9c2551f`): 38
+passed, 0 failed, 8 unsupported, `tool_errors: 0` on all 41 turns, every turn
+on v3.2.** `inj-scope-01` passed in a 59-token no-tool turn. The three run #1
+cases pass as in run #4. `follow-01`'s question turn re-queried this time
+(`get_stride_tips`, found), where in runs #3 and #4 it answered from the
+previous turn's text: that turn is a coin the prompt does not fix, and it is
+harmless only because the case has no expectation. PR #187 was merged at
+11:33 UTC, four minutes before run #5 finished, so `main` at `d8cf80c` carries
+exactly the tree run #5 ran.
+
+Run #6 (`34754931990`) is the run on `main` at `d8cf80c`, dispatched 11:37 UTC;
+its result is recorded here when it lands.
 
 **What run #1 taught about the data.** The corpus's April dates do not all
 line up with the calendar: 12 April 2026 is a Sunday and Randwick raced on the
@@ -193,6 +205,9 @@ evidence that answers are grounded.
   application code, not about the folder name.
 
 ## Changelog
+
+**2026-09-13, runs #5 and #6.** Prompt v3.2 (PR #187, merged) pins the
+off-domain refusal's opening words. Run #5 on the branch: 38 of 38. Run #6 on `main` (`34754931990`) dispatched 11:37 UTC; result to follow.
 
 **2026-09-13, run #4.** PR #186 merged; `chat-eval` run #4 on `main`
 (`34753747067`): 37 passed, 1 failed, 8 unsupported. The three fixed cases
