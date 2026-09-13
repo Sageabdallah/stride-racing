@@ -163,6 +163,7 @@ def test_wrong_track_miss_names_tracks_leading_picks_and_the_nearest_date_at_tha
     db.handlers["GROUP BY race_date, track"] = [
         {"race_date": "2026-04-11", "track": "Royal Randwick", "n": 10},
         {"race_date": "2026-04-11", "track": "Caulfield", "n": 10},
+        {"race_date": "2026-04-12", "track": "Gundagai", "n": 1},
         {"race_date": "2026-04-12", "track": "Hobart", "n": 2},
         {"race_date": "2026-04-18", "track": "Royal Randwick", "n": 9},
     ]
@@ -179,8 +180,8 @@ def test_wrong_track_miss_names_tracks_leading_picks_and_the_nearest_date_at_tha
     assert d["top_selections_elsewhere"][0]["track"] == "Hobart" and d["top_selections_elsewhere"][0]["edge"] == 6.4
     assert [n["race_date"] for n in d["nearby_dates"]] == ["2026-04-11", "2026-04-18"]
     assert d["nearby_dates"][0]["tracks"] == ["Royal Randwick"], "only the track asked for counts as nearby"
-    sql, params = next((s, p) for s, p in db.calls if "GROUP BY race_date, track" in s)
-    assert params == ("2026-04-02", "2026-04-22"), "ten days either side of the span"
+    windows = [p for s, p in db.calls if "GROUP BY race_date, track" in s]
+    assert ("2026-04-02", "2026-04-22") in windows, "ten days either side of the span"
 
 
 def test_empty_day_miss_names_the_nearest_dates_with_tips(ctx, db):
@@ -209,7 +210,8 @@ def test_wrong_race_miss_lists_the_races_that_had_tips(ctx, db):
     assert out["notes"][1] == "STRIDE's tips at Hobart for 2026-04-12 were in races 5, 7; nothing for race 9."
     assert out["data"]["races_with_tips"] == [5, 7]
     assert [p["horse_name"] for p in out["data"]["top_selections_elsewhere"]] == ["Apple Isle", "Derwent Star"]
-    assert not any("GROUP BY race_date, track" in s for s, _ in db.calls), "the track had tips; no neighbourhood needed"
+    windows = [p for s, p in db.calls if "GROUP BY race_date, track" in s]
+    assert windows == [("2026-04-12", "2026-04-12")], "the track had tips; no neighbourhood needed"
 
 
 def test_honest_miss_says_after_records_end(ctx, db):
@@ -217,7 +219,8 @@ def test_honest_miss_says_after_records_end(ctx, db):
     out = get_stride_tips(ctx, "2027-12-25", track="Ascot")
     assert not out["found"]
     assert out["notes"][1] == "2027-12-25 is after STRIDE's latest recorded tips (2026-09-11)."
-    assert not any("GROUP BY race_date, track" in s for s, _ in db.calls)
+    windows = [p for s, p in db.calls if "GROUP BY race_date, track" in s]
+    assert windows == [("2027-12-25", "2027-12-25")], "no neighbourhood search past the records"
 
 
 def test_range_miss_at_a_fictional_track_still_names_the_week(ctx, db):
@@ -240,3 +243,79 @@ def test_artifact_miss_carries_the_leading_picks_elsewhere(ctx):
     assert picks[0]["edge_pct"] == 7.0 and picks[2]["edge_pct"] == -1.0, "a coverage pick stands in where there is no bet"
     assert out["data"]["tracks_with_tips"] == ["Flemington", "Royal Randwick"]
     assert "not picks at the track asked for" in out["notes"][1]
+
+
+# -- the range and day views: a complete calendar, capped rows (chain-04's "6 and 7 March") --
+
+def _sel(date, track, race, horse, edge, **kw):
+    row = {"race_date": date, "track": track, "race_number": race, "horse_name": horse, "edge": edge,
+           "market_odds": 5.0, "win_percentage": 20.0, "confidence": "medium", "value_rating": "Good",
+           "jockey": "J Smith", "trainer": "T Jones", "is_active": True}
+    row.update(kw)
+    return row
+
+
+MARCH_CALENDAR = [
+    {"race_date": "2026-03-06", "track": "Doomben", "n": 3},
+    {"race_date": "2026-03-07", "track": "Caulfield", "n": 9},
+    {"race_date": "2026-03-07", "track": "Randwick", "n": 8},
+    {"race_date": "2026-03-07", "track": "Ascot", "n": 6},
+    {"race_date": "2026-03-11", "track": "Kensington", "n": 4},
+    {"race_date": "2026-03-14", "track": "Flemington", "n": 9},
+    {"race_date": "2026-03-18", "track": "Sandown", "n": 5},
+    {"race_date": "2026-03-21", "track": "Rosehill", "n": 8},
+    {"race_date": "2026-03-25", "track": "Canterbury", "n": 4},
+    {"race_date": "2026-03-28", "track": "Caulfield", "n": 9},
+]
+MARCH_ROWS = ([_sel("2026-03-06", "Doomben", i, f"D{i}", 1.0 * i) for i in (1, 2, 3)]
+              + [_sel("2026-03-07", "Caulfield", i, f"C{i}", 0.5 * i) for i in range(1, 10)]
+              + [_sel("2026-03-07", "Randwick", i, f"R{i}", 6.0 - i) for i in range(1, 9)])
+
+
+def test_busy_month_lists_every_date_from_the_calendar_and_caps_the_rows(ctx, db):
+    db.handlers["GROUP BY race_date, track"] = MARCH_CALENDAR
+    db.handlers["FROM selections WHERE race_date >= %s"] = MARCH_ROWS  # rows only for the first two dates
+    out = get_stride_tips(ctx, "2026-03-01", date_to="2026-03-31")
+    assert out["found"] and out["truncated"]
+    d = out["data"]
+    assert d["dates_with_tips"] == ["2026-03-06", "2026-03-07", "2026-03-11", "2026-03-14", "2026-03-18",
+                                    "2026-03-21", "2026-03-25", "2026-03-28"], "every date, not the first 400 rows' worth"
+    cal = {c["race_date"]: c for c in d["calendar"]}
+    assert cal["2026-03-07"]["selections"] == 23 and [t["track"] for t in cal["2026-03-07"]["tracks"]] == ["Caulfield", "Randwick", "Ascot"]
+    assert cal["2026-03-28"] == {"race_date": "2026-03-28", "selections": 9, "tracks": [{"track": "Caulfield", "selections": 9}]}
+    # Two per track per date, best edge first, compact keys.
+    march7 = d["selections_by_date"]["2026-03-07"]
+    assert [(r["track"], r["horse_name"]) for r in march7] == [("Caulfield", "C9"), ("Caulfield", "C8"), ("Randwick", "R1"), ("Randwick", "R2")]
+    assert "jockey" not in march7[0] and march7[0]["edge"] == 4.5
+    assert d["selections_by_date"]["2026-03-14"] == []
+    assert any(n.startswith("Rows for 2026-03-11, 2026-03-14, 2026-03-18, 2026-03-21, 2026-03-25, 2026-03-28 are not shown") for n in out["notes"])
+    assert any("leading 2 by edge per track per date" in n for n in out["notes"])
+    # Only the active set counts, in both queries, and the row fetch is bounded.
+    cal_sql = next(s for s, _ in db.calls if "GROUP BY race_date, track" in s)
+    row_sql, row_params = next((s, p) for s, p in db.calls if "ORDER BY race_date, track, edge DESC" in s)
+    assert "COALESCE(is_active, true)" in cal_sql and "COALESCE(is_active, true)" in row_sql
+    assert row_params == ("2026-03-01", "2026-03-31", 1500)
+
+
+def test_day_view_shows_three_per_track_and_the_calendar_counts(ctx, db):
+    db.handlers["GROUP BY race_date, track"] = [{"race_date": "2026-03-07", "track": "Caulfield", "n": 9},
+                                                 {"race_date": "2026-03-07", "track": "Randwick", "n": 8}]
+    db.handlers["FROM selections WHERE race_date >= %s"] = [r for r in MARCH_ROWS if r["race_date"] == "2026-03-07"]
+    out = get_stride_tips(ctx, "2026-03-07")
+    rows = out["data"]["selections_by_date"]["2026-03-07"]
+    assert [r["horse_name"] for r in rows] == ["C9", "C8", "C7", "R1", "R2", "R3"]
+    assert out["truncated"] and out["data"]["calendar"][0]["selections"] == 17
+    assert any("leading 3 by edge per track per date" in n for n in out["notes"])
+
+
+def test_track_view_keeps_the_detail_and_caps_per_date(ctx, db):
+    db.handlers["GROUP BY race_date, track"] = [{"race_date": "2026-03-07", "track": "Caulfield", "n": 14}]
+    db.handlers["FROM selections WHERE race_date >= %s"] = (
+        [_sel("2026-03-07", "Caulfield", i, f"C{i}", float(i)) for i in range(1, 15)]
+        + [_sel("2026-03-07", "Randwick", 1, "R1", 9.0)])
+    out = get_stride_tips(ctx, "2026-03-07", track="Caulfield")
+    rows = out["data"]["selections_by_date"]["2026-03-07"]
+    assert len(rows) == 12 and rows[0]["horse_name"] == "C14" and rows[0]["jockey"] == "J Smith"
+    assert all(r["track"] == "Caulfield" for r in rows)
+    assert out["truncated"] and any("capped at 12 rows per date" in n for n in out["notes"])
+    assert out["data"]["dates_with_tips"] == ["2026-03-07"] and out["data"]["calendar"][0]["tracks"] == [{"track": "Caulfield", "selections": 14}]
