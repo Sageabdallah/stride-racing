@@ -11,9 +11,14 @@ untrusted input:
   boundary; this is the belt over those braces and costs nothing.
 * The URL is STRIDE_CHAT_DATABASE_URL, never DATABASE_URL (config.py).
 
-psycopg2 is imported inside connect() so the module imports without it. Rows
-come back as plain dicts, which is what the tools serialise and what a fake
-in the tests returns.
+psycopg2 is imported inside _open() so the module imports without it, and a
+missing driver raises DatabaseUnavailable like any other reason the database
+cannot be reached — the tools then say the database did not answer rather than
+dying on ModuleNotFoundError. query() imports only after _connection() has
+returned, so an unconfigured chat reports the missing URL, which is the true
+cause, rather than whichever import happened to run first. Rows come back as
+plain dicts, which is what the tools serialise and what a fake in the tests
+returns.
 """
 
 from __future__ import annotations
@@ -57,8 +62,12 @@ class Database:
         if not self.url:
             raise DatabaseUnavailable(
                 "STRIDE_CHAT_DATABASE_URL is not set; the chat has no database")
-        import psycopg2  # lazy
-        import psycopg2.extras
+        try:
+            import psycopg2  # lazy
+            import psycopg2.extras  # noqa: F401  (registers the extras namespace)
+        except ImportError as e:
+            raise DatabaseUnavailable(
+                f"psycopg2 is not installed; the chat has no database ({e})") from e
         try:
             conn = psycopg2.connect(
                 self.url,
@@ -84,11 +93,15 @@ class Database:
         error is re-raised as DatabaseUnavailable with the driver's own text,
         which the tool turns into an honest "the database did not answer".
         """
-        import psycopg2.extras  # lazy
         last_err: Optional[Exception] = None
         for attempt in (1, 2):
             try:
                 conn = self._connection()
+                # After _connection(). It raises DatabaseUnavailable for both a
+                # missing URL and a missing driver, so importing here keeps an
+                # unconfigured chat on the honest error instead of surfacing
+                # ModuleNotFoundError from an import that ran first.
+                import psycopg2.extras  # lazy
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute(sql, tuple(params))
                     return [dict(r) for r in cur.fetchall()]

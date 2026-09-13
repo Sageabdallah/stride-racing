@@ -1,7 +1,8 @@
 # STRIDE chatbot integration — plan
 
-Date: 2026-09-10; status updated 2026-09-11 (§13). Phase 0 is built and
-phase 1 is built and waiting on the operator's APPLY. Supersedes nothing; it
+Date: 2026-09-10; status updated 2026-09-13 (§13). Phase 0 is built and its
+live exit is dispatchable; phase 1 is applied and proved; phase 2 is the
+blocker and the operator owns it. Supersedes nothing; it
 sits between the audit at
 [`CHAT_LAMBDA_ARCHITECTURE_AUDIT.md`](CHAT_LAMBDA_ARCHITECTURE_AUDIT.md)
 (2026-09-03) and the product plan at [`../../PLAN.md`](../../PLAN.md)
@@ -533,11 +534,10 @@ Phase 2 cannot start without 1 and 2.
 
 ---
 
-## 13. Status, 2026-09-11
+## 13. Status, 2026-09-13
 
-Steps 1 and 2 of the execution order (plan §6, phases 0 and 1) are built on
-branch `claude/peaceful-edison-62mpc1`. Nothing has touched AWS, Neon or
-`stride-app`.
+Phases 0 and 1 (plan §6) are merged to `main` as PRs #179 and #180. Phase 1 is
+applied to Neon and proved. Nothing has touched AWS or `stride-app`.
 
 **Phase 0, built.** `server/python/chat/` holds the tool library: the eight
 typed tools of §4 plus the off-by-default SQL escape hatch, the read-only
@@ -550,27 +550,74 @@ with no credential, no network and none of `anthropic`, `boto3` or
 `pandas` imported at module scope. The offline eval suite reproduces the
 TypeScript runner's result: 10 pass (3 inverted controls), 36 live-only.
 
-**Phase 0 exit, not yet met.** The exit is the golden and injection suites
-green *live* against the CLI over a read-only Neon URL. That needs the role
-from phase 1 applied, `STRIDE_CHAT_DATABASE_URL`, an `ANTHROPIC_API_KEY`
-and the operator's `EVAL_LIVE_CONFIRM=yes`; it costs tokens and is the
-operator's call. Run: `python -m chat.eval_runner --live-cli`. The `web-*`
-and `inj-page-*` cases report `unsupported` until search is ported (§6,
-phase 5); they are not counted as passes.
+**Phase 1, closed.** `migrations/chat_readonly_role.sql` was applied on
+2026-09-13 at 05:35 UTC — `apply-migration` run #6, on `40b698b`. Runs #3, #4
+and #5 failed first: Neon's owner role is not a Postgres superuser, which
+PR #180 fixed. The same job then connected as `stride_chat_ro` and ran
+`server/python/chat/verify_readonly_role.py`, which reported:
 
-**Phase 1, built, waiting on APPLY.** `migrations/chat_readonly_role.sql`
-creates `stride_chat_ro` with `pg_read_all_data` and nothing else. The
-password never enters the repository: the file carries a token that
-`apply-migration.yml` replaces from a new repository secret,
-`STRIDE_CHAT_RO_PASSWORD`, at execution time. The same workflow run then
-connects as the new role and runs
-`server/python/chat/verify_readonly_role.py`, which fails the job unless
-every INSERT, UPDATE, DELETE and CREATE TABLE is refused for lack of
-privilege inside an explicitly READ WRITE transaction, so the role's
-read-only session default cannot pass for the grant. To apply: set the
-secret (20+ random characters), dispatch `apply-migration` with
-`migration=chat_readonly_role.sql` and `confirm=APPLY`, and read the proof
-step's output.
+```
+ok  connected as the chat role (current_user='stride_chat_ro')
+ok  no superuser/createrole/createdb/bypassrls/replication
+ok  could open a READ WRITE transaction (so the next refusals are privilege, not mode)
+ok  insert refused in a READ WRITE transaction (refused with SQLSTATE 42501)
+ok  create table refused (refused with SQLSTATE 42501)
+VERDICT: PASS: the role cannot write
+```
+
+The READ WRITE line is the one that matters. A role carrying full write grants
+would still refuse an INSERT under the migration's
+`default_transaction_read_only = on`, so a naive check passes for the exact
+failure it exists to catch; opening the transaction READ WRITE first means only
+SQLSTATE 42501 — missing privilege — can explain the refusal. The password is
+in the repository secret `STRIDE_CHAT_RO_PASSWORD` and has never been in the
+repository.
+
+**Phase 0 exit, dispatchable, not yet run.** The exit is the golden and
+injection suites green *live* against the CLI over the read-only role, and the
+role now exists. `.github/workflows/chat-eval.yml` runs it: dispatch
+`chat-eval` with `confirm=RUN`. It needs no new secret — `DATABASE_URL`,
+`STRIDE_CHAT_RO_PASSWORD`, `ANTHROPIC_API_KEY` and `PUNTINGFORM_API_KEY` are
+all set already — and it spends tokens on the estate's Anthropic key, which is
+the operator's call and is why the typed confirmation is there.
+
+The workflow proves four legs before spending anything, each stating what it
+actually proves rather than what would be convenient: the database returns rows
+to `stride_chat_ro` (not merely a connection), Punting Form returns meetings
+inside its window across three consecutive days, the S3 relay answers, and the
+model answers a live 16-token call via `preflight_model`. A dark leg would
+otherwise present as a wall of agent failures.
+
+The last two are shaped against a wrong version of themselves that a first pass
+had. The relay leg is reachability only: an absent tips file is deliberately not
+a gate, because every artifact-backed case asks about April 2026, those keys were
+never relayed — `infra/jobs/handler.py` uploads only the current day and the
+relay first shipped 2026-08-02 with no backfill — and the cases assert tool
+*names*, which `loop.py:164` records whether the tool hit or missed. Gating on a
+fresh tips file would block an exit that would otherwise pass on four quiet days.
+The model leg is a live call rather than a non-empty `ANTHROPIC_API_KEY`, because
+with a retired id every `_create` raises and the 12 injection cases whose
+expectations are purely negative pass *vacuously* against the string "model call
+failed" — enough that a partial run over injection ids exits 0 green with the
+model entirely dark, and enough that a full run reports 25 config failures as
+agent defects.
+
+It then asserts a floor on the run itself: the corpus must load all 46 cases,
+all 38 non-search cases must actually execute, and at least one must pass.
+`_report` returns 0 when nothing failed, and nothing fails when nothing ran —
+an all-`unsupported` run is the silent no-op that floor guards.
+
+Asked what it would still pass with, the honest answer: a chat whose tools are
+called and answer "the database did not answer" to every query, because the
+golden cases assert which tools the agent reached for, not that the call came
+back with rows. Phase 3A's `chat-proof` closes that by asserting on the tool
+results themselves. The 8 `web-*` and `inj-page-*` cases report `unsupported`
+until search is ported (§6, phase 5) and are not counted as passes.
+
+**Phase 2 is the blocker.** §11 questions 1 and 2 — audience, and written
+Punting Form commercial clearance — are unanswered, and §6 is explicit that no
+AWS resource is built before they are. Everything below phase 1 that could be
+built without an operator decision now has been.
 
 **Corrections to this plan found while building.** `lookup_horse` reads
 `blackbook_entries` and `blackbook_entry_runs` with the columns pinned in
@@ -580,3 +627,13 @@ for now). The eval harness's live mode reads tool names from a `trace`
 array that the response contract does not have; the response therefore
 carries an additive `toolCalls` field (§5) and the Python runner reads
 that. Phase 4A's Express proxy must forward it.
+
+`chat/db.py` imported `psycopg2.extras` at the top of `query()`, before
+`_connection()` could reach its own missing-URL check, so an unconfigured chat
+in an environment without the driver raised `ModuleNotFoundError` instead of
+the `DatabaseUnavailable` the module documents. It passed in CI only because
+`ci.yml` installs `psycopg2-binary`. The import now runs after `_connection()`,
+and a missing driver is itself reported as `DatabaseUnavailable` — the tools
+say the database did not answer rather than dying on an import. The offline
+suite now runs 78 green with psycopg2 absent, which is what §13 claimed of it
+all along.
