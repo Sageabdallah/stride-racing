@@ -26,22 +26,10 @@ import sys
 import uuid
 
 from . import PROMPT_VERSION, config
-from ._paths import REPO_ROOT
 from .contract import ChatRequestError, parse_request
 from .loop import ChatModelUnavailable, ChatTurnError
 from .runtime import build_context, build_engine
 from .tools import dispatch
-
-
-def _load_dotenv() -> None:
-    path = os.path.join(REPO_ROOT, ".env")
-    if not os.path.isfile(path):
-        return
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(path, override=False)
-    except ImportError:
-        pass
 
 
 def _print_turn(result: dict, as_json: bool) -> None:
@@ -78,7 +66,7 @@ def main(argv=None) -> int:
     parser.add_argument("--model", help="Model id for this run (default ANTHROPIC_CHAT_MODEL).")
     args = parser.parse_args(argv)
 
-    _load_dotenv()
+    config.load_dotenv_once()
     if args.date:
         os.environ["STRIDE_DATE"] = args.date
     ctx = build_context()

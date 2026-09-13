@@ -21,6 +21,26 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+def load_dotenv_once() -> None:
+    """Load .env from the repository root if python-dotenv is installed.
+
+    Every entry point that reads an environment variable this module names
+    (STRIDE_CHAT_DATABASE_URL, ANTHROPIC_CHAT_MODEL, ...) should call this
+    first, so setting a variable in .env has the same effect regardless of
+    which script reads it. override=False: a variable already set in the
+    real environment (a CI runner, a Lambda) always wins over the file.
+    """
+    from ._paths import REPO_ROOT
+    path = os.path.join(REPO_ROOT, ".env")
+    if not os.path.isfile(path):
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path, override=False)
+    except ImportError:
+        pass
+
+
 DEFAULT_CHAT_MODEL = "claude-opus-5"
 
 # Hard limits. These are contract, not tuning: the request cap is what
