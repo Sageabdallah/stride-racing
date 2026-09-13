@@ -1,0 +1,6 @@
+{
+  "case_id": "web-01",
+  "response": "Knight's Choice won the 2025 Melbourne Cup at big odds — the result and dividends are covered here: [race report](https://www.racing.com/news/melbourne-cup-result). STRIDE's database doesn't cover that race, so this is web-sourced.",
+  "citations": [{"url": "https://www.racing.com/news/melbourne-cup-result", "title": "Melbourne Cup result"}],
+  "tool_calls": ["web_search", "web_fetch"]
+}

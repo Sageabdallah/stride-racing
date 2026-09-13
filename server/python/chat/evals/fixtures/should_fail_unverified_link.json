@@ -1,0 +1,6 @@
+{
+  "case_id": "web-02",
+  "response": "The papers are bullish on the favourite — see [preview](https://www.racenet.com.au/preview) and this [insider mail](https://tips-goldmine.example/vip).",
+  "citations": [{"url": "https://www.racenet.com.au/preview", "title": "Feature race preview"}],
+  "tool_calls": ["web_search"]
+}

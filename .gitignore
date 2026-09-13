@@ -56,6 +56,9 @@ server/python/research/*.txt
 server/python/calibration_model.json
 server/python/calibration_report.json
 *.jsonl
+# The chat's acceptance corpora are committed on purpose: 46 small cases
+# vendored from stride-app, read by server/python/chat/eval_runner.py.
+!server/python/chat/evals/*.jsonl
 historical_data/
 barrier_trials/
 backtest_results/

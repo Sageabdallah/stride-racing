@@ -1,0 +1,30 @@
+{"id": "db-tips-01", "category": "db_tips", "question": "What did STRIDE tip at Randwick on 12 April 2026?", "expect": {"tools_any_of": ["get_stride_tips", "get_race_card"], "must_not_contain": ["I don't have access to a database"]}}
+{"id": "db-tips-02", "category": "db_tips", "question": "Show me our selections for Flemington on 2026-04-11 with their edges.", "expect": {"tools_any_of": ["get_stride_tips", "get_race_card"]}}
+{"id": "db-tips-03", "category": "db_tips", "question": "Which tip had the highest confidence on 6 April 2026?", "expect": {"tools_any_of": ["get_stride_tips"]}}
+{"id": "db-tips-04", "category": "db_tips", "question": "What was the consensus intelligence saying about our top pick on April 10 2026?", "expect": {"tools_any_of": ["get_stride_tips"]}}
+{"id": "db-tips-05", "category": "db_tips", "question": "Did we tip anything at Caulfield in the first week of April 2026?", "expect": {"tools_any_of": ["get_stride_tips", "query_results"]}}
+{"id": "horse-01", "category": "horse_lookup", "question": "Tell me everything you know about Pride Of Jenni.", "expect": {"tools_any_of": ["lookup_horse"]}}
+{"id": "horse-02", "category": "horse_lookup", "question": "What are the graph franking metrics for Mr Brightside and what do they mean?", "expect": {"tools_any_of": ["lookup_horse"], "must_contain_any": ["pagerank", "community", "form stability", "authority"]}}
+{"id": "horse-03", "category": "horse_lookup", "question": "Is Amelia's Jewel in our blackbook? Why?", "expect": {"tools_any_of": ["lookup_horse"]}}
+{"id": "horse-04", "category": "horse_lookup", "question": "How were Imperatriz's closing sectionals in her last three starts we have on record?", "expect": {"tools_any_of": ["lookup_horse"]}}
+{"id": "perf-01", "category": "performance", "question": "What's our strike rate by track this year?", "expect": {"tools_any_of": ["get_performance"]}}
+{"id": "perf-02", "category": "performance", "question": "Where do we make money — short-priced favourites or double-figure odds?", "expect": {"tools_any_of": ["get_performance"]}}
+{"id": "perf-03", "category": "performance", "question": "How does STRIDE go on heavy tracks versus good tracks?", "expect": {"tools_any_of": ["get_performance", "query_results"]}}
+{"id": "perf-04", "category": "performance", "question": "P&L by confidence tier please.", "expect": {"tools_any_of": ["get_performance"]}}
+{"id": "chain-01", "category": "chained", "question": "Compare the last-start sectionals of our top two picks from April 12 2026.", "expect": {"tools_any_of": ["get_stride_tips", "lookup_horse"]}}
+{"id": "chain-02", "category": "chained", "question": "How did our highest-edge tip at Randwick on 2026-04-06 actually go in the race?", "expect": {"tools_any_of": ["get_stride_tips", "query_results", "lookup_horse"]}}
+{"id": "chain-03", "category": "chained", "question": "Which horse beat our pick in race 7 at Flemington on April 11 2026, and what do we know about it?", "expect": {"tools_any_of": ["get_race_card", "query_results", "lookup_horse"]}}
+{"id": "chain-04", "category": "chained", "question": "Of the horses we blackbooked in March 2026, which have won since?", "expect": {"tools_any_of": ["lookup_horse", "query_results"]}}
+{"id": "chain-05", "category": "chained", "question": "Pick any race from 2026-04-12 and walk me through how our tip's graph metrics compared to the race favourite's.", "expect": {"tools_any_of": ["get_race_card", "lookup_horse"]}}
+{"id": "web-01", "category": "web", "question": "Who won the 2025 Melbourne Cup and at what price?", "modes": {"search": true}, "expect": {"must_cite_web": true}}
+{"id": "web-02", "category": "web", "question": "What are the papers saying about this Saturday's Group 1?", "modes": {"search": true}, "expect": {"must_cite_web": true}}
+{"id": "web-03", "category": "web", "question": "Any late scratchings at today's metro meetings?", "modes": {"search": true}, "expect": {"must_cite_web": true}}
+{"id": "web-04", "category": "web", "question": "Explain how the Melbourne Cup ballot exemption races work.", "modes": {"search": true}, "expect": {}}
+{"id": "web-05", "category": "web", "question": "What's the current early market for the next Cox Plate?", "modes": {"search": true}, "expect": {"must_cite_web": true}}
+{"id": "miss-01", "category": "honest_miss", "question": "What are STRIDE's tips for Ascot on 25 December 2027?", "expect": {"must_contain_any": ["couldn't find", "could not find", "don't have", "do not have", "no tips", "nothing recorded"]}}
+{"id": "miss-02", "category": "honest_miss", "question": "Show me our selections for Timbuktu racecourse last week.", "expect": {"must_contain_any": ["couldn't find", "could not find", "don't have", "do not have", "no record"]}}
+{"id": "miss-03", "category": "honest_miss", "question": "What did we tip on 1 January 2020?", "expect": {"must_contain_any": ["couldn't find", "could not find", "don't have", "do not have", "no record", "before"]}}
+{"id": "miss-04", "category": "honest_miss", "question": "Give me the sectionals for a horse called Zxqwv Lightning.", "expect": {"must_contain_any": ["couldn't find", "could not find", "don't have", "do not have", "no record", "no horse"]}}
+{"id": "follow-01", "category": "followup", "question": "What about the second pick from that same day?", "setup": ["What did STRIDE tip at Randwick on 12 April 2026?"], "expect": {}}
+{"id": "follow-02", "category": "followup", "question": "And how has that horse gone since?", "setup": ["What did STRIDE tip at Randwick on 12 April 2026?", "Tell me more about the top pick."], "expect": {"tools_any_of": ["lookup_horse", "query_results"]}}
+{"id": "follow-03", "category": "followup", "question": "Same question but for Caulfield instead.", "setup": ["What's our strike rate at Flemington this year?"], "expect": {}}

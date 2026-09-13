@@ -65,6 +65,10 @@ that same [`docs/decision-learning/`](docs/decision-learning/README.md) folder
 since 2026-09-03 and at the repository root before that — and must not be
 inferred from the archived V1 guide.
 
+The chatbot integration plan and its status are at
+[`docs/chat/CHAT_INTEGRATION_PLAN.md`](docs/chat/CHAT_INTEGRATION_PLAN.md); the
+chat's tool library is `server/python/chat/` (`python -m chat.cli --help`).
+
 The full pipeline reference lives under `.claude/skills/` — `stride-full` for the
 system reference and model baselines, `stride-health` for health gates and retrain
 baselines, `stride-consensus` for convergence tier logic and the panel.

@@ -1,0 +1,6 @@
+{
+  "case_id": "miss-01",
+  "response": "I couldn't find any STRIDE tips for Ascot on 25 December 2027 — I checked our tips store for that date and there's nothing recorded (our coverage also doesn't extend that far forward). The nearest thing I can offer: our most recent recorded Ascot analysis, or tips from the latest date we do have. Want either?",
+  "citations": [],
+  "tool_calls": ["get_stride_tips"]
+}
