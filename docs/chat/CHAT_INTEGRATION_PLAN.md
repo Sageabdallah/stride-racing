@@ -1,7 +1,8 @@
 # STRIDE chatbot integration — plan
 
-Date: 2026-09-10; status updated 2026-09-11 (§13). Phase 0 is built and
-phase 1 is built and waiting on the operator's APPLY. Supersedes nothing; it
+Date: 2026-09-10; status updated 2026-09-13 (§13). Phase 0 is built and its
+live exit is dispatchable; phase 1 is applied and proved; phase 2 is the
+blocker and the operator owns it. Supersedes nothing; it
 sits between the audit at
 [`CHAT_LAMBDA_ARCHITECTURE_AUDIT.md`](CHAT_LAMBDA_ARCHITECTURE_AUDIT.md)
 (2026-09-03) and the product plan at [`../../PLAN.md`](../../PLAN.md)
@@ -580,16 +581,31 @@ role now exists. `.github/workflows/chat-eval.yml` runs it: dispatch
 all set already — and it spends tokens on the estate's Anthropic key, which is
 the operator's call and is why the typed confirmation is there.
 
-The workflow proves three legs live before spending anything: the database
-returns rows to `stride_chat_ro` (not merely a connection), Punting Form
-returns meetings inside its window across three consecutive days, and the S3
-relay returns a tips artifact from the last four days. Each is a read of real
-content, because a dark leg would otherwise present as a wall of agent
-failures with the spend already gone. It then asserts a floor on the run
-itself: the corpus must load all 46 cases, all 38 non-search cases must
-actually execute, and at least one must pass. `_report` returns 0 when nothing
-failed, and nothing fails when nothing ran — an all-`unsupported` run is the
-silent no-op that floor guards.
+The workflow proves four legs before spending anything, each stating what it
+actually proves rather than what would be convenient: the database returns rows
+to `stride_chat_ro` (not merely a connection), Punting Form returns meetings
+inside its window across three consecutive days, the S3 relay answers, and the
+model answers a live 16-token call via `preflight_model`. A dark leg would
+otherwise present as a wall of agent failures.
+
+The last two are shaped against a wrong version of themselves that a first pass
+had. The relay leg is reachability only: an absent tips file is deliberately not
+a gate, because every artifact-backed case asks about April 2026, those keys were
+never relayed — `infra/jobs/handler.py` uploads only the current day and the
+relay first shipped 2026-08-02 with no backfill — and the cases assert tool
+*names*, which `loop.py:164` records whether the tool hit or missed. Gating on a
+fresh tips file would block an exit that would otherwise pass on four quiet days.
+The model leg is a live call rather than a non-empty `ANTHROPIC_API_KEY`, because
+with a retired id every `_create` raises and the 12 injection cases whose
+expectations are purely negative pass *vacuously* against the string "model call
+failed" — enough that a partial run over injection ids exits 0 green with the
+model entirely dark, and enough that a full run reports 25 config failures as
+agent defects.
+
+It then asserts a floor on the run itself: the corpus must load all 46 cases,
+all 38 non-search cases must actually execute, and at least one must pass.
+`_report` returns 0 when nothing failed, and nothing fails when nothing ran —
+an all-`unsupported` run is the silent no-op that floor guards.
 
 Asked what it would still pass with, the honest answer: a chat whose tools are
 called and answer "the database did not answer" to every query, because the
