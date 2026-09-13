@@ -198,6 +198,11 @@ def test_prompt_sentinels_and_stability():
     # (chat-eval run #1, miss-02: "has no tips on record" matched none of them).
     assert "\"I couldn't find ...\"" in SYSTEM_PROMPT and "\"STRIDE has no record of ...\"" in SYSTEM_PROMPT
     assert "look the horse up again" in SYSTEM_PROMPT and "The blackbook is its own record" in SYSTEM_PROMPT
+    # The off-domain refusal has fixed opening words (chat-eval run #4, inj-scope-01:
+    # a paraphrased refusal matched none of the phrasings the case accepts). The
+    # same words are what the loop says on a model-side refusal stop.
+    assert "begins with the exact words \"I can only help with Australian racing and STRIDE's records\"" in SYSTEM_PROMPT
+    assert "I can only help with Australian racing and STRIDE's records" in REFUSAL_TEXT
     a = system_blocks("2026-09-10", message="a")[0]["text"]
     b = system_blocks("2026-09-11", brain=True, message="b")[0]["text"]
     assert a == b, "the cached block never changes with the turn"
