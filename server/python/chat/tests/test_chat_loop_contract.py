@@ -194,6 +194,10 @@ def test_prompt_sentinels_and_stability():
               "Never invent a runner, price, result"):
         assert s in SYSTEM_PROMPT
     assert "only help with" in SYSTEM_PROMPT
+    # The honest-miss cases accept a fixed vocabulary; the prompt pins the words
+    # (chat-eval run #1, miss-02: "has no tips on record" matched none of them).
+    assert "\"I couldn't find ...\"" in SYSTEM_PROMPT and "\"STRIDE has no record of ...\"" in SYSTEM_PROMPT
+    assert "look the horse up again" in SYSTEM_PROMPT and "The blackbook is its own record" in SYSTEM_PROMPT
     a = system_blocks("2026-09-10", message="a")[0]["text"]
     b = system_blocks("2026-09-11", brain=True, message="b")[0]["text"]
     assert a == b, "the cached block never changes with the turn"

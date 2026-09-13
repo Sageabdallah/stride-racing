@@ -157,3 +157,89 @@ def test_dead_database_is_a_failure(ctx, db):
     db.handlers["FROM race_results_history"] = DatabaseUnavailable("query failed: timeout")
     out = query_results(ctx, "2026-04-12")
     assert out["ok"] is False
+
+
+# -- the blackbook window (chat-eval run #1, chain-04) --------------------------------
+
+ENTRIES = [
+    {"id": "bb1", "horse_name": "Pride Of Jenni", "source_track": "Flemington", "source_race_date": "2026-03-20",
+     "source_race_number": 8, "source_position": 3, "primary_reason": "luckless", "readiness_band": "ready",
+     "status": "waiting", "created_at": "2026-03-21 09:15:00"},
+    {"id": "bb2", "horse_name": "Mr Brightside (NZ)", "source_track": "Caulfield", "source_race_date": "2026-03-28",
+     "source_race_number": 6, "source_position": 4, "primary_reason": "sectional standout", "readiness_band": "close",
+     "status": "waiting", "created_at": "2026-03-29 08:00:00"},
+    {"id": "bb3", "horse_name": "No Runs Yet", "source_track": "Sale", "source_race_date": "2026-03-30",
+     "source_race_number": 2, "source_position": 5, "primary_reason": "held up", "status": "waiting",
+     "created_at": "2026-03-31 08:00:00"},
+]
+RUNS_SINCE = [
+    {"race_date": "2026-04-18", "track": "Royal Randwick", "race_number": 7, "race_class": "G1", "position": 1,
+     "margin_lengths": 0.5, "sp_odds": 3.2, "horse_name": "Pride Of Jenni", "name_key": "prideofjenni"},
+    {"race_date": "2026-04-12", "track": "Royal Randwick", "race_number": 5, "race_class": "BM88", "position": 2,
+     "margin_lengths": 0.75, "sp_odds": 4.2, "horse_name": "Pride Of Jenni", "name_key": "prideofjenni"},
+    {"race_date": "2026-03-20", "track": "Flemington", "race_number": 8, "race_class": "G2", "position": 3,
+     "margin_lengths": 1.25, "sp_odds": 6.0, "horse_name": "Pride Of Jenni (NZ)", "name_key": "prideofjenni"},
+    {"race_date": "2026-04-25", "track": "Caulfield", "race_number": 3, "race_class": "G3", "position": 6,
+     "margin_lengths": 4.0, "sp_odds": 11.0, "horse_name": "Mr Brightside", "name_key": "mrbrightside"},
+]
+
+
+def test_blackbook_window_lists_entries_with_runs_and_wins_since(ctx, db):
+    db.handlers["FROM blackbook_entries WHERE substr(created_at"] = ENTRIES
+    db.handlers["= ANY(%s) ORDER BY race_date DESC LIMIT 600"] = RUNS_SINCE
+    db.handlers["FROM blackbook_entry_runs"] = [{"blackbook_entry_id": "bb2", "track": "Caulfield",
+                                                "race_date": "2026-04-25", "race_number": 3,
+                                                "verdict": "WATCH", "status": "raceday"}]
+    out = lookup_horse(ctx, blackbooked_from="2026-03-01", blackbooked_to="2026-03-31")
+    assert out["ok"] and out["found"] and not out["truncated"]
+    d = out["data"]
+    assert (d["entries"], d["raced_since"], d["won_since"]) == (3, 2, 1)
+    jenni, bright, quiet = d["horses"]
+    assert jenni["entry"]["horse_name"] == "Pride Of Jenni" and jenni["entry"]["blackbooked_on"] == "2026-03-21"
+    assert jenni["entry"]["primary_reason"] == "luckless" and "id" not in jenni["entry"]
+    assert jenni["runs_since_count"] == 2 and jenni["wins_since"] == 1, "the source race itself is not a run since"
+    assert [r["race_date"] for r in jenni["runs_since"]] == ["2026-04-18", "2026-04-12"]
+    assert jenni["runs_since"][0]["position"] == 1 and "beaten_margin" not in jenni["runs_since"][0]
+    assert jenni["runs_since"][1]["beaten_margin"] == 0.75
+    assert bright["runs_since_count"] == 1 and bright["wins_since"] == 0
+    assert bright["app_tracked_runs"][0]["verdict"] == "WATCH"
+    assert quiet["runs_since_count"] == 0 and quiet["runs_since"] == [] and "app_tracked_runs" not in quiet
+    # One query for all the horses' runs, on the normalised key, no country suffix.
+    sql, params = next((s, p) for s, p in db.calls if "LIMIT 600" in s)
+    assert params == (["mrbrightside", "norunsyet", "prideofjenni"],)
+    window_sql, window_params = next((s, p) for s, p in db.calls if "substr(created_at" in s)
+    assert window_params == ("2026-03-01", "2026-03-31", 31)
+    assert any("wins_since counts wins" in n for n in out["notes"])
+
+
+def test_blackbook_window_with_nothing_in_it_says_when_the_blackbook_starts(ctx, db):
+    db.handlers["FROM blackbook_entries WHERE substr(created_at"] = []
+    db.handlers["MIN(created_at)"] = [{"first_date": "2026-08-03", "last_date": "2026-08-30", "n": 102}]
+    out = lookup_horse(ctx, blackbooked_from="2026-03-01", blackbooked_to="2026-03-31")
+    assert out["ok"] and not out["found"]
+    assert out["notes"][0] == "No horses were blackbooked between 2026-03-01 and 2026-03-31."
+    assert out["notes"][1] == "The blackbook holds 102 entries, made between 2026-08-03 and 2026-08-30."
+    assert not any("race_results_history" in s for s, _ in db.calls)
+
+
+def test_blackbook_window_when_the_tables_are_absent_is_a_miss(ctx, db):
+    db.handlers["FROM blackbook_entries"] = relation_missing_error("blackbook_entries")
+    out = lookup_horse(ctx, blackbooked_from="2026-03-01")
+    assert out["ok"] and not out["found"] and "created by the STRIDE app" in out["notes"][0]
+
+
+def test_lookup_horse_needs_a_name_or_a_window_not_both(ctx):
+    out = dispatch(ctx, "lookup_horse", {})
+    assert out["ok"] is False and "name is required, or blackbooked_from" in out["error"]
+    out = dispatch(ctx, "lookup_horse", {"name": "Pride Of Jenni", "blackbooked_from": "2026-03-01"})
+    assert out["ok"] is False and "not both" in out["error"]
+    out = dispatch(ctx, "lookup_horse", {"blackbooked_from": "2026-03-31", "blackbooked_to": "2026-03-01"})
+    assert out["ok"] is False and "before" in out["error"]
+    out = dispatch(ctx, "lookup_horse", {"blackbooked_from": "March 2026"})
+    assert out["ok"] is False and "YYYY-MM-DD" in out["error"]
+
+
+def test_blackbook_window_without_a_database_is_a_failure(ctx):
+    ctx.db = None
+    out = lookup_horse(ctx, blackbooked_from="2026-03-01", blackbooked_to="2026-03-31")
+    assert out["ok"] is False

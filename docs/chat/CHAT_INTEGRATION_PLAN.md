@@ -211,7 +211,7 @@ Built on the existing helpers so the model never writes a join.
 |---|---|---|
 | `get_stride_tips(date, track?, race?)` | `artifacts/racecards/tips_<date>.json`, falling back to `selections` | The artifact carries the full decision contract (`bet_pick`, `coverage_pick`, `bet_status`, `convergence_tier`, `full_field`); `selections` holds only `should_bet` rows |
 | `get_race_card(date, track, race?)` | `artifacts/server/python/racecards/racecard_<date>.json`, else `pf_client.meeting_detail` | Replaces the dead Racing API client |
-| `lookup_horse(name, n=10)` | `race_results_history`, `sectional_times`, `franking_scores` via `normalize_runner_key` | Blackbook handled separately — see §8.1 |
+| `lookup_horse(name?, n=10, blackbooked_from?, blackbooked_to?)` | `race_results_history`, `sectional_times`, `franking_scores` via `normalize_runner_key`; `blackbook_entries` | Blackbook handled separately — see §8.1. Without a name, the window lists the horses blackbooked in a period with their runs since (`chain-04`) |
 | `query_results(date, track?, race?)` | `race_results_history`, `prediction_audit`, `pf_client.results_for_meeting` for unsettled days | Margins only through `result_margins.beaten_margin` |
 | `get_performance(window, group_by)` | `selection_ledger`, `stride_tip_results`, `selection_results` | Net of commission, per the ledger |
 | `get_consensus(date, track, race)` | `artifacts/.../consensus_<date>.json`, `consensus_scores` | Read only. The consensus agent itself is untouchable under `CLAUDE.md` |
@@ -542,7 +542,7 @@ applied to Neon and proved. Nothing has touched AWS or `stride-app`.
 **Phase 0, built.** `server/python/chat/` holds the tool library: the eight
 typed tools of §4 plus the off-by-default SQL escape hatch, the read-only
 database layer, the artifact reader (S3 relay first, local checkout second),
-the Punting Form facade with the 31-day wall, the tool loop, prompt v3.0,
+the Punting Form facade with the 31-day wall, the tool loop, prompt v3.1,
 the request and response contract, session memory, a CLI, and the eval
 runner with the 46 cases and 10 fixtures vendored from `stride-app` at
 `810e7c1`. 78 offline tests run under `python -m pytest server/python`
@@ -573,7 +573,23 @@ SQLSTATE 42501 — missing privilege — can explain the refusal. The password i
 in the repository secret `STRIDE_CHAT_RO_PASSWORD` and has never been in the
 repository.
 
-**Phase 0 exit, dispatchable, not yet run.** The exit is the golden and
+**Phase 0 exit, run once, three defects fixed, green on the fix branch.** Run #1
+(2026-09-13, `34750824003`, on `0967164`) executed 38 of 46 cases live: 35
+passed, `chain-04`, `follow-02` and `miss-02` failed, 8 unsupported, and all
+13 executed injection cases passed. A three-case diagnostic run captured the
+responses: no fabrication in any of them. `chain-04` had no tool that listed
+the blackbook by period and fell back to a month of tips; `follow-02`'s setup
+turns missed because Randwick raced on Saturday 11 April, not Sunday the 12th,
+and the miss carried nothing to carry forward; `miss-02` said "has no tips on
+record", honest and outside the accepted vocabulary. The fixes are the
+`lookup_horse` window in §4, misses from `get_stride_tips` that name the tracks,
+leading selections and nearest dates that did exist, and prompt v3.1. The
+corpus is untouched (§12). Run #3 (`34752688083`, on the fix branch at
+`dd9b2d9`) executed 38 of 46 with 38 passed and `tool_errors: 0` on every turn;
+the exit proper is that run again on `main` after the merge.
+`docs/chat/HANDOVER.md` carries the evidence.
+
+The exit is the golden and
 injection suites green *live* against the CLI over the read-only role, and the
 role now exists. `.github/workflows/chat-eval.yml` runs it: dispatch
 `chat-eval` with `confirm=RUN`. It needs no new secret — `DATABASE_URL`,

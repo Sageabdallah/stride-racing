@@ -142,3 +142,101 @@ def test_no_card_and_date_outside_window_is_an_honest_miss(ctx):
 def test_track_is_required(ctx):
     out = dispatch(ctx, "get_race_card", {"date": "2026-04-12"})
     assert out["ok"] is False and "track" in out["error"]
+
+
+# -- the miss that says what did exist (chat-eval run #1, follow-02 / miss-02) --------------
+
+SUNDAY_ROWS = [
+    {"race_date": "2026-04-12", "track": "Gundagai", "race_number": 3, "horse_name": "Bush Flyer",
+     "edge": 3.1, "market_odds": 6.0, "confidence": "medium", "win_percentage": 22.0},
+    {"race_date": "2026-04-12", "track": "Hobart", "race_number": 5, "horse_name": "Apple Isle",
+     "edge": 6.4, "market_odds": 4.0, "confidence": "high", "win_percentage": 31.0},
+    {"race_date": "2026-04-12", "track": "Hobart", "race_number": 7, "horse_name": "Derwent Star",
+     "edge": None, "market_odds": 9.0, "confidence": "low"},
+]
+
+
+def test_wrong_track_miss_names_tracks_leading_picks_and_the_nearest_date_at_that_track(ctx, db):
+    ctx.artifacts.files.pop("racecards/tips_2026-04-12.json")  # the selections path, as for April in the relay
+    # Handlers are matched in insertion order by substring: the grouped
+    # neighbourhood query must be registered before the broader span query.
+    db.handlers["GROUP BY race_date, track"] = [
+        {"race_date": "2026-04-11", "track": "Royal Randwick", "n": 10},
+        {"race_date": "2026-04-11", "track": "Caulfield", "n": 10},
+        {"race_date": "2026-04-12", "track": "Hobart", "n": 2},
+        {"race_date": "2026-04-18", "track": "Royal Randwick", "n": 9},
+    ]
+    db.handlers["FROM selections WHERE race_date >= %s"] = SUNDAY_ROWS
+    out = get_stride_tips(ctx, "2026-04-12", track="Randwick")
+    assert out["ok"] and not out["found"]
+    assert out["notes"][0] == "Couldn't find any STRIDE tips at Randwick for 2026-04-12."
+    assert "STRIDE did not tip at Randwick for 2026-04-12; its tips were at Hobart (2); Gundagai (1)" in out["notes"][1]
+    assert "not Randwick selections" in out["notes"][1]
+    assert out["notes"][2] == "Nearest Randwick tips: 2026-04-11 (10); 2026-04-18 (9)."
+    d = out["data"]
+    assert [t["track"] for t in d["tracks_with_tips"]] == ["Hobart", "Gundagai"]
+    assert [p["horse_name"] for p in d["top_selections_elsewhere"]] == ["Apple Isle", "Bush Flyer", "Derwent Star"]
+    assert d["top_selections_elsewhere"][0]["track"] == "Hobart" and d["top_selections_elsewhere"][0]["edge"] == 6.4
+    assert [n["race_date"] for n in d["nearby_dates"]] == ["2026-04-11", "2026-04-18"]
+    assert d["nearby_dates"][0]["tracks"] == ["Royal Randwick"], "only the track asked for counts as nearby"
+    sql, params = next((s, p) for s, p in db.calls if "GROUP BY race_date, track" in s)
+    assert params == ("2026-04-02", "2026-04-22"), "ten days either side of the span"
+
+
+def test_empty_day_miss_names_the_nearest_dates_with_tips(ctx, db):
+    db.handlers["MIN(race_date)"] = [{"first_date": "2026-02-25", "last_date": "2026-09-11"}]
+    db.handlers["GROUP BY race_date, track"] = [
+        {"race_date": "2026-03-28", "track": "Caulfield", "n": 60},
+        {"race_date": "2026-03-28", "track": "Rosehill", "n": 33},
+        {"race_date": "2026-04-08", "track": "Eagle Farm", "n": 8},
+        {"race_date": "2026-04-10", "track": "Tamworth", "n": 8},
+        {"race_date": "2026-04-10", "track": "Darwin", "n": 4},
+    ]
+    out = get_stride_tips(ctx, "2026-04-06")
+    assert out["ok"] and not out["found"]
+    assert out["notes"][0] == "Couldn't find any STRIDE tips for 2026-04-06."
+    assert out["notes"][1] == ("Nearest dates with tips: 2026-03-28 (93 at Caulfield, Rosehill); "
+                               "2026-04-08 (8 at Eagle Farm); 2026-04-10 (12 at Darwin, Tamworth).")
+    assert [n["selections"] for n in out["data"]["nearby_dates"]] == [93, 8, 12]
+
+
+def test_wrong_race_miss_lists_the_races_that_had_tips(ctx, db):
+    ctx.artifacts.files.pop("racecards/tips_2026-04-12.json")
+    db.handlers["FROM selections WHERE race_date >= %s"] = SUNDAY_ROWS
+    out = get_stride_tips(ctx, "2026-04-12", track="Hobart", race=9)
+    assert not out["found"]
+    assert out["notes"][0] == "Couldn't find any STRIDE tips at Hobart in race 9 for 2026-04-12."
+    assert out["notes"][1] == "STRIDE's tips at Hobart for 2026-04-12 were in races 5, 7; nothing for race 9."
+    assert out["data"]["races_with_tips"] == [5, 7]
+    assert [p["horse_name"] for p in out["data"]["top_selections_elsewhere"]] == ["Apple Isle", "Derwent Star"]
+    assert not any("GROUP BY race_date, track" in s for s, _ in db.calls), "the track had tips; no neighbourhood needed"
+
+
+def test_honest_miss_says_after_records_end(ctx, db):
+    db.handlers["MIN(race_date)"] = [{"first_date": "2026-02-25", "last_date": "2026-09-11"}]
+    out = get_stride_tips(ctx, "2027-12-25", track="Ascot")
+    assert not out["found"]
+    assert out["notes"][1] == "2027-12-25 is after STRIDE's latest recorded tips (2026-09-11)."
+    assert not any("GROUP BY race_date, track" in s for s, _ in db.calls)
+
+
+def test_range_miss_at_a_fictional_track_still_names_the_week(ctx, db):
+    db.handlers["GROUP BY race_date, track"] = []
+    db.handlers["FROM selections WHERE race_date >= %s"] = [
+        {"race_date": "2026-09-11", "track": "Geelong", "race_number": 4, "horse_name": "Bay Bolt", "edge": 2.0}]
+    out = get_stride_tips(ctx, "2026-09-07", track="Timbuktu", date_to="2026-09-13")
+    assert out["notes"][0] == "Couldn't find any STRIDE tips at Timbuktu for 2026-09-07 to 2026-09-13."
+    assert "its tips were at Geelong (1 on 2026-09-11)" in out["notes"][1]
+    assert out["notes"][2] == "STRIDE has no tips at Timbuktu within ten days either side of 2026-09-07 to 2026-09-13."
+
+
+def test_artifact_miss_carries_the_leading_picks_elsewhere(ctx):
+    out = get_stride_tips(ctx, "2026-04-12", track="Timbuktu")
+    assert not out["found"]
+    picks = out["data"]["top_picks_elsewhere"]
+    assert [(p["horse"], p["track"]) for p in picks] == [("Amelia's Jewel", "Flemington"),
+                                                          ("Pride Of Jenni", "Royal Randwick"),
+                                                          ("Imperatriz", "Royal Randwick")]
+    assert picks[0]["edge_pct"] == 7.0 and picks[2]["edge_pct"] == -1.0, "a coverage pick stands in where there is no bet"
+    assert out["data"]["tracks_with_tips"] == ["Flemington", "Royal Randwick"]
+    assert "not picks at the track asked for" in out["notes"][1]

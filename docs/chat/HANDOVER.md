@@ -19,7 +19,7 @@ Last updated 2026-09-13.
 | Phase (plan §6) | State | Evidence |
 |---|---|---|
 | 0 — the tool library | **Built** | PR #179; 78 offline tests green, no credential, no network |
-| 0 — exit (live evals) | **Dispatchable, not run** | `chat-eval` workflow exists; needs `confirm=RUN` and spends tokens |
+| 0 — exit (live evals) | **Green on the fix branch; needs the merge and one run on `main`** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, on `dd9b2d9`, prompt v3.1, `tool_errors` 0 on all 41 turns) |
 | 1 — read-only role | **Closed, proved** | `apply-migration` run #6, 2026-09-13 05:35 UTC, on `40b698b` |
 | 2 — the fork decision | **BLOCKED — operator** | §11 questions 1 and 2, unanswered |
 | 3A — AWS | Not started, and must not be | §6: "Do not build AWS resources before this" |
@@ -42,10 +42,23 @@ failure it exists to catch. Forcing the transaction read-write first means only
 a missing privilege can explain the refusal. If you change that verifier, keep
 that property.
 
-**Nothing else on the chat path has been proved live.** The tool library has
-78 offline tests and an offline eval pass, which prove the code does what the
-recorded fixtures say. No chat turn has yet run against the real database, the
-real Punting Form key, or the real artifact relay.
+**The chat has now run live, once, and it did not fabricate.** `chat-eval`
+run #1 (2026-09-13 10:02 UTC, on `0967164`) executed all 38 non-search cases
+against the real database as `stride_chat_ro`, the real Punting Form key and
+the real relay: 35 passed, 3 failed, 8 unsupported, all 13 executed injection
+cases green. A diagnostic run (#2, three cases, responses captured) showed all
+three failures were honest answers that missed the assertion, not invented
+ones; the section below has each root cause. The fix is on
+`claude/zen-mayer-md6v9k`, the offline suite is 89 green, and run #3 on that
+branch (`34752688083`) executed all 38 cases green with `tool_errors: 0` on
+every turn, so every new query ran against the real schema as `stride_chat_ro`.
+
+**What run #1 taught about the data.** The corpus's April dates do not all
+line up with the calendar: 12 April 2026 is a Sunday and Randwick raced on the
+11th; 6 April is Easter Monday and STRIDE has no selections between 28 March
+and 8 April. The blackbook holds 102 entries, all made in August 2026 from
+July and August form, so "blackbooked in March 2026" is honestly empty. None
+of that is a corpus defect; it is what an honest agent has to say plainly.
 
 ## The blocker, and it is not a technical one
 
@@ -61,6 +74,36 @@ Until both are answered, §6 forbids building AWS resources, and phase 3A is the
 next thing there is to build. Everything below that line which could be built
 without an operator decision now has been. A session that arrives here and
 wants to make progress should ask the questions, not pick a fork and start.
+
+## Run #1's three failures, and where each actually was
+
+Read the turn logs before believing a headline. Run #1's report said
+`chain-04` and `follow-02` called no expected tool; mapping the 41 `chat_turn`
+lines to cases showed they failed in different places.
+
+- **`chain-04` — a tool-surface gap, not a prompt lapse.** The model did call
+  a tool: `get_stride_tips` over 1–31 March, because nothing listed the
+  blackbook by period and that was the nearest thing. It got a 24,000-character
+  truncated dump of selections, said so, and asked the user for horse names.
+  `lookup_horse` now takes a `blackbooked_from`/`blackbooked_to` window and
+  returns each entry with the horse's runs and wins since its source race.
+- **`follow-02` — an uninformative miss upstream, not session memory.** Both
+  setup turns missed: no Randwick selections on Sunday 12 April, a bare
+  "couldn't find", and so no horse ever entered the conversation for "how has
+  that horse gone since?" to look up. The selections-table miss now names the
+  tracks that did carry tips, the leading selections elsewhere and the nearest
+  dates at the track asked for (Royal Randwick, 11 April, 10 selections), and
+  the prompt says a "since" question is a fresh lookup.
+- **`miss-02` — wording, not fabrication.** "STRIDE has no tips on record for
+  Timbuktu" is honest and contains none of `couldn't find`, `could not find`,
+  `don't have`, `do not have`, `no record`. Prompt v3.1 pins the words of a
+  miss. The case is not mis-specified: a fixed vocabulary for a miss is a
+  product property, and the other three miss cases already met it.
+
+Left for its own change: a range query over a busy month returns the first
+400 selection rows and reports only the dates those rows fall on, so "March"
+came back as "6 and 7 March". The chain-04 response surfaced it; the fix is
+per-date capping with a real count, not a bigger limit.
 
 ## Running the phase 0 exit
 
@@ -130,6 +173,21 @@ evidence that answers are grounded.
   application code, not about the folder name.
 
 ## Changelog
+
+**2026-09-13, later.** `chat-eval` run #1 executed live: 35/38, 3 failed, no
+fabrication. Diagnosed each (section above) and fixed them in the tool layer
+and prompt v3.1, corpus untouched: `lookup_horse` blackbook window,
+`get_stride_tips` misses that say what did exist, and the miss vocabulary
+pinned. Offline suite 78 → 89. The full 46-case re-run on the branch, run #3
+(`34752688083`, on `dd9b2d9`): 38 executed, 38 passed, 8 unsupported, every
+turn on prompt v3.1 with `tool_errors: 0`. `chain-04` now calls `lookup_horse`
+with the window (an honest miss: no March entries); `follow-02`'s second setup
+turn fetches the nearest tips and looks the top pick up, and the question turn
+calls `lookup_horse`; `miss-02` says "couldn't find". One thing to watch:
+`follow-01`'s question turn now answers from the previous turn's text with no
+tool call, where run #1 re-queried; it has no expectation and passes either
+way, but a `chat-proof` that asserts on tool results would see it. The exit
+proper is the same run on `main` after the merge.
 
 **2026-09-13.** Phase 1 applied and proved (run #6). Added
 `.github/workflows/chat-eval.yml` so the phase 0 exit is a dispatch rather than
