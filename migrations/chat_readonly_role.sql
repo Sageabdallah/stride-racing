@@ -32,14 +32,31 @@ BEGIN
 END
 $$;
 
+-- Only LOGIN, CONNECTION LIMIT and PASSWORD are stated explicitly. The
+-- first apply attempt (2026-09-13) also stated NOSUPERUSER, NOCREATEDB,
+-- NOCREATEROLE, NOREPLICATION, NOBYPASSRLS and INHERIT, and Neon rejected it:
+--
+--   psycopg2.errors.InsufficientPrivilege: permission denied to alter role
+--   DETAIL: Only roles with the SUPERUSER attribute may change the
+--   SUPERUSER attribute.
+--
+-- Neon's connection-string "owner" role is privileged but is NOT a true
+-- PostgreSQL superuser, and PostgreSQL refuses to let a non-superuser touch
+-- the SUPERUSER attribute of ANY role in an ALTER ROLE statement — even to
+-- restate NOSUPERUSER, which is already the value a bare CREATE ROLE gives
+-- it. The same restriction applies to REPLICATION and BYPASSRLS (a role can
+-- only grant or restate those attributes on another role if it already
+-- holds that attribute itself), which Neon's owner role does not.
+--
+-- This changes nothing about the resulting privilege: CREATE ROLE with no
+-- options above already sets SUPERUSER, CREATEDB, CREATEROLE, REPLICATION
+-- and BYPASSRLS to off and INHERIT to on, so dropping these from the ALTER
+-- is a syntax fix for Neon's role model, not a security change. The
+-- verifier's own pg_roles flag check (server/python/chat/verify_readonly_role.py)
+-- still asserts all five stayed off, so a future Neon change that made this
+-- role inherit any of them would fail loudly there.
 ALTER ROLE stride_chat_ro WITH
     LOGIN
-    NOSUPERUSER
-    NOCREATEDB
-    NOCREATEROLE
-    NOREPLICATION
-    NOBYPASSRLS
-    INHERIT
     CONNECTION LIMIT 10
     PASSWORD __STRIDE_CHAT_RO_PASSWORD__;
 
