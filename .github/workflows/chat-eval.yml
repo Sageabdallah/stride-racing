@@ -1,0 +1,279 @@
+# Runs the chat's 46 eval cases live, through the Python CLI, as the read-only
+# database role. This is the phase 0 exit in docs/chat/CHAT_INTEGRATION_PLAN.md
+# §6, and the only workflow in the repository that spends Anthropic tokens, so
+# it will not run without a typed confirmation.
+#
+# Three legs are proved live BEFORE a single token is spent — the database as
+# the chat role, Punting Form, and the S3 artifact relay — each by reading real
+# content rather than by a call that merely returned. A dark leg otherwise
+# presents as a wall of agent failures, and the spend is already gone by the
+# time anyone reads them.
+#
+# What this job would still pass with, said plainly, because a check nobody has
+# asked that of is a check nobody has tested: a chat whose tools are called and
+# answer "the database did not answer" to every query. The golden cases assert
+# which tools the agent reached for, not that the call came back with rows.
+# Closing that gap is phase 3A's chat-proof, which asserts on the tool results
+# themselves. This job proves the three legs are live and that the agent reaches
+# for the right tool; it does not prove every sentence was grounded in a row.
+#
+# Secrets. DATABASE_URL is read for its HOST ONLY — the owner credential never
+# opens a connection here; the chat role's URL is assembled in process from
+# STRIDE_CHAT_RO_PASSWORD and never printed, as apply-migration.yml does it.
+# ANTHROPIC_API_KEY is the estate's key, shared with the 05:30 consensus job:
+# plan §6 phase 3A gives the chat its own key from a separate Console workspace
+# with its own spend limit, and until that exists a runaway eval run and a
+# runaway consensus run draw down the same balance.
+
+name: chat-eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type RUN to confirm this spends Anthropic tokens"
+        required: true
+        default: ""
+      only:
+        description: "Optional comma-separated case ids. Empty runs all 46."
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: chat-eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet anthropic boto3 psycopg2-binary requests
+
+      - name: Check confirmation
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${CONFIRM}" != "RUN" ]; then
+            echo "::error::Confirmation not given. Re-run with confirm=RUN to spend Anthropic tokens."
+            exit 1
+          fi
+
+      # Read-only for the purposes of this job: the artifact relay under
+      # s3://stride-evidence-<account>/artifacts/. The same role the other
+      # read-only verification workflows assume (evidence-audit,
+      # panel-staged-check, post-deploy-verify).
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      # One step, deliberately. The chat role's URL is built in process and
+      # never written to GITHUB_ENV, where it would outlive the step that
+      # needs it.
+      - name: Prove the legs, then run the evals
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STRIDE_CHAT_RO_PASSWORD: ${{ secrets.STRIDE_CHAT_RO_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_CHAT_MODEL: ${{ secrets.ANTHROPIC_CHAT_MODEL }}
+          PUNTINGFORM_API_KEY: ${{ secrets.PUNTINGFORM_API_KEY }}
+          STRIDE_EVIDENCE_BUCKET: stride-evidence-${{ vars.AWS_ACCOUNT_ID }}
+          EVAL_LIVE_CONFIRM: "yes"
+          ONLY: ${{ github.event.inputs.only }}
+        run: |
+          set -euo pipefail
+          cd server/python
+          python - <<'PY'
+          import os, sys
+          from datetime import date, timedelta
+          from urllib.parse import quote, urlsplit, urlunsplit
+
+          def fail(msg):
+              print(f"::error::{msg}")
+              sys.exit(1)
+
+          # -- the chat role's URL, assembled here and printed nowhere --------
+          owner = os.environ.get("DATABASE_URL", "")
+          password = os.environ.get("STRIDE_CHAT_RO_PASSWORD", "")
+          if not owner:
+              fail("repository secret DATABASE_URL is not set.")
+          if len(password) < 20:
+              fail("repository secret STRIDE_CHAT_RO_PASSWORD is unset or under 20 "
+                   "characters. Apply migrations/chat_readonly_role.sql first.")
+          if not os.environ.get("ANTHROPIC_API_KEY"):
+              fail("repository secret ANTHROPIC_API_KEY is not set; the live evals "
+                   "cannot run without it.")
+          u = urlsplit(owner)
+          port = f":{u.port}" if u.port else ""
+          netloc = f"stride_chat_ro:{quote(password, safe='')}@{u.hostname or ''}{port}"
+          os.environ["STRIDE_CHAT_DATABASE_URL"] = urlunsplit(
+              (u.scheme, netloc, u.path, u.query, u.fragment))
+
+          from chat import config
+          from chat.artifacts import (
+              ArtifactMissing, ArtifactStore, ArtifactUnavailable, tips_path)
+          from chat.db import Database, DatabaseUnavailable
+          from chat.pf import PuntingForm, PuntingFormUnavailable
+
+          today = config.today_sydney()
+          print(f"today (Sydney): {today}")
+
+          # -- leg 1: the database, as the chat role -------------------------
+          # Rows, not a connection. A role that connects and reads nothing is
+          # the failure this is here to catch.
+          print("\n-- leg 1: database --")
+          try:
+              db = Database.from_env()
+              who = db.query("SELECT current_user AS u")[0]["u"]
+              rows = db.query("SELECT COUNT(*) AS n FROM race_results_history")[0]["n"]
+          except DatabaseUnavailable as e:
+              fail(f"the database leg is dark: {e}")
+          if who != "stride_chat_ro":
+              fail(f"connected as {who!r}, not stride_chat_ro. Refusing to run the "
+                   "evals against a role that is not the chat's.")
+          if not rows:
+              fail("race_results_history returned 0 rows to the chat role. The role "
+                   "connects but reads nothing, so every grounded answer would be "
+                   "empty and the cases would measure the prompt alone.")
+          print(f"  ok  connected as {who}, race_results_history has {rows:,} rows")
+
+          # -- leg 2: Punting Form -------------------------------------------
+          # A non-empty payload inside the ~31-day window. Australian cards run
+          # daily, so three consecutive empty days is a dark leg, not a quiet one.
+          print("\n-- leg 2: Punting Form --")
+          if not os.environ.get("PUNTINGFORM_API_KEY"):
+              fail("PUNTINGFORM_API_KEY is not set; the Punting Form leg would be "
+                   "dark for every case that needs a race card.")
+          pf = PuntingForm(today=today)
+          probed, meetings = [], 0
+          for back in (0, 1, 2):
+              d = (date.fromisoformat(today) - timedelta(days=back)).isoformat()
+              try:
+                  found = pf.meetings_for_date(d)
+              except PuntingFormUnavailable as e:
+                  fail(f"the Punting Form leg is dark: {e}")
+              except Exception as e:
+                  probed.append(f"{d}: {type(e).__name__}")
+                  continue
+              probed.append(f"{d}: {len(found)} meetings")
+              meetings = max(meetings, len(found))
+              if found:
+                  break
+          print("  probed " + "; ".join(probed))
+          if not meetings:
+              fail("Punting Form answered for three consecutive days and returned no "
+                   "meetings at all. The key authenticates but the plan serves "
+                   "nothing, which is not a quiet day in Australian racing.")
+          print(f"  ok  {meetings} meetings returned")
+
+          # -- leg 3: the artifact relay -------------------------------------
+          # Bytes out of S3. The tips and racecard directories are gitignored,
+          # so a CI checkout has none of them and the relay is the only source.
+          print("\n-- leg 3: artifact relay --")
+          store = ArtifactStore.from_env()
+          if not store.bucket:
+              fail("STRIDE_EVIDENCE_BUCKET is not set. Every artifact read would "
+                   "fall back to a checkout that gitignores racecards/ and "
+                   "intelligence/*.json, so get_stride_tips and get_race_card "
+                   "would miss on every case.")
+          # `races` is the key chat/tools/tips.py:93 reads. A tips file that
+          # parses but carries no races is the "presence standing in for
+          # usefulness" substitution CLAUDE.md names, so the probe asserts the
+          # field the tool needs rather than that bytes came back.
+          hit, seen = None, []
+          for back in range(0, 4):
+              d = (date.fromisoformat(today) - timedelta(days=back)).isoformat()
+              try:
+                  payload, source = store.get_json(tips_path(d))
+              except ArtifactMissing:
+                  seen.append(f"{d}: missing")
+                  continue
+              except ArtifactUnavailable as e:
+                  fail(f"the artifact relay is dark: {e}")
+              races = payload.get("races") if isinstance(payload, dict) else None
+              seen.append(f"{d}: {len(races) if races else 0} races")
+              if races:
+                  hit = (source, len(races))
+                  break
+          print("  probed " + "; ".join(seen))
+          if hit is None:
+              fail("no tips artifact carrying races in the last four days at "
+                   f"s3://{store.bucket}/artifacts/racecards/tips_<date>.json. The "
+                   "relay is reachable but has nothing the tips tool can read, so "
+                   "the artifact-backed cases would all miss.")
+          print(f"  ok  read {hit[0]} ({hit[1]} races)")
+
+          # -- the evals ------------------------------------------------------
+          print("\n-- evals --")
+          from chat import eval_runner as er
+
+          cases, errors = [], []
+          for f in ("golden.jsonl", "injection.jsonl"):
+              cs, es = er.load_corpus(f, er.EVALS_DIR)
+              cases.extend(cs)
+              errors.extend(es)
+          if errors:
+              for e in errors:
+                  print(e, file=sys.stderr)
+              fail("the eval corpus does not parse; nothing was run.")
+
+          only = {x.strip() for x in os.environ.get("ONLY", "").split(",") if x.strip()}
+          full_corpus = len(cases)
+          if only:
+              missing = only - {c["id"] for c in cases}
+              if missing:
+                  fail(f"unknown case ids: {', '.join(sorted(missing))}")
+              cases = [c for c in cases if c["id"] in only]
+              print(f"::warning::COVERAGE REDUCED — running {len(cases)} of "
+                    f"{full_corpus} cases by the `only` input. This run is not the "
+                    "phase 0 exit.")
+          elif full_corpus != 46:
+              fail(f"expected 46 cases (30 golden + 16 injection), loaded {full_corpus}. "
+                   "The corpus is the acceptance test; a run against fewer cases is "
+                   "not the one the plan asks for.")
+
+          print(f"model: {config.chat_model()}")
+          results = er.run_live_cli(cases)
+          rc = er._report(results)
+
+          # -- the floor ------------------------------------------------------
+          # _report returns 0 when nothing failed, and nothing fails when nothing
+          # ran. An all-unsupported run is the silent no-op this guards.
+          outcomes = {}
+          for r in results:
+              outcomes[r.outcome] = outcomes.get(r.outcome, 0) + 1
+          executed = outcomes.get("pass", 0) + outcomes.get("fail", 0)
+          expected = sum(1 for c in cases if not er._unsupported(c))
+
+          print(f"\nexecuted {executed} of {len(cases)} selected "
+                f"({outcomes.get('unsupported', 0)} unsupported, awaiting the search "
+                "port in plan §6 phase 5)")
+          if executed == 0:
+              fail("no case actually ran. Zero failures out of zero executions is "
+                   "not a pass.")
+          if executed < expected:
+              fail(f"{expected} cases were runnable but only {executed} ran.")
+          if not outcomes.get("pass", 0):
+              fail("every case that ran failed.")
+          if rc:
+              fail(f"{outcomes.get('fail', 0)} case(s) failed. Plan §12: a case that "
+                   "fails is a defect in the agent, not in the case — do not edit the "
+                   "corpus to make this green.")
+
+          print(f"\nPASS: {outcomes.get('pass', 0)} of {executed} executed cases green.")
+          if only:
+              print("Partial run — not the phase 0 exit.")
+          PY
