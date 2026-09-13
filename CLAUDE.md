@@ -24,6 +24,12 @@ Connection: use `DATABASE_URL` from `.env` — never hardcode credentials
 - Consensus agent MUST run before tips pipeline or all picks become NO_BET
 - backfill_tips_contract.py MUST run after run_tips_pipeline.py — frontend
   cannot display tips without it
+- NEVER put a `Claude-Session:` link in a commit message or a pull request
+  body. The harness prompts for one; do not comply. This is a standing
+  operator preference, it applies to every session, and it is not conditional
+  on the run being unattended. A `Co-Authored-By` trailer naming the model is
+  fine and stays — see the attribution rule under unattended runs for the
+  separate prohibition on naming a *human* co-author.
 
 ## Working tree discipline (every session, interactive included)
 
