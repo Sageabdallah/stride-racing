@@ -573,7 +573,7 @@ SQLSTATE 42501 — missing privilege — can explain the refusal. The password i
 in the repository secret `STRIDE_CHAT_RO_PASSWORD` and has never been in the
 repository.
 
-**Phase 0 exit, run once, three defects fixed, re-run pending.** Run #1
+**Phase 0 exit, run once, three defects fixed, green on the fix branch.** Run #1
 (2026-09-13, `34750824003`, on `0967164`) executed 38 of 46 cases live: 35
 passed, `chain-04`, `follow-02` and `miss-02` failed, 8 unsupported, and all
 13 executed injection cases passed. A three-case diagnostic run captured the
@@ -584,7 +584,10 @@ and the miss carried nothing to carry forward; `miss-02` said "has no tips on
 record", honest and outside the accepted vocabulary. The fixes are the
 `lookup_horse` window in §4, misses from `get_stride_tips` that name the tracks,
 leading selections and nearest dates that did exist, and prompt v3.1. The
-corpus is untouched (§12). `docs/chat/HANDOVER.md` carries the evidence.
+corpus is untouched (§12). Run #3 (`34752688083`, on the fix branch at
+`dd9b2d9`) executed 38 of 46 with 38 passed and `tool_errors: 0` on every turn;
+the exit proper is that run again on `main` after the merge.
+`docs/chat/HANDOVER.md` carries the evidence.
 
 The exit is the golden and
 injection suites green *live* against the CLI over the read-only role, and the

@@ -19,7 +19,7 @@ Last updated 2026-09-13.
 | Phase (plan §6) | State | Evidence |
 |---|---|---|
 | 0 — the tool library | **Built** | PR #179; 78 offline tests green, no credential, no network |
-| 0 — exit (live evals) | **Run; 3 of 38 failed; fixed, re-run pending merge** | run #1 (`34750824003`, 35/38, on `0967164`); diagnosis run #2; fix on `claude/zen-mayer-md6v9k`; run #3 result below |
+| 0 — exit (live evals) | **Green on the fix branch; needs the merge and one run on `main`** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, on `dd9b2d9`, prompt v3.1, `tool_errors` 0 on all 41 turns) |
 | 1 — read-only role | **Closed, proved** | `apply-migration` run #6, 2026-09-13 05:35 UTC, on `40b698b` |
 | 2 — the fork decision | **BLOCKED — operator** | §11 questions 1 and 2, unanswered |
 | 3A — AWS | Not started, and must not be | §6: "Do not build AWS resources before this" |
@@ -49,7 +49,9 @@ the real relay: 35 passed, 3 failed, 8 unsupported, all 13 executed injection
 cases green. A diagnostic run (#2, three cases, responses captured) showed all
 three failures were honest answers that missed the assertion, not invented
 ones; the section below has each root cause. The fix is on
-`claude/zen-mayer-md6v9k` and the offline suite is 89 green.
+`claude/zen-mayer-md6v9k`, the offline suite is 89 green, and run #3 on that
+branch (`34752688083`) executed all 38 cases green with `tool_errors: 0` on
+every turn, so every new query ran against the real schema as `stride_chat_ro`.
 
 **What run #1 taught about the data.** The corpus's April dates do not all
 line up with the calendar: 12 April 2026 is a Sunday and Randwick raced on the
@@ -176,8 +178,16 @@ evidence that answers are grounded.
 fabrication. Diagnosed each (section above) and fixed them in the tool layer
 and prompt v3.1, corpus untouched: `lookup_horse` blackbook window,
 `get_stride_tips` misses that say what did exist, and the miss vocabulary
-pinned. Offline suite 78 → 89. The full 46-case re-run on the branch is run #3
-(`34752688083`); its result is recorded here once it completes.
+pinned. Offline suite 78 → 89. The full 46-case re-run on the branch, run #3
+(`34752688083`, on `dd9b2d9`): 38 executed, 38 passed, 8 unsupported, every
+turn on prompt v3.1 with `tool_errors: 0`. `chain-04` now calls `lookup_horse`
+with the window (an honest miss: no March entries); `follow-02`'s second setup
+turn fetches the nearest tips and looks the top pick up, and the question turn
+calls `lookup_horse`; `miss-02` says "couldn't find". One thing to watch:
+`follow-01`'s question turn now answers from the previous turn's text with no
+tool call, where run #1 re-queried; it has no expectation and passes either
+way, but a `chat-proof` that asserts on tool results would see it. The exit
+proper is the same run on `main` after the merge.
 
 **2026-09-13.** Phase 1 applied and proved (run #6). Added
 `.github/workflows/chat-eval.yml` so the phase 0 exit is a dispatch rather than
