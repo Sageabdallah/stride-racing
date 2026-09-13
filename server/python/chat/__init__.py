@@ -15,7 +15,7 @@ Layout:
   db.py          read-only Neon access with the timeouts run_tips_pipeline uses
   pf.py          Punting Form through pf_client, with a TTL cache and the wall
   tools/         the typed tools, named as evals/chat/golden.jsonl names them
-  prompt.py      system prompt v3.1 (v3.0 ported from stridePrompts.ts v2.2)
+  prompt.py      system prompt v3.2 (v3.0 ported from stridePrompts.ts v2.2)
   loop.py        the Anthropic tool loop and the ChatCompletionResponse mapping
   contract.py    request validation and the response shape the React client reads
   session.py     conversation memory (12 messages, 30 minutes) behind a protocol
@@ -27,6 +27,6 @@ from __future__ import annotations
 
 from . import _paths  # noqa: F401  (puts server/python on sys.path for the flat modules)
 
-PROMPT_VERSION = "v3.1"
+PROMPT_VERSION = "v3.2"
 
 __all__ = ["PROMPT_VERSION"]
