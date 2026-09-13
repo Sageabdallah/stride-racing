@@ -157,9 +157,11 @@ new set, and the chat counted both, which is how one Saturday showed 380
 now reads active rows only, answers a span with a grouped calendar of every
 date and track with selections (complete whatever the volume) plus the
 leading selections per track per date under a payload cap, and says which
-dates' rows are not shown rather than dropping them. The evidence that the
-new SQL runs against the real schema is a `chat-eval` dispatch on its branch,
-recorded here when it has run.
+dates' rows are not shown rather than dropping them. Run #7 (`34756390730`,
+on the fix branch at `26808ce`, 12:11 UTC) is the evidence that the new SQL
+runs against the real schema: 38 of 38, `tool_errors: 0` on all 41 turns, and
+16 turns called `get_stride_tips`, every one of which ran the grouped
+calendar and the active-rows query, with 0 errors. The fix is PR #189.
 
 ## Running the phase 0 exit
 
@@ -229,6 +231,10 @@ evidence that answers are grounded.
   application code, not about the folder name.
 
 ## Changelog
+
+**2026-09-13, run #7.** The tips range defect fixed (PR #189): active rows
+only, a complete calendar per span, per-track-per-date caps. Run #7 on the
+branch: 38 of 38, `tool_errors: 0`, 16 `get_stride_tips` turns clean.
 
 **2026-09-13, runs #5 and #6.** Prompt v3.2 (PR #187, merged) pins the
 off-domain refusal's opening words. Run #5 on the branch: 38 of 38. Run #6 on `main`

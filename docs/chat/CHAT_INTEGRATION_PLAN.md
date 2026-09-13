@@ -595,7 +595,12 @@ the refusal's opening words; run #5 (`34754428003`, on the v3.2 branch at
 Run #6 (`34754931990`, on `main` at `d8cf80c`, 2026-09-13 11:37 UTC) executed 38
 with 38 passed, 8 unsupported and `tool_errors: 0` on every turn, all on v3.2:
 the phase 0 exit as §6 defines it. Phase 2 (§11) is now the only thing in the
-way.
+way. A fourth defect the same run surfaced, `get_stride_tips` answering a busy
+month from its first 400 rows and counting superseded (`is_active = false`)
+runs, is fixed in PR #189: active rows only, a grouped calendar of every date
+and track in the span, and per-track-per-date caps under the payload backstop.
+Run #7 (`34756390730`, on that branch) executed 38 with 38 passed and
+`tool_errors: 0`.
 `docs/chat/HANDOVER.md` carries the evidence.
 
 The exit is the golden and
