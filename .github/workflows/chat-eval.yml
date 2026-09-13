@@ -3,19 +3,25 @@
 # §6, and the only workflow in the repository that spends Anthropic tokens, so
 # it will not run without a typed confirmation.
 #
-# Three legs are proved live BEFORE a single token is spent — the database as
-# the chat role, Punting Form, and the S3 artifact relay — each by reading real
-# content rather than by a call that merely returned. A dark leg otherwise
-# presents as a wall of agent failures, and the spend is already gone by the
-# time anyone reads them.
+# Four legs are proved BEFORE a single token is spent, and each says exactly
+# what it proves, because a leg that is checked more weakly than the comment
+# claims is worse than one that is not checked at all:
+#
+#   1. database   — rows come back to stride_chat_ro, not just a connection.
+#   2. PuntingForm— meetings come back inside the window, not just a 200.
+#   3. relay      — S3 ANSWERS. Reachability only; see the leg for why an
+#                   absent tips file is deliberately not a gate.
+#   4. model      — a real 16-token call. A non-empty ANTHROPIC_API_KEY proves
+#                   a string is set; it does not prove the key is live or that
+#                   the model id still exists.
 #
 # What this job would still pass with, said plainly, because a check nobody has
 # asked that of is a check nobody has tested: a chat whose tools are called and
 # answer "the database did not answer" to every query. The golden cases assert
 # which tools the agent reached for, not that the call came back with rows.
 # Closing that gap is phase 3A's chat-proof, which asserts on the tool results
-# themselves. This job proves the three legs are live and that the agent reaches
-# for the right tool; it does not prove every sentence was grounded in a row.
+# themselves. This job proves the legs are live and that the agent reaches for
+# the right tool; it does not prove every sentence was grounded in a row.
 #
 # Secrets. DATABASE_URL is read for its HOST ONLY — the owner credential never
 # opens a connection here; the chat role's URL is assembled in process from
@@ -117,6 +123,7 @@ jobs:
               fail("repository secret ANTHROPIC_API_KEY is not set; the live evals "
                    "cannot run without it.")
           u = urlsplit(owner)
+
           port = f":{u.port}" if u.port else ""
           netloc = f"stride_chat_ro:{quote(password, safe='')}@{u.hostname or ''}{port}"
           os.environ["STRIDE_CHAT_DATABASE_URL"] = urlunsplit(
@@ -180,41 +187,68 @@ jobs:
           print(f"  ok  {meetings} meetings returned")
 
           # -- leg 3: the artifact relay -------------------------------------
-          # Bytes out of S3. The tips and racecard directories are gitignored,
-          # so a CI checkout has none of them and the relay is the only source.
+          # Reachability only, deliberately. The corpus's artifact-backed cases
+          # ask about 6-12 April 2026, and the relay first shipped 2026-08-02
+          # uploading only the current day, with no backfill — so those keys
+          # have never been in the bucket and the cases have always fallen
+          # through to the selections table (chat/tools/tips.py:192). They
+          # assert tool NAMES, which chat/loop.py:164 records whether the tool
+          # hit or missed, so no case outcome turns on a tips file existing.
+          # Gating the run on a fresh one would block a phase 0 exit that would
+          # otherwise pass — four quiet days is enough. What IS worth catching
+          # before the spend is a dead bucket credential, and ArtifactMissing
+          # (a clean 404, so S3 answered) separates that from an empty relay.
           print("\n-- leg 3: artifact relay --")
           store = ArtifactStore.from_env()
           if not store.bucket:
-              fail("STRIDE_EVIDENCE_BUCKET is not set. Every artifact read would "
-                   "fall back to a checkout that gitignores racecards/ and "
-                   "intelligence/*.json, so get_stride_tips and get_race_card "
-                   "would miss on every case.")
-          # `races` is the key chat/tools/tips.py:93 reads. A tips file that
-          # parses but carries no races is the "presence standing in for
-          # usefulness" substitution CLAUDE.md names, so the probe asserts the
-          # field the tool needs rather than that bytes came back.
-          hit, seen = None, []
+              fail("STRIDE_EVIDENCE_BUCKET is not set. Artifact reads would fall "
+                   "back to a checkout that gitignores racecards/ and "
+                   "intelligence/*.json.")
+          answered, seen = False, []
           for back in range(0, 4):
               d = (date.fromisoformat(today) - timedelta(days=back)).isoformat()
               try:
                   payload, source = store.get_json(tips_path(d))
               except ArtifactMissing:
-                  seen.append(f"{d}: missing")
+                  answered = True
+                  seen.append(f"{d}: no file")
                   continue
               except ArtifactUnavailable as e:
-                  fail(f"the artifact relay is dark: {e}")
+                  fail(f"the artifact relay is dark — the bucket credential does "
+                       f"not work, which is not the same as an empty relay: {e}")
+              answered = True
               races = payload.get("races") if isinstance(payload, dict) else None
               seen.append(f"{d}: {len(races) if races else 0} races")
-              if races:
-                  hit = (source, len(races))
-                  break
           print("  probed " + "; ".join(seen))
-          if hit is None:
-              fail("no tips artifact carrying races in the last four days at "
-                   f"s3://{store.bucket}/artifacts/racecards/tips_<date>.json. The "
-                   "relay is reachable but has nothing the tips tool can read, so "
-                   "the artifact-backed cases would all miss.")
-          print(f"  ok  read {hit[0]} ({hit[1]} races)")
+          if not answered:
+              fail(f"s3://{store.bucket}/artifacts/ did not answer at all.")
+          print("  ok  the relay answers. Absence of a recent tips file is not a "
+                "gate: no eval case reads one.")
+
+          # -- leg 4: the model ----------------------------------------------
+          # The leg that spends. A non-empty ANTHROPIC_API_KEY proves a string
+          # is set, not that the key is live or the id still exists, and
+          # ANTHROPIC_CHAT_MODEL is a secret nothing validates — config.py:46
+          # silently substitutes the default when it is empty or misspelled.
+          # Without this, a retired id or a key past its Console cap makes every
+          # _create raise, and the closing message below tells the operator that
+          # 25 cases are agent defects and not to touch the corpus. Worse, the
+          # 12 injection cases whose expectations are purely negative PASS
+          # against the string "model call failed", so a partial `only` run over
+          # injection ids exits 0 green with the model completely dark.
+          # preflight_model is 16 tokens and already exists for exactly this
+          # (chat/loop.py:59, and `python -m chat.cli --preflight`).
+          print("\n-- leg 4: the model --")
+          from chat.loop import ChatModelUnavailable
+          from chat.runtime import build_engine
+          probe = build_engine()
+          try:
+              probe.preflight()
+          except ChatModelUnavailable as e:
+              fail(f"the model leg is dark: {e}. Nothing was spent. Check "
+                   f"ANTHROPIC_API_KEY and the model id ({config.chat_model()}) "
+                   "before reading any case result as an agent defect.")
+          print(f"  ok  {config.chat_model()} answered a 16-token probe")
 
           # -- the evals ------------------------------------------------------
           print("\n-- evals --")

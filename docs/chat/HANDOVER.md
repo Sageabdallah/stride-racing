@@ -75,12 +75,24 @@ key, shared with the 05:30 consensus job, which is why the confirmation is
 typed rather than a checkbox. Plan §6 phase 3A gives the chat its own key from
 a separate Console workspace; that belongs with the Lambda.
 
-The workflow proves three legs live before spending anything — the database
-returns rows to `stride_chat_ro`, Punting Form returns meetings across three
-consecutive days, the S3 relay returns a tips artifact from the last four days —
-then floors the run itself: 46 cases must load, all 38 non-search cases must
-execute, at least one must pass. That floor exists because `_report` returns 0
-when nothing failed, and nothing fails when nothing ran.
+The workflow proves four legs before spending anything, and each states what it
+actually proves: the database returns **rows** to `stride_chat_ro`, Punting Form
+returns **meetings** across three consecutive days, the S3 relay **answers**, and
+the model answers a real 16-token call. It then floors the run itself: 46 cases
+must load, all 38 non-search cases must execute, at least one must pass. That
+floor exists because `_report` returns 0 when nothing failed, and nothing fails
+when nothing ran.
+
+Two of those are deliberately shaped against a specific wrong version of
+themselves. The relay leg is **reachability only** — an absent tips file is not
+a gate, because every artifact-backed case asks about April 2026, those keys
+were never relayed (the relay ships only the current day, from 2026-08-02, with
+no backfill), and the cases assert tool *names*, which are recorded whether the
+tool hit or missed. Gating on a fresh tips file would block a phase 0 exit that
+would otherwise pass. The model leg is a **live call**, not a non-empty
+`ANTHROPIC_API_KEY`: with a retired model id, 12 injection cases pass vacuously
+against the string "model call failed", so a partial run over injection ids
+would exit 0 green with the model completely dark.
 
 Expect 8 `unsupported` results. Those are the `web-*` and `inj-page-*` cases;
 search mode is not ported (§6 phase 5) and they are not counted as passes.
