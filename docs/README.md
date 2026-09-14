@@ -31,6 +31,7 @@ source read of the ~150 Python modules (~72k lines) in this repo.
 | [`analysis/`](analysis/SYSTEM_MAP.md) | The 2026-07 research pass: system map, academic findings, improvement report, implementation plan, results; and the [2026-09-06 audit verification](analysis/AUDIT_VERIFICATION_2026-09-06.md) |
 | [`research/`](research/FEATURE_PROVENANCE.md) | Feature provenance and liveness, task-12 feature decisions, the winner-pattern proof run |
 | [`phase-minus-1/`](phase-minus-1/ARCHITECTURE_STABILISATION.md) | The architecture-stabilisation record that precedes Phase 0 |
+| [`chat/`](chat/CHAT_INTEGRATION_PLAN.md) | The STRIDE chat: its design and phase plan, the Lambda architecture audit, and the session-to-session handover |
 
 Deployment and operations: [`DEPLOY_RUNBOOK.md`](DEPLOY_RUNBOOK.md),
 [`../infra/README.md`](../infra/README.md),
