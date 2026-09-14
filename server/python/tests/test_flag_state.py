@@ -175,8 +175,16 @@ def _flag_enabled(name, default="false"):
 '''
 
 
+# Fixture flag names are assembled, never written whole. mentioned_names()
+# regex-scans every .py in the repo, so a fixture flag spelled out in this file
+# would enter the real report as a control that does not exist -- the phantom
+# this module exists to report on. Writing them out moved names_seen 94 -> 102.
+_FX = "STRIDE" + "_FIXTURE"
+
+
 def _probe(tmp_path, body: str):
-    (tmp_path / "probe.py").write_text(_PROBE + body, encoding="utf-8")
+    (tmp_path / "probe.py").write_text(
+        _PROBE + body.replace("@F@", _FX), encoding="utf-8")
     fs.scan_readers(tmp_path)
     return fs.scan_readers(tmp_path), fs.unresolved_dynamic(tmp_path)
 
@@ -190,10 +198,10 @@ RULES = {"ALPHA": 1, "BETA": 2}
 
 def run():
     for suffix in RULES:
-        flag = f"STRIDE_PROBE_{suffix}"
+        flag = f"@F@_{suffix}"
         _flag_enabled(flag)
 ''')
-    assert "STRIDE_PROBE_ALPHA" in readers and "STRIDE_PROBE_BETA" in readers
+    assert f"{_FX}_ALPHA" in readers and f"{_FX}_BETA" in readers
     assert stranded == []
 
 
@@ -207,7 +215,7 @@ def test_unresolvable_runtime_name_is_recorded_not_dropped(tmp_path):
     _, stranded = _probe(tmp_path, '''
 def run(names):
     for n in names:                     # not a literal collection
-        _flag_enabled(f"STRIDE_DYNAMIC_{n}")
+        _flag_enabled(f"@F@_{n}")
 ''')
     assert stranded and all(s.startswith("probe.py:") for s in stranded)
 
@@ -225,14 +233,51 @@ def test_fstring_sentence_is_not_a_flag_name_head():
     or not the head test is right, so the mutation would pass.
     """
     def head(src):
-        return ast.parse(src, mode="eval").body
+        return ast.parse(src.replace("@F@", _FX), mode="eval").body
 
     assert not fs._fstring_flag_head(head('f"STRIDE_ names unresolved: {x}"'))
-    assert not fs._fstring_flag_head(head('f"STRIDE_FLAGS are {x}"'))
-    assert not fs._fstring_flag_head(head('f"{x}_STRIDE_TAIL"'))
-    assert not fs._fstring_flag_head(head('"STRIDE_PLAIN_STRING"'))
+    assert not fs._fstring_flag_head(head('f"@F@ are {x}"'))
+    assert not fs._fstring_flag_head(head('f"{x}_@F@_TAIL"'))
+    assert not fs._fstring_flag_head(head('"@F@_PLAIN"'))
     assert fs._fstring_flag_head(head('f"STRIDE_RACE_FILTER_{suffix}"'))
     assert fs._fstring_flag_head(head('f"STRIDE_CTX_MULT_{name}"'))
+
+
+def test_conversion_and_format_spec_do_not_invent_a_name(tmp_path):
+    """`f"STRIDE_X_{s!r}"` builds STRIDE_X_'MAIDEN' at runtime, and `{s:>10}`
+    pads to width. Substituting the bare value would record a flag name that is
+    never read -- inventing a read site, which is worse than missing one,
+    because this report is what says whether a written fix is live. Neither is
+    resolvable, so both belong in `unresolved`."""
+    readers, stranded = _probe(tmp_path, '''
+RULES = {"MAIDEN": 1}
+
+
+def run():
+    for s in RULES:
+        _flag_enabled(f"@F@C_{s!r}")
+        _flag_enabled(f"@F@S_{s:>10}")
+''')
+    invented = [k for k in readers if k.startswith(_FX)]
+    assert invented == [], f"invented names the interpreter never builds: {invented}"
+    assert len(stranded) == 2, f"both sites must be reported, got {stranded}"
+
+
+def test_constant_fstring_is_treated_as_a_named_constant(tmp_path):
+    """`F = f"STRIDE_X"` has nothing to substitute: shape 3 wearing an f
+    prefix. Scoping it to a loop span binds it to its own line and loses every
+    later read with no record -- a silent miss, the failure this resolver
+    exists to remove."""
+    readers, stranded = _probe(tmp_path, '''
+PREFIXED = f"@F@_MODLEVEL"
+
+
+def run():
+    _flag_enabled(PREFIXED)
+''')
+    assert f"{_FX}_MODLEVEL" in readers, "constant f-string read was lost"
+    assert readers[f"{_FX}_MODLEVEL"]["sites"]
+    assert stranded == []
 
 
 def test_mention_of_a_flag_shaped_fstring_is_not_a_read(tmp_path):
@@ -241,7 +286,7 @@ def test_mention_of_a_flag_shaped_fstring_is_not_a_read(tmp_path):
     _, stranded = _probe(tmp_path, '''
 def run(names):
     for n in names:
-        print(f"STRIDE_PROBE_{n} ignored")
+        print(f"@F@_{n} ignored")
 ''')
     assert stranded == []
 

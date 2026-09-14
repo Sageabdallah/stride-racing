@@ -331,6 +331,13 @@ def _scan_module(path: Path, rel: str, out: Dict[str, Dict[str, Any]],
             if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
                 parts.append([piece.value])
             elif isinstance(piece, ast.FormattedValue) and isinstance(piece.value, ast.Name):
+                # !r and a format spec change the text the interpreter builds:
+                # f"STRIDE_X_{s!r}" is STRIDE_X_'MAIDEN', and f"{s:>10}" pads.
+                # Substituting the bare value would record a flag name that is
+                # never read -- inventing a site, which is worse than missing
+                # one. Neither is resolvable here, so both go to `unresolved`.
+                if piece.conversion != -1 or piece.format_spec is not None:
+                    return None
                 found = _bound(piece.value.id, line)
                 if found is None:
                     return None
@@ -352,7 +359,15 @@ def _scan_module(path: Path, rel: str, out: Dict[str, Dict[str, Any]],
                 and isinstance(node.targets[0], ast.Name) \
                 and isinstance(node.value, ast.JoinedStr):
             names = _fstring(node.value, node.lineno)
-            if names:
+            interpolated = any(isinstance(v, ast.FormattedValue) for v in node.value.values)
+            if names and not interpolated:
+                # `F = f"STRIDE_X"` with nothing to substitute is shape 3 wearing
+                # an f prefix. Binding it to a loop span would scope it to its
+                # own line and lose every later read -- a silent miss, which is
+                # the failure this whole resolver exists to remove.
+                if len(names) == 1 and _is_flag_name(names[0]):
+                    const_names.setdefault(node.targets[0].id, names[0])
+            elif names:
                 enclosing = [(lo, hi) for entries in binds.values()
                              for lo, hi, _v, _o in entries if lo <= node.lineno <= hi]
                 lo, hi = min(enclosing, key=lambda s: s[1] - s[0]) if enclosing else \
