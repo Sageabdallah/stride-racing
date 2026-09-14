@@ -146,10 +146,22 @@ lines to cases showed they failed in different places.
   miss. The case is not mis-specified: a fixed vocabulary for a miss is a
   product property, and the other three miss cases already met it.
 
-Left for its own change: a range query over a busy month returns the first
-400 selection rows and reports only the dates those rows fall on, so "March"
-came back as "6 and 7 March". The chain-04 response surfaced it; the fix is
-per-date capping with a real count, not a bigger limit.
+A fourth defect the chain-04 response surfaced, fixed after the exit closed:
+a range query over a busy month returned the first 400 selection rows and
+reported only the dates those rows fell on, so "March" came back as "6 and 7
+March", with `truncated` false. Two things were wrong. The 400-row limit cut
+whole dates, and the rows counted superseded runs: `store_selections_in_db`
+deactivates a day's earlier rows (`is_active = false`) before inserting the
+new set, and the chat counted both, which is how one Saturday showed 380
+"selections" when the published set is one bet pick per race. `get_stride_tips`
+now reads active rows only, answers a span with a grouped calendar of every
+date and track with selections (complete whatever the volume) plus the
+leading selections per track per date under a payload cap, and says which
+dates' rows are not shown rather than dropping them. Run #7 (`34756390730`,
+on the fix branch at `26808ce`, 12:11 UTC) is the evidence that the new SQL
+runs against the real schema: 38 of 38, `tool_errors: 0` on all 41 turns, and
+16 turns called `get_stride_tips`, every one of which ran the grouped
+calendar and the active-rows query, with 0 errors. The fix is PR #189.
 
 ## Running the phase 0 exit
 
@@ -219,6 +231,10 @@ evidence that answers are grounded.
   application code, not about the folder name.
 
 ## Changelog
+
+**2026-09-13, run #7.** The tips range defect fixed (PR #189): active rows
+only, a complete calendar per span, per-track-per-date caps. Run #7 on the
+branch: 38 of 38, `tool_errors: 0`, 16 `get_stride_tips` turns clean.
 
 **2026-09-13, runs #5 and #6.** Prompt v3.2 (PR #187, merged) pins the
 off-domain refusal's opening words. Run #5 on the branch: 38 of 38. Run #6 on `main`

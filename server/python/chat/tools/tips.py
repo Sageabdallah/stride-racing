@@ -3,8 +3,14 @@
 Reads the day's tips artifact first, because it carries the whole decision
 contract (bet_pick, coverage_pick, bet_status, convergence tier, the field),
 and the `selections` table second, which holds only the published rows. A
-date range is answered from the table in one query, so "the first week of
-April" is one call, not seven.
+date range is answered from the table in two queries, so "the first week of
+April" is one call, not seven: a grouped calendar of every date and track
+with selections, which is complete whatever the volume, and the rows
+themselves, active only and capped per track per date, so a busy month does
+not come back as its first two days (chat-eval run #1, chain-04: a month
+came back as "6 and 7 March"). The pipeline keeps superseded runs in the
+table with is_active = false; only the active rows are STRIDE's published
+set for the day, and only they are counted.
 """
 
 from __future__ import annotations
@@ -42,6 +48,9 @@ SELECTION_KEYS = ("race_date", "track", "race_number", "race_name", "horse_name"
 
 NEAREST_KEYS = ("race_date", "track", "race_number", "horse_name", "edge", "market_odds",
                 "win_percentage", "confidence")
+RANGE_KEYS = ("track", "race_number", "horse_name", "edge", "market_odds", "win_percentage",
+              "confidence", "value_rating")
+ACTIVE = "COALESCE(is_active, true)"  # rows from before the flag existed count as live
 
 MAX_RACES = 60
 MAX_TOP_PICKS = 5
@@ -51,6 +60,13 @@ NEAREST_TOP = 3
 MAX_NEAREST_TRACKS = 12
 NEARBY_DAYS = 10
 NEARBY_TOP = 4
+ROW_FETCH_CAP = 1500
+MAX_RANGE_DATES = 14
+# detail -> (rows per track per date, rows in total, keys). The totals keep a
+# worst-case payload (14 dates, six tracks, long names) near 18k characters,
+# clear of the 24k backstop in frame_for_model, which cuts JSON mid-way.
+ROW_CAPS = {"range": (2, 70, RANGE_KEYS), "day": (3, 40, RANGE_KEYS),
+            "track": (12, 30, SELECTION_KEYS), "race": (24, 48, SELECTION_KEYS)}
 
 
 def _pick(p: Any, with_insight: bool = False) -> Dict[str, Any]:
@@ -149,31 +165,106 @@ def _from_selections(ctx: Context, date_from: str, date_to: str, track: Optional
     if ctx.db is None:
         return miss(f"No tips artifact for {date_from} and no database is configured.",
                     source="none")
+    calendar = [c for c in _calendar(ctx, date_from, date_to)
+                if date_from <= c["race_date"] <= date_to]
     span_rows = ctx.db.query(
         "SELECT race_date, track, race_number, race_name, horse_name, horse_number, barrier, "
         "jockey, trainer, win_percentage, model_probability, market_odds, expected_value, "
         "edge, confidence, value_rating, kelly_stake, convergence_gate, consensus_vote_pct, "
-        "is_active FROM selections WHERE race_date >= %s AND race_date <= %s "
-        "ORDER BY race_date, track, race_number, edge DESC NULLS LAST LIMIT 400",
-        (date_from, date_to))
+        "is_active FROM selections WHERE race_date >= %s AND race_date <= %s AND " + ACTIVE + " "
+        "ORDER BY race_date, track, edge DESC NULLS LAST, race_number LIMIT %s",
+        (date_from, date_to, ROW_FETCH_CAP))
     rows = [r for r in span_rows if track_matches(r.get("track"), track)
             and (race is None or _int(r.get("race_number")) == race)]
     source = "neon:selections"
     if not rows:
-        return _miss_with_context(ctx, date_from, date_to, track, race, source, span_rows)
-    by_date: Dict[str, List[Dict[str, Any]]] = {}
+        return _miss_with_context(ctx, date_from, date_to, track, race, source, span_rows, calendar)
+
+    detail = ("race" if race is not None else "track" if track else
+              "day" if date_from == date_to else "range")
+    per_group, total_cap, keys = ROW_CAPS[detail]
+    grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for r in rows:
-        by_date.setdefault(str(r.get("race_date")), []).append(compact(r, SELECTION_KEYS))
-    shown, more = cap_list(sorted(by_date.items()), 14)
-    data = {"date_from": date_from, "date_to": date_to,
-            "dates_with_tips": [d for d, _ in shown],
-            "selections_by_date": {d: v for d, v in shown}}
-    return result(data, source=source, truncated=more,
-                  notes=["Published selection rows only; the per-race decision contract "
-                         "(bet/coverage/NO_BET) lives in the day's tips artifact."])
+        d = str(r.get("race_date"))[:10]
+        grouped.setdefault(d, {}).setdefault(str(r.get("track") or ""), []).append(r)
+    # The calendar is the complete list of dates; the rows are a capped sample
+    # of each. A date the calendar has and the rows do not is reported, never
+    # silently dropped, which is the defect this replaces.
+    cal_dates = sorted({c["race_date"] for c in calendar
+                        if track_matches(c["track"], track)}) if race is None else sorted(grouped)
+    dates = cal_dates or sorted(grouped)
+    shown_dates, more_dates = cap_list(dates, MAX_RANGE_DATES)
+    by_date: Dict[str, List[Dict[str, Any]]] = {}
+    dropped = 0
+    budget = total_cap
+    for d in shown_dates:
+        out: List[Dict[str, Any]] = []
+        for t, trows in sorted(grouped.get(d, {}).items()):
+            ranked = sorted(trows, key=lambda r: (number(r.get("edge")) is None,
+                                                  -(number(r.get("edge")) or 0),
+                                                  _int(r.get("race_number")) or 0))
+            take = ranked[:min(per_group, max(budget, 0))]
+            dropped += len(trows) - len(take)
+            budget -= len(take)
+            out.extend(compact(r, keys) for r in take)
+        by_date[d] = out
+    calendar_out = []
+    for d in shown_dates:
+        tracks = [{"track": c["track"], "selections": c["n"]} for c in calendar
+                  if c["race_date"] == d and track_matches(c["track"], track)]
+        if not tracks:  # no calendar entry (fake backends): count the rows
+            tracks = [{"track": t, "selections": len(trows)} for t, trows in sorted(grouped.get(d, {}).items())]
+        calendar_out.append({"race_date": d, "selections": sum(t["selections"] for t in tracks),
+                             "tracks": tracks})
+    missing_rows = [d for d in shown_dates if not by_date.get(d)]
+    truncated = more_dates or dropped > 0 or len(span_rows) >= ROW_FETCH_CAP
+    data = {"date_from": date_from, "date_to": date_to, "dates_with_tips": shown_dates,
+            "calendar": calendar_out, "selections_by_date": by_date}
+    notes = ["Published selection rows only, the active set for each day; the per-race "
+             "decision contract (bet/coverage/NO_BET) lives in the day's tips artifact.",
+             "calendar lists every date and track with selections in the span and how many; "
+             "dates_with_tips is complete."]
+    if detail in ("range", "day"):
+        notes.append(f"selections_by_date shows the leading {per_group} by edge per track per date. "
+                     "Ask with a track for all of a meeting's selections, or a track and race "
+                     "for one race.")
+    elif dropped:
+        notes.append(f"selections_by_date is capped at {per_group} rows per date; the calendar "
+                     "has the full counts.")
+    if more_dates:
+        notes.append(f"Only the first {MAX_RANGE_DATES} dates are shown; {len(dates) - MAX_RANGE_DATES} "
+                     "more have selections. Narrow the range for those.")
+    if missing_rows:
+        notes.append("Rows for " + ", ".join(missing_rows) + " are not shown; the calendar "
+                     "still counts them. Ask for those dates directly.")
+    return result(data, source=source, truncated=truncated, notes=notes)
 
 
-def _miss_with_context(ctx, date_from, date_to, track, race, source, span_rows=()):
+def _calendar(ctx, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    """Every date and track with active selections in the span, with counts.
+
+    Grouped in SQL, so it is complete whatever the row volume, and cheap: a
+    month is a few dozen rows. Returns [] when the database does not answer;
+    the callers treat that as "no calendar", never as "no tips".
+    """
+    try:
+        grouped = ctx.db.query(
+            "SELECT race_date, track, COUNT(*) AS n FROM selections WHERE race_date >= %s "
+            "AND race_date <= %s AND " + ACTIVE + " GROUP BY race_date, track "
+            "ORDER BY race_date, track LIMIT 600", (date_from, date_to))
+    except DatabaseUnavailable:
+        return []
+    out = []
+    for g in grouped:
+        d = str(g.get("race_date") or "")[:10]
+        if not d:
+            continue
+        out.append({"race_date": d, "track": str(g.get("track") or ""),
+                    "n": _int(g.get("n")) or 1})
+    return out
+
+
+def _miss_with_context(ctx, date_from, date_to, track, race, source, span_rows=(), calendar=()):
     """The honest miss for the selections table, with what did exist.
 
     Three different misses share this exit and the model must be able to tell
@@ -199,7 +290,7 @@ def _miss_with_context(ctx, date_from, date_to, track, race, source, span_rows=(
     rows = list(span_rows or [])
     at_track = [r for r in rows if track_matches(r.get("track"), track)] if track else rows
     if rows and not at_track:
-        tracks = _tracks_with_tips(rows)
+        tracks = _tracks_with_tips(list(calendar or []) or rows)
         shown, more = cap_list(tracks, MAX_NEAREST_TRACKS)
         parts = [t["track"] + (f" ({t['selections']})" if date_from == date_to
                                else f" ({t['selections']} on {', '.join(t['dates'][:3])})") for t in shown]
@@ -237,13 +328,14 @@ def _miss_with_context(ctx, date_from, date_to, track, race, source, span_rows=(
 
 
 def _tracks_with_tips(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-track counts from calendar entries (which carry n) or from plain rows."""
     by_track: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         t = str(r.get("track") or "").strip()
         if not t:
             continue
         slot = by_track.setdefault(t, {"track": t, "selections": 0, "dates": set()})
-        slot["selections"] += 1
+        slot["selections"] += _int(r.get("n")) or 1
         slot["dates"].add(str(r.get("race_date"))[:10])
     out = sorted(by_track.values(), key=lambda x: (-x["selections"], x["track"]))
     for t in out:
@@ -259,7 +351,8 @@ def _leading(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _records_span(ctx) -> "tuple[str, str]":
     try:
-        rows = ctx.db.query("SELECT MIN(race_date) AS first_date, MAX(race_date) AS last_date FROM selections", ())
+        rows = ctx.db.query("SELECT MIN(race_date) AS first_date, MAX(race_date) AS last_date "
+                            "FROM selections WHERE " + ACTIVE, ())
     except DatabaseUnavailable:
         return "", ""
     head = (rows[0] or {}) if rows else {}
@@ -273,22 +366,15 @@ def _nearby_dates(ctx, date_from: str, date_to: str, track: Optional[str]) -> Li
     and the previous meeting is the useful pointer."""
     lo = (datetime.strptime(date_from, "%Y-%m-%d") - timedelta(days=NEARBY_DAYS)).strftime("%Y-%m-%d")
     hi = (datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=NEARBY_DAYS)).strftime("%Y-%m-%d")
-    try:
-        grouped = ctx.db.query(
-            "SELECT race_date, track, COUNT(*) AS n FROM selections WHERE race_date >= %s "
-            "AND race_date <= %s GROUP BY race_date, track ORDER BY race_date, track LIMIT 300",
-            (lo, hi))
-    except DatabaseUnavailable:
-        return []
     by_date: Dict[str, Dict[str, Any]] = {}
-    for g in grouped:
-        d = str(g.get("race_date") or "")[:10]
-        if not d or (track and not track_matches(g.get("track"), track)):
+    for g in _calendar(ctx, lo, hi):
+        d = g["race_date"]
+        if track and not track_matches(g["track"], track):
             continue
         slot = by_date.setdefault(d, {"race_date": d, "tracks": [], "selections": 0})
-        if g.get("track"):
-            slot["tracks"].append(str(g["track"]))
-        slot["selections"] += _int(g.get("n")) or 0
+        if g["track"]:
+            slot["tracks"].append(g["track"])
+        slot["selections"] += g["n"]
 
     def distance(d: str) -> int:
         if d < date_from:
@@ -346,7 +432,9 @@ SPEC = ToolSpec(
         "pick, NO_BET decisions with reasons, edges, model win percentages, confidence, "
         "convergence tier and staking. Use for any question about what STRIDE tipped or "
         "selected. Pass a track for the picks at one meeting, and a race number for that "
-        "race's full field. Pass date_to for a range of days (max 31)."),
+        "race's full field. Pass date_to for a range of days (max 31): the answer carries a "
+        "complete calendar of dates and tracks with selections and the leading selections "
+        "per track per date."),
     input_schema={
         "type": "object",
         "properties": {
