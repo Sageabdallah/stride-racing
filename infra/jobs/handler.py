@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -741,6 +742,46 @@ def job_late_odds_watch() -> dict:
     return {"last_success_date": _today()}
 
 
+def _collector_status(out: str) -> str:
+    """The `status` of stride_results_collector.py's result, the JSON it
+    prints last on stdout. Empty when there is no such object."""
+    idx = out.rfind("\n{")
+    blob = out[idx + 1:] if idx >= 0 else out
+    try:
+        return str(json.loads(blob).get("status", ""))
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _require_tips_scored(day: str, out: str) -> str:
+    """Refuse the collector's `no_tips` for a day whose tips file is on this
+    task. The collector reads racecards/tips_<date>.json from the filesystem
+    it runs on, and a Fargate task starts empty: from the 2026-08-02 cutover
+    to 2026-09-14 nothing relayed the file, Step 1 found no tips, the script
+    exited 0, and its scoring insert and the shadow tracker's settlement never
+    ran once in the cloud. The relay in job_results_collect ends that; this
+    is the check that would have said so.
+
+    `no_tips` with no file relayed is the truth (a quiet day publishes none),
+    and `no_picks` is a zero-bet card the collector settles shadow rows for.
+    """
+    status = _collector_status(out)
+    tips = f"{_root()}/racecards/tips_{day}.json"
+    if status == "no_tips" and os.path.exists(tips):
+        raise RuntimeError(
+            f"results-collect: tips_{day}.json is on this task but "
+            f"stride_results_collector.py reported no_tips for {day}, so it is "
+            f"reading a different path; nothing was scored or settled.")
+    if status == "no_tips":
+        print(f"[results-collect] no tips file for {day} was relayed: a quiet "
+              f"day, or the tips job never published. Nothing to score.",
+              file=sys.stderr)
+    elif status == "no_picks":
+        print(f"[results-collect] {day} had tips but no BET or COVERAGE pick; "
+              f"the collector settled the shadow rows only.")
+    return status
+
+
 def job_results_collect() -> dict:
     """Collect TODAY and yesterday, matching the pf-evening-results workflow
     this replaces. Yesterday alone would leave the day's own races waiting
@@ -761,13 +802,17 @@ def job_results_collect() -> dict:
             healed.append(day)
         except SOFT as e:
             print(f"backfill {day} failed: {e}", file=sys.stderr)
+    # The tips the collector scores and settles against. tips_<date>.json is
+    # relayed up by the tips job and lives nowhere on this task until it is
+    # relayed down; see _require_tips_scored for what its absence cost.
+    _sync_down("racecards")
     for day in (yesterday, today):
         # Today's late meetings may not have resulted yet at 22:30; the
         # 01:00 retry covers them, so today is non-fatal here.
         try:
             _run_ok("auto_results_collector.py", "--date", day)
             _run_ok("fetch_and_import_date.py", "--date", day)
-            _run_ok("stride_results_collector.py", day)
+            _require_tips_scored(day, _run_ok("stride_results_collector.py", day))
         except SOFT as e:
             if day == yesterday:
                 raise
@@ -947,6 +992,57 @@ def job_consensus_agent() -> dict:
 CTX_MULT_DIAG_FLAG = "STRIDE_CTX_MULT_DIAG"
 
 
+# The summary line shadow_pl_tracker.py's `record` prints to stdout. Parsed
+# rather than assumed: a script whose line changed shape would otherwise read
+# as "recorded nothing" or, worse, as fine.
+_RECORDED_RE = re.compile(
+    r"^RECORDED (\d+) rows for (\d{4}-\d{2}-\d{2}) \((\d+) duplicates skipped\)$",
+    re.M)
+
+
+def _record_tip_results(date: str) -> int:
+    """Record the day's tiers into stride_tip_results, and prove it happened.
+
+    stride_tip_results is the shadow ledger every tier's level-stakes P/L is
+    measured from, and one of the tables deploy_preflight.py's liveness board
+    and the retrain gates read for freshness. It has two writers: the
+    collector's scoring insert for BET and COVERAGE picks (results-collect,
+    at night, now that the tips are relayed to it) and this step, the
+    tracker's `record`, which writes every tier's rows at tip time so the
+    shadow P/L can compare them. `record` was a step the local pipeline had
+    (docs/02-daily-pipeline.md) and the Fargate chain never got.
+
+    Runs AFTER the tips file is relayed to S3, deliberately: a failure here
+    must not cost the frontend its tips. It still fails the job, because a
+    day that produced a tips file and recorded no rows is the silent no-op
+    this handler exists to refuse. A re-run of an already-recorded day is
+    the one legitimate zero: `record` skips horses already present and says
+    how many, and that count is the difference between the two.
+    """
+    out = _run_ok("shadow_pl_tracker.py", "record", date)
+    m = _RECORDED_RE.search(out)
+    if not m:
+        raise RuntimeError(
+            f"tips-pipeline: shadow_pl_tracker.py record {date} exited 0 but "
+            f"printed no RECORDED summary line, so what it wrote to "
+            f"stride_tip_results is unknown. Unknown is treated as nothing.")
+    inserted, recorded_for, skipped = int(m.group(1)), m.group(2), int(m.group(3))
+    if recorded_for != date:
+        raise RuntimeError(
+            f"tips-pipeline: asked shadow_pl_tracker.py to record {date} and "
+            f"it reported {recorded_for}.")
+    if inserted == 0 and skipped == 0:
+        raise RuntimeError(
+            f"tips-pipeline: tips_{date}.json exists but shadow_pl_tracker.py "
+            f"record inserted 0 rows into stride_tip_results and found 0 "
+            f"already there. The day's tiers are unrecorded: the shadow "
+            f"ledger and the preflight's freshness board will not see this "
+            f"card.")
+    print(f"[tips-pipeline] stride_tip_results: {inserted} rows recorded for "
+          f"{date}, {skipped} already present")
+    return inserted
+
+
 def job_tips_pipeline() -> dict:
     os.environ.setdefault(CTX_MULT_DIAG_FLAG, "true")
     _sync_down("server/python/intelligence")
@@ -967,7 +1063,35 @@ def job_tips_pipeline() -> dict:
     # Deliberately NOT asserting a bet count: a day on which every runner
     # gates to NO_BET is a legitimate outcome, not a failure.
     _sync_up("racecards", "tips_*.json")
-    return {"last_success_date": _today(), "detail": out[-300:]}
+    # After the relay, never before it: see _record_tip_results.
+    try:
+        recorded = _record_tip_results(_today())
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"{e} tips_{_today()}.json is already relayed and the frontend "
+            f"has the day's tips; only the stride_tip_results record step "
+            f"failed. Re-run it alone with the tip-results-record job "
+            f"(idempotent), never the tips job.") from e
+    return {"last_success_date": _today(), "rows_written": recorded,
+            "detail": out[-300:]}
+
+
+def job_tip_results_record() -> dict:
+    """Only the stride_tip_results record step, for a day whose tips are
+    already relayed: the sanctioned recovery for a record-only failure in
+    tips-pipeline, whose other two steps must not be re-run out of slot.
+    Idempotent — horses already recorded are skipped. STRIDE_DATE picks the
+    day (verify-jobs.yml's `date` input)."""
+    _sync_down("racecards")
+    date = _today()
+    tips = f"{_root()}/racecards/tips_{date}.json"
+    if not os.path.exists(tips):
+        raise RuntimeError(
+            f"tip-results-record: no tips_{date}.json in the relay, so there "
+            f"is nothing to record. A quiet day has none; a day whose tips "
+            f"job never published needs the tips job, not this.")
+    recorded = _record_tip_results(date)
+    return {"last_success_date": date, "rows_written": recorded}
 
 
 def _prepare_racecard() -> str:
@@ -1503,6 +1627,9 @@ JOBS = {
     "intelligence-build": job_intelligence_build,
     "consensus-agent": job_consensus_agent,
     "tips-pipeline": job_tips_pipeline,
+    # The record-only recovery for tips-pipeline; hand-dispatched, idempotent,
+    # borrows the tips task definition in verify-jobs.yml.
+    "tip-results-record": job_tip_results_record,
     # Proof variants: same image and task definition, selected by the
     # STRIDE_JOB override. Never scheduled — dispatched by hand to verify
     # a path before it runs for real.

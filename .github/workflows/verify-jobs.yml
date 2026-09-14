@@ -17,6 +17,11 @@
 # dispatch, and `llm-proof` is the two-pick check to run before a preview whose
 # insights are the point.
 #
+# `jobs=tip-results-record` re-runs only the stride_tip_results record step of
+# tips-pipeline for a day whose tips are already relayed (with `date` for a
+# past day). It is the one sanctioned re-run touching that job: idempotent,
+# no LLM, no ledger, no tips file written.
+#
 # `jobs=flag-state` reports what every STRIDE_* flag is resolved to IN THE
 # CONTAINER, and which flags have no way to be set at all. It reads source and
 # os.environ and writes nothing, so unlike everything above it is safe beside a
@@ -166,6 +171,12 @@ jobs:
                 # definition. preflight is the right family to borrow: 512/1024,
                 # read-only, and its log group already exists.
                 flag-state)      TD=stride-preflight ;;
+                # The record-only recovery for a tips-pipeline run whose
+                # tips shipped but whose stride_tip_results step failed.
+                # Idempotent, needs the tips image and the database secret,
+                # so it borrows the tips family. With `date` it re-records
+                # that day; nothing else in the tips job runs.
+                tip-results-record) TD=stride-tips-pipeline ;;
                 *)               TD="stride-$JOB" ;;
               esac
               EXTRA_ENV=""

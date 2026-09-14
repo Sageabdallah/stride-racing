@@ -153,6 +153,13 @@ def _infer_tier_from_json(race, horse_name):
 
 BET_TIERS = {"CONFIRMED", "CROWD_ONLY", "LOCK"}
 
+# The tip_type values stride_results_collector.py writes for the same day's
+# horses: its scored BET and COVERAGE rows. `record` keys its duplicate check
+# on the horse, over its own rows only, so a re-run after tier drift neither
+# inserts a second row per horse nor mistakes the collector's rows for its
+# own.
+COLLECTOR_TIP_TYPES = ("BET", "COVERAGE")
+
 def cmd_record(race_date, conn=None):
     close_conn = conn is None
     if conn is None:
@@ -160,13 +167,27 @@ def cmd_record(race_date, conn=None):
         ensure_schema(conn)
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT track, race_number, horse_name, convergence_tier,
-               final_convergence_score, stride_score, pillars_strong, field_size
-        FROM convergence_output
-        WHERE race_date = %s
-    """, (race_date,))
-    db_rows = cur.fetchall()
+    # The pipeline's convergence_output write is wrapped in a try/except and
+    # the table comes from a migration this script cannot see applied, so an
+    # absent table is answered with the JSON fallback below rather than a
+    # traceback after the day's tips have already shipped.
+    try:
+        from psycopg2 import errors as _pg_errors
+        _absent_table = (_pg_errors.UndefinedTable,)
+    except ImportError:  # a faked cursor in tests; nothing to catch
+        _absent_table = ()
+    try:
+        cur.execute("""
+            SELECT track, race_number, horse_name, convergence_tier,
+                   final_convergence_score, stride_score, pillars_strong, field_size
+            FROM convergence_output
+            WHERE race_date = %s
+        """, (race_date,))
+        db_rows = cur.fetchall()
+    except _absent_table as e:
+        print(f"  [SHADOW] convergence_output is not there ({e}); "
+              f"using the tips JSON", file=sys.stderr)
+        db_rows = []
 
     races = _load_tips(race_date)
     tips_lookup = {}
@@ -181,17 +202,20 @@ def cmd_record(race_date, conn=None):
             tips_lookup[key] = {**tips_lookup.get(key, {}), **pick}
 
     cur.execute("""
-        SELECT track, race_number, horse_name, tip_type
-        FROM stride_tip_results WHERE race_date = %s
-    """, (race_date,))
-    existing = {(r[0], r[1], r[2], r[3]) for r in cur.fetchall()}
+        SELECT track, race_number, horse_name
+        FROM stride_tip_results
+        WHERE race_date = %s AND COALESCE(tip_type, '') NOT IN %s
+    """, (race_date, COLLECTOR_TIP_TYPES))
+    existing = {(r[0], r[1], r[2]) for r in cur.fetchall()}
+    seen = set()
 
     to_insert = []
 
     if db_rows:
         for track, rnum, horse, tier, conv_score, stride_score, pillars, fsize in db_rows:
-            if (track, rnum, horse, tier) in existing:
+            if (track, rnum, horse) in existing or (track, rnum, horse) in seen:
                 continue
+            seen.add((track, rnum, horse))
             key = (_normalize_name(track), rnum, _normalize_name(horse))
             tip = tips_lookup.get(key, {})
             to_insert.append((
@@ -218,8 +242,9 @@ def cmd_record(race_date, conn=None):
                 if not horse:
                     continue
                 tier = _infer_tier_from_json(race, horse)
-                if (track, rnum, horse, tier) in existing:
+                if (track, rnum, horse) in existing or (track, rnum, horse) in seen:
                     continue
+                seen.add((track, rnum, horse))
                 to_insert.append((
                     race_date, race_date, track, rnum, horse, horse, tier,
                     float(runner.get("odds", 0) or 0),
@@ -247,6 +272,11 @@ def cmd_record(race_date, conn=None):
     cur.close()
     if close_conn:
         conn.close()
+    # The stdout line is the contract with the cloud tips job: infra/jobs/
+    # handler.py parses it to record rows_written and to refuse a day that
+    # produced tips but recorded nothing. Keep its shape if you change it
+    # (handler._RECORDED_RE). The stderr line below stays for a person.
+    print(f"RECORDED {inserted} rows for {race_date} ({skipped} duplicates skipped)")
     print(f"  [SHADOW] Recorded {inserted} rows for {race_date} ({skipped} duplicates skipped)",
           file=sys.stderr)
     return inserted
