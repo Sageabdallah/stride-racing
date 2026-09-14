@@ -10,6 +10,11 @@ Three modes, same assertion engine:
                                              ANTHROPIC_API_KEY; costs tokens)
   python -m chat.eval_runner --live-url URL  POST each case to URL/api/chat
 
+A .env at the repository root is loaded if python-dotenv is installed, the
+same as chat.cli and chat.verify_readonly_role, so a STRIDE_CHAT_DATABASE_URL
+or ANTHROPIC_API_KEY set only there reaches --live-cli without being exported
+into the shell first.
+
 The assertion engine is a line-for-line port of assertCase() and
 unverifiedLinks() from the TypeScript runner, so a case passes or fails for
 the same reason here as there. Two things are deliberately different:
@@ -343,6 +348,8 @@ def main(argv=None) -> int:
     parser.add_argument("--corpus-dir", default=EVALS_DIR, help="Directory holding golden.jsonl, injection.jsonl, fixtures/.")
     parser.add_argument("--only", help="Comma-separated case ids.")
     args = parser.parse_args(argv)
+    from .config import load_dotenv_once
+    load_dotenv_once()
 
     if args.self_test:
         failed = self_test(args.corpus_dir)
