@@ -4,12 +4,22 @@
     python -m chat.cli --brain --json "How did our top pick at Flemington go on 2026-04-11?"
     python -m chat.cli --repl                      # one session, follow-ups work
     python -m chat.cli --tool get_stride_tips --args '{"date": "2026-04-12", "track": "Randwick"}'
+    python -m chat.cli --tool lookup_horse --args-file args.json
     python -m chat.cli --preflight                 # is ANTHROPIC_CHAT_MODEL callable?
 
 --tool runs one tool against the configured data plane and prints its
 envelope. It costs no Anthropic tokens, which makes it the way to prove the
 data plane before spending on a turn, and the shape of the chat-proof smoke
 in phase 3A: a tool call that returns rows is evidence; prose is not.
+
+--args-file reads the JSON from a file instead of the command line: use it
+on Windows PowerShell, where a value containing both spaces and embedded
+double quotes (any JSON object with a string value that has a space in it,
+e.g. a horse name) is not reliably passed through to a native process no
+matter how it is escaped -- different PowerShell versions mangle it
+differently, and no quoting convention is safe against all of them. Save
+the JSON in a plain text file (Notepad works; no shell escaping applies to
+file contents) and point --args-file at it instead.
 
 Environment: STRIDE_CHAT_DATABASE_URL (read-only role), STRIDE_EVIDENCE_BUCKET
 (optional; local artifacts otherwise), PUNTINGFORM_API_KEY (only when a tool
@@ -62,6 +72,9 @@ def main(argv=None) -> int:
     parser.add_argument("--repl", action="store_true", help="Interactive session.")
     parser.add_argument("--tool", help="Run one tool by name and print its envelope (no Anthropic call).")
     parser.add_argument("--args", default="{}", help="JSON arguments for --tool.")
+    parser.add_argument("--args-file", metavar="PATH",
+                        help="Read --tool's JSON arguments from this file instead of --args "
+                             "(the reliable option on Windows PowerShell).")
     parser.add_argument("--preflight", action="store_true", help="Check the chat model is callable.")
     parser.add_argument("--model", help="Model id for this run (default ANTHROPIC_CHAT_MODEL).")
     args = parser.parse_args(argv)
@@ -72,10 +85,23 @@ def main(argv=None) -> int:
     ctx = build_context()
 
     if args.tool:
+        if args.args_file and args.args != "{}":
+            print("pass --args or --args-file, not both", file=sys.stderr)
+            return 2
+        if args.args_file:
+            try:
+                with open(args.args_file, "r", encoding="utf-8") as fh:
+                    raw_args = fh.read()
+            except OSError as e:
+                print(f"could not read --args-file {args.args_file!r}: {e}", file=sys.stderr)
+                return 2
+        else:
+            raw_args = args.args
         try:
-            tool_args = json.loads(args.args)
+            tool_args = json.loads(raw_args)
         except ValueError as e:
-            print(f"--args is not JSON: {e}", file=sys.stderr)
+            source = f"--args-file {args.args_file!r}" if args.args_file else "--args"
+            print(f"{source} is not JSON: {e}", file=sys.stderr)
             return 2
         envelope = dispatch(ctx, args.tool, tool_args)
         print(json.dumps(envelope, indent=2, default=str))
