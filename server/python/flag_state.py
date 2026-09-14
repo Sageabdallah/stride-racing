@@ -27,16 +27,28 @@ Two independent halves, because they fail independently:
 because it knows one code shape: ``feature_liveness_audit.py`` credits a feature
 as served on evidence that only executes behind a default-off flag, and contains
 no reference to flags at all. This scanner has the same hazard in a different
-place — flags are read through three shapes, and a scanner that knows only the
-first misses **30 of the 74 flags that have a production reader** (measured),
-among them every ``STRIDE_CTX_MULT_*``, ``STRIDE_LEDGER_WRITE`` and
-``STRIDE_EV_GATE_AT_PRICE``:
+place — flags are read through five shapes, and a scanner that knows only the
+first missed **30 of the 74 flags that then had a production reader** — measured
+when shapes 2 and 3 were added, so read it as the case for parsing them and not
+as a current total, which has moved since — among them every
+``STRIDE_CTX_MULT_*``, ``STRIDE_LEDGER_WRITE`` and ``STRIDE_EV_GATE_AT_PRICE``:
 
   1. direct       ``os.environ.get("STRIDE_X", "false")`` / ``os.environ["STRIDE_X"]``
   2. helper       ``_flag_enabled("STRIDE_X")`` — the dominant idiom here
   3. const        ``F = "STRIDE_X"`` … ``os.environ.setdefault(F, "true")``
+  4. seq          ``for f in FLAGS: _flag_enabled(f)`` — FLAGS a module-level literal
+  5. fstring      ``_stride_flag(f"STRIDE_RACE_FILTER_{suffix}")`` over a rules table
 
-All three are parsed, every flag reports which shape found it, and ``--self-test``
+Shapes 4 and 5 name a flag the source never spells out in full. Missing them is
+not under-counting sites, it is reporting a live control as dead: all four
+``STRIDE_RACE_FILTER_*`` rule flags read ``n_read_sites: 0`` while setting one
+genuinely declines races, and two of them were dropped from the table entirely,
+because a name with no reader and no writer is not printed. A loop variable is
+resolved only against a *literal* collection; a name this scanner cannot reduce
+to literals is recorded by ``unresolved_dynamic`` and fails ``--self-test``
+rather than silently reading as dead.
+
+All five are parsed, every flag reports which shape found it, and ``--self-test``
 fails on a named flag per shape rather than on a count. A count would pass on
 exactly the regression it is meant to catch.
 
@@ -159,6 +171,41 @@ def _is_flag_name(text: str) -> bool:
     return bool(re.fullmatch(r"STRIDE_[A-Z0-9]+(?:_[A-Z0-9]+)*", text)) and len(text) > len(PREFIX)
 
 
+def _fstring_flag_head(node: ast.AST) -> bool:
+    """An f-string whose literal head could begin a STRIDE_ name.
+
+    The head must be flag-shaped all the way through, not merely start with
+    the prefix. ``f"STRIDE_ names the scanner could not resolve: {x}"`` is a
+    sentence, and accepting it made this scanner's own failure message look
+    like an unresolved flag read -- the sentence-as-flag mistake
+    ``_is_flag_name`` exists to prevent, re-made one level up.
+    """
+    if not (isinstance(node, ast.JoinedStr) and node.values):
+        return False
+    head = node.values[0]
+    return isinstance(head, ast.Constant) and isinstance(head.value, str) \
+        and bool(re.fullmatch(r"STRIDE_[A-Z0-9_]*", head.value))
+
+
+def _literal_strings(node: ast.AST) -> List[str]:
+    """The string literals in a collection display, or [] if it is not one.
+
+    A dict contributes its keys, because the repo's idiom for a family of
+    flags is a rules table keyed by suffix (``selection_policy`` 's
+    ``RACE_FILTER_RULES``). Non-string members are skipped rather than
+    disqualifying the collection: ``{"MAIDEN": (...), **extra}`` still tells
+    us about MAIDEN.
+    """
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        elts = list(node.elts)
+    elif isinstance(node, ast.Dict):
+        elts = [k for k in node.keys if k is not None]
+    else:
+        return []
+    return [e.value for e in elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+
+
 def discover_helpers(repo: Path = REPO) -> Dict[str, List[str]]:
     """Functions that turn a flag name into its value, and the default each uses.
 
@@ -198,7 +245,8 @@ def discover_helpers(repo: Path = REPO) -> Dict[str, List[str]]:
 
 
 def _scan_module(path: Path, rel: str, out: Dict[str, Dict[str, Any]],
-                 helpers: Dict[str, List[str]]) -> None:
+                 helpers: Dict[str, List[str]],
+                 unresolved: Optional[List[str]] = None) -> None:
     """Record every read and write of a STRIDE_* flag in one module.
 
     Only the shapes that actually resolve a flag count. A call is a read when
@@ -215,12 +263,103 @@ def _scan_module(path: Path, rel: str, out: Dict[str, Dict[str, Any]],
         return
 
     const_names: Dict[str, str] = {}
+    const_seqs: Dict[str, List[str]] = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
-                and isinstance(node.value.value, str) and _is_flag_name(node.value.value):
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Name):
-                    const_names[tgt.id] = node.value.value
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str) \
+                and _is_flag_name(node.value.value):
+            for name in targets:
+                const_names[name] = node.value.value
+        else:
+            members = _literal_strings(node.value)
+            if members:
+                for name in targets:
+                    const_seqs[name] = members
+
+    # Shape 5 needs a name the source never spells out. `race_type_filter`
+    # reads four live flags as f"STRIDE_RACE_FILTER_{suffix}" over a
+    # module-level rules table, and every one reported zero read sites while
+    # setting it genuinely declines races. Binding a loop variable to the
+    # literal collection it iterates recovers the names the interpreter would
+    # build. Anything not reducible to literals is NOT guessed at -- it is
+    # recorded in `unresolved`, because a flag the scanner cannot resolve and
+    # does not mention is indistinguishable from one nothing reads.
+    binds: Dict[str, List[Any]] = {}      # name -> [(lo, hi, values, origin)]
+
+    def _seq_of(it: ast.AST) -> Optional[List[str]]:
+        if isinstance(it, ast.Name):
+            return const_seqs.get(it.id)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) \
+                and it.func.attr in ("items", "keys") and isinstance(it.func.value, ast.Name):
+            return const_seqs.get(it.func.value.id)
+        return None
+
+    def _bind(target: ast.AST, values: List[str], lo: int, hi: int, origin: str) -> None:
+        # `for suffix, (...) in TABLE.items()` binds the key in position 0.
+        if isinstance(target, ast.Tuple):
+            target = target.elts[0] if target.elts else target
+        if isinstance(target, ast.Name):
+            binds.setdefault(target.id, []).append((lo, hi, values, origin))
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            values = _seq_of(node.iter)
+            if values:
+                _bind(node.target, values, node.lineno,
+                      getattr(node, "end_lineno", node.lineno), "seq")
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for gen in node.generators:
+                values = _seq_of(gen.iter)
+                if values:
+                    _bind(gen.target, values, node.lineno,
+                          getattr(node, "end_lineno", node.lineno), "seq")
+
+    def _bound(name: str, line: int) -> Optional[Any]:
+        """The innermost binding of `name` covering `line`, or None."""
+        best = None
+        for lo, hi, values, origin in binds.get(name, []):
+            if lo <= line <= hi and (best is None or (hi - lo) < best[0]):
+                best = (hi - lo, values, origin)
+        return (best[1], best[2]) if best else None
+
+    def _fstring(node: ast.JoinedStr, line: int) -> Optional[List[str]]:
+        """Every name this f-string can produce, or None if not all literal."""
+        parts: List[List[str]] = []
+        for piece in node.values:
+            if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                parts.append([piece.value])
+            elif isinstance(piece, ast.FormattedValue) and isinstance(piece.value, ast.Name):
+                found = _bound(piece.value.id, line)
+                if found is None:
+                    return None
+                parts.append(found[0])
+            else:
+                return None
+        built = [""]
+        for part in parts:
+            built = [a + b for a in built for b in part]
+            if len(built) > 64:      # a family this wide is not a flag table
+                return None
+        return built
+
+    # `flag = f"STRIDE_RACE_FILTER_{suffix}"` then `_stride_flag(flag)`: the
+    # call's argument is a plain Name, so the f-string has to be followed to
+    # the variable it lands in before the call can be resolved.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name) \
+                and isinstance(node.value, ast.JoinedStr):
+            names = _fstring(node.value, node.lineno)
+            if names:
+                enclosing = [(lo, hi) for entries in binds.values()
+                             for lo, hi, _v, _o in entries if lo <= node.lineno <= hi]
+                lo, hi = min(enclosing, key=lambda s: s[1] - s[0]) if enclosing else \
+                    (node.lineno, getattr(tree, "end_lineno", node.lineno) or node.lineno)
+                binds.setdefault(node.targets[0].id, []).append((lo, hi, names, "fstring"))
+            elif _fstring_flag_head(node.value) and unresolved is not None:
+                unresolved.append(f"{rel}:{node.lineno}")
 
     # Test code reads flags to assert on them, and pops them first to prove the
     # default. Letting those sites contribute to "the code default" invents
@@ -267,31 +406,51 @@ def _scan_module(path: Path, rel: str, out: Dict[str, Dict[str, Any]],
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node.args:
             first = node.args[0]
-            if isinstance(first, ast.Constant) and isinstance(first.value, str) \
-                    and _is_flag_name(first.value):
-                flag, via_const = first.value, False
-            elif isinstance(first, ast.Name) and first.id in const_names:
-                flag, via_const = const_names[first.id], True
-            else:
-                continue
-
             fname = node.func.attr if isinstance(node.func, ast.Attribute) else (
                 node.func.id if isinstance(node.func, ast.Name) else "")
             kind = _env_accessor(node.func)
+            # A mention is not a read, and an unresolved mention is not a
+            # missing reader: print(f"STRIDE_X_{n} ignored") resolves nothing
+            # and needs nothing resolved.
+            is_read_call = kind is not None or fname in helpers
+            origin = None
+            if isinstance(first, ast.Constant) and isinstance(first.value, str) \
+                    and _is_flag_name(first.value):
+                flags, via_const = [first.value], False
+            elif isinstance(first, ast.Name) and first.id in const_names:
+                flags, via_const = [const_names[first.id]], True
+            elif isinstance(first, ast.Name) \
+                    and (found := _bound(first.id, node.lineno)) is not None:
+                values, origin = found
+                flags, via_const = [v for v in values if _is_flag_name(v)], False
+            elif isinstance(first, ast.JoinedStr):
+                built = _fstring(first, node.lineno)
+                if built is None:
+                    if is_read_call and _fstring_flag_head(first) and unresolved is not None:
+                        unresolved.append(f"{rel}:{node.lineno}")
+                    continue
+                flags, via_const, origin = [v for v in built if _is_flag_name(v)], False, "fstring"
+            else:
+                continue
+            if not flags:
+                continue
 
-            if kind == "write":
-                record_write(flag, node.lineno)
-            elif kind == "read":
-                # No second argument is not the same as a required key:
-                # `environ.get(x)` yields None and the caller supplies the
-                # fallback (roi_stats.commission_rate_from_env takes it as a
-                # parameter). Only a subscript actually raises when unset.
-                dflt = _literal(node.args[1]) if len(node.args) > 1 else "<none inline>"
-                record_read(flag, node.lineno, dflt, "const" if via_const else "direct")
-            elif fname in helpers:
-                dflts = helpers[fname]
-                dflt = dflts[0] if len(dflts) == 1 else "|".join(dflts)
-                record_read(flag, node.lineno, dflt, f"helper:{fname}")
+            for flag in flags:
+                if kind == "write":
+                    record_write(flag, node.lineno)
+                elif kind == "read":
+                    # No second argument is not the same as a required key:
+                    # `environ.get(x)` yields None and the caller supplies the
+                    # fallback (roi_stats.commission_rate_from_env takes it as a
+                    # parameter). Only a subscript actually raises when unset.
+                    dflt = _literal(node.args[1]) if len(node.args) > 1 else "<none inline>"
+                    shape = origin or ("const" if via_const else "direct")
+                    record_read(flag, node.lineno, dflt, shape)
+                elif fname in helpers:
+                    dflts = helpers[fname]
+                    dflt = dflts[0] if len(dflts) == 1 else "|".join(dflts)
+                    shape = f"{origin}:{fname}" if origin else f"helper:{fname}"
+                    record_read(flag, node.lineno, dflt, shape)
             # Anything else (print, raise, log) mentions the name; it does not read it.
 
         elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) \
@@ -313,16 +472,31 @@ def scan_readers(repo: Path = REPO,
         return _SCAN_CACHE[cache_key]
     helpers = discover_helpers(repo) if helpers is None else helpers
     out: Dict[str, Dict[str, Any]] = {}
+    unresolved: List[str] = []
     for path in sorted(repo.rglob("*.py")):
         if ".git" in path.parts or "__pycache__" in path.parts:
             continue
-        _scan_module(path, str(path.relative_to(repo)), out, helpers)
+        _scan_module(path, str(path.relative_to(repo)), out, helpers, unresolved)
+    _SCAN_CACHE[f"unresolved::{repo}"] = sorted(set(unresolved))
     for rec in out.values():
         rec["defaults"] = sorted(rec["defaults"])
         rec["shapes"] = sorted(rec["shapes"])
         rec["writers"] = sorted(set(rec["writers"]))
     _SCAN_CACHE[cache_key] = out
     return out
+
+
+def unresolved_dynamic(repo: Path = REPO) -> List[str]:
+    """Sites building a STRIDE_ name the scanner could not reduce to literals.
+
+    Empty is the only acceptable value and --self-test enforces it. A site
+    here reads a flag under a name this scanner cannot name, so the flag gets
+    no read site and reads as dead -- the failure that hid four live
+    race filters behind `n_read_sites: 0`. Resolve it by giving the name a
+    literal source, or teach the resolver the new shape; do not silence it.
+    """
+    scan_readers(repo)
+    return _SCAN_CACHE.get(f"unresolved::{repo}", [])
 
 
 def mentioned_names(repo: Path = REPO, code_only: bool = True) -> Set[str]:
@@ -591,6 +765,7 @@ def build_report(secret_values: Optional[Dict[str, str]] = None,
             "deliverable_but_unread": len(unread),
         },
         "secret_stride_keys": sorted(in_secret),
+        "dynamic_unresolved": unresolved_dynamic(),
         "no_delivery_path": sorted(gated),
         "deliverable_but_unread": sorted(unread),
         "flags": flags,
@@ -614,6 +789,13 @@ def render(report: Dict[str, Any], only_gated: bool = False) -> str:
         for name, src in sorted(report["delivery_sources"].items()):
             if not src["available"]:
                 lines.append(f"***   {name}: {src['path']}")
+        lines.append("")
+    if report.get("dynamic_unresolved"):
+        lines += ["*** STRIDE_ NAMES BUILT AT RUNTIME THAT COULD NOT BE RESOLVED.",
+                  "*** Each reads a flag under a name this scan cannot record, so",
+                  "*** that flag reads as having no reader when it has one:"]
+        for site in report["dynamic_unresolved"]:
+            lines.append(f"***   {site}")
         lines.append("")
     c = report["counts"]
     lines.append(
@@ -691,6 +873,32 @@ def self_test() -> int:
     want("STRIDE_RENORMALISE_FIELD", "shape 2: read only via _flag_enabled(...)")
     want("STRIDE_LEDGER_WRITE", "shape 2: read only via _stride_flag(...)")
 
+    def want_shape(flag: str, shape: str, why: str) -> None:
+        """Assert the shape, not just the flag.
+
+        STRIDE_CTX_MULT_BIAS is read through shape 2 as well, so a presence
+        check passes with shape 4 completely broken -- the count-shaped
+        assertion this scanner exists to avoid.
+        """
+        rec = readers.get(flag)
+        if not rec or not any(s["shape"] == shape for s in rec["sites"]):
+            failures.append(f"MISSED {flag} via {shape} — {why}")
+
+    want_shape("STRIDE_CTX_MULT_BIAS", "seq:_flag_enabled",
+               "shape 4: iterated over the module-level _CTX_MULT_FLAGS tuple")
+    want_shape("STRIDE_RACE_FILTER_MAIDEN", "fstring:_stride_flag",
+               "shape 5: f-string over the RACE_FILTER_RULES table")
+    want_shape("STRIDE_RACE_FILTER_HEAVY_GOING", "fstring:_stride_flag",
+               "shape 5: has no literal spelling anywhere, so nothing else finds it")
+
+    stranded = unresolved_dynamic()
+    if stranded:
+        failures.append(
+            f"STRIDE_ names built at runtime that the scanner could not resolve: "
+            f"{stranded}. Each reads a flag under a name nothing records, so it "
+            f"reports zero readers and is indistinguishable from a dead control. "
+            f"Give the name a literal source, or teach the resolver the shape.")
+
     handler = handler_setters()
     if "STRIDE_CTX_MULT_DIAG" not in handler:
         failures.append("MISSED STRIDE_CTX_MULT_DIAG as an image setter — "
@@ -755,8 +963,8 @@ def self_test() -> int:
     if failures:
         print(f"{len(failures)} self-test failure(s)", file=sys.stderr)
         return 1
-    print("flag_state self-test: OK (4 read shapes, image setter, secret identity, "
-          "delivery verdicts, scope honesty)")
+    print("flag_state self-test: OK (6 read shapes, runtime-built names resolved, "
+          "image setter, secret identity, delivery verdicts, scope honesty)")
     return 0
 
 
