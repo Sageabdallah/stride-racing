@@ -376,6 +376,29 @@ def _scan_module(path: Path, rel: str, out: Dict[str, Dict[str, Any]],
             elif _fstring_flag_head(node.value) and unresolved is not None:
                 unresolved.append(f"{rel}:{node.lineno}")
 
+    # A name rebound inside its loop stops meaning what the loop bound it to.
+    # Without this, `flag = f"STRIDE_X_{s}"` ... `flag = other` ... read(flag)
+    # credits the second read to the table's names -- inventing a site, which
+    # is the failure the conversion/format-spec guard above also exists to
+    # avoid. Truncate the binding at the first unresolvable rebinding instead
+    # of guessing; the later read then resolves to nothing, like any other
+    # variable whose value the source does not determine.
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        entries = binds.get(node.targets[0].id)
+        if not entries:
+            continue
+        if isinstance(node.value, ast.JoinedStr) \
+                and _fstring(node.value, node.lineno) is not None:
+            continue                      # the resolvable assignment itself
+        binds[node.targets[0].id] = [
+            (lo, min(hi, node.lineno - 1), values, origin)
+            if lo <= node.lineno <= hi else (lo, hi, values, origin)
+            for lo, hi, values, origin in entries
+        ]
+
     # Test code reads flags to assert on them, and pops them first to prove the
     # default. Letting those sites contribute to "the code default" invents
     # disagreements: feature_interactions.py's --self-test asserts the unset

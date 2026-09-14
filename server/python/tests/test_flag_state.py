@@ -263,6 +263,27 @@ def run():
     assert len(stranded) == 2, f"both sites must be reported, got {stranded}"
 
 
+def test_rebinding_inside_the_loop_ends_the_binding(tmp_path):
+    """A name rebound to something unknowable stops meaning what the loop
+    bound it to. Crediting the later read to the table's names would invent a
+    site, and a site that does not exist is worse than one that is missed --
+    this report is what says whether a written fix is live."""
+    readers, _ = _probe(tmp_path, '''
+RULES = {"MAIDEN": 1, "BIG_FIELD": 2}
+
+
+def run(other):
+    for s in RULES:
+        flag = f"@F@_{s}"
+        _flag_enabled(flag)
+        flag = other
+        _flag_enabled(flag)
+''')
+    for suffix in ("MAIDEN", "BIG_FIELD"):
+        sites = readers[f"{_FX}_{suffix}"]["sites"]
+        assert len(sites) == 1, f"expected only the pre-rebinding read, got {sites}"
+
+
 def test_constant_fstring_is_treated_as_a_named_constant(tmp_path):
     """`F = f"STRIDE_X"` has nothing to substitute: shape 3 wearing an f
     prefix. Scoping it to a loop span binds it to its own line and loses every
