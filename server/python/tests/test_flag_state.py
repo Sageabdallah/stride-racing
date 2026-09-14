@@ -13,6 +13,7 @@ os.environ.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -111,6 +112,48 @@ def test_finds_const_mediated_setter():
     assert setters["STRIDE_CTX_MULT_DIAG"], "no setter site recorded"
 
 
+def test_finds_sequence_iterated_reads(readers):
+    """Shape 4: ``for f in _CTX_MULT_FLAGS: _flag_enabled(f)``.
+
+    run_tips_pipeline records which context multipliers were on by iterating a
+    module-level tuple of flag names. The name is never a call argument the
+    source spells out, so shapes 1-3 see nothing at that site.
+    """
+    for flag in ("STRIDE_CTX_MULT_FITNESS", "STRIDE_CTX_MULT_BIAS",
+                 "STRIDE_CTX_MULT_JOCKEY"):
+        assert flag in readers, f"{flag} is read by iteration and was missed"
+        assert any(s["shape"].startswith("seq:") for s in readers[flag]["sites"]), \
+            f"{flag} has no site attributed to the iterated-sequence shape"
+
+
+def test_finds_fstring_built_reads(readers):
+    """Shape 5: ``_stride_flag(f"STRIDE_RACE_FILTER_{suffix}")`` over a table.
+
+    These four spell their own names only at runtime. Before the resolver
+    learned the shape every one reported ``n_read_sites: 0`` while setting one
+    genuinely declines races.
+    """
+    for flag in ("STRIDE_RACE_FILTER_MAIDEN", "STRIDE_RACE_FILTER_BIG_FIELD",
+                 "STRIDE_RACE_FILTER_SMALL_FIELD", "STRIDE_RACE_FILTER_HEAVY_GOING"):
+        assert flag in readers, f"{flag} is built at runtime and was missed"
+        assert any(s["shape"].startswith("fstring:") for s in readers[flag]["sites"]), \
+            f"{flag} has no site attributed to the f-string shape"
+
+
+def test_live_control_is_never_rendered_as_dead(report):
+    """The table drops a name with no reader and no writer.
+
+    That is how STRIDE_RACE_FILTER_SMALL_FIELD and _HEAVY_GOING disappeared
+    from the operator-facing report while `race_type_filter` read both on
+    every race. Absence from the table is the property that actually failed,
+    so assert on the rendered text and not only on the record.
+    """
+    table = fs.render(report)
+    for flag in ("STRIDE_RACE_FILTER_SMALL_FIELD", "STRIDE_RACE_FILTER_HEAVY_GOING"):
+        assert report["flags"][flag]["n_read_sites"], f"{flag} reports no reader"
+        assert flag in table, f"{flag} is read at runtime but absent from the table"
+
+
 # --------------------------------------------------------------------------
 # Precision — the scanner must not invent flags
 # --------------------------------------------------------------------------
@@ -122,6 +165,151 @@ def test_rejects_sentences_that_start_with_the_prefix():
     assert not fs._is_flag_name("STRIDE_")
     assert not fs._is_flag_name("STRIDE_lowercase")
     assert fs._is_flag_name("STRIDE_EV_GATE_AT_PRICE")
+
+
+_PROBE = '''import os
+
+
+def _flag_enabled(name, default="false"):
+    return os.environ.get(name, default) == "true"
+'''
+
+
+# Fixture flag names are assembled, never written whole. mentioned_names()
+# regex-scans every .py in the repo, so a fixture flag spelled out in this file
+# would enter the real report as a control that does not exist -- the phantom
+# this module exists to report on. Writing them out moved names_seen 94 -> 102.
+_FX = "STRIDE" + "_FIXTURE"
+
+
+def _probe(tmp_path, body: str):
+    (tmp_path / "probe.py").write_text(
+        _PROBE + body.replace("@F@", _FX), encoding="utf-8")
+    fs.scan_readers(tmp_path)
+    return fs.scan_readers(tmp_path), fs.unresolved_dynamic(tmp_path)
+
+
+def test_resolver_expands_a_module_level_literal_table(tmp_path):
+    """Shape 5 against a synthetic module, so the guarantee does not depend on
+    selection_policy keeping its current shape."""
+    readers, stranded = _probe(tmp_path, '''
+RULES = {"ALPHA": 1, "BETA": 2}
+
+
+def run():
+    for suffix in RULES:
+        flag = f"@F@_{suffix}"
+        _flag_enabled(flag)
+''')
+    assert f"{_FX}_ALPHA" in readers and f"{_FX}_BETA" in readers
+    assert stranded == []
+
+
+def test_unresolvable_runtime_name_is_recorded_not_dropped(tmp_path):
+    """A name that cannot be reduced to literals must be reported.
+
+    Silence is the original defect: the flag gets no read site and is
+    indistinguishable from one nothing reads. --self-test fails on a non-empty
+    list, so the scanner cannot quietly go blind on a shape it has not learnt.
+    """
+    _, stranded = _probe(tmp_path, '''
+def run(names):
+    for n in names:                     # not a literal collection
+        _flag_enabled(f"@F@_{n}")
+''')
+    assert stranded and all(s.startswith("probe.py:") for s in stranded)
+
+
+def test_fstring_sentence_is_not_a_flag_name_head():
+    """`f"STRIDE_ names ... {x}"` is a sentence, not the start of a flag name.
+
+    The literal head must be flag-shaped all the way through. Accepting any
+    head that merely starts with the prefix made this scanner's own failure
+    message register as an unresolved flag read -- the mistake
+    `test_rejects_sentences_that_start_with_the_prefix` guards one level down.
+
+    Asserted on the predicate directly. Routed through a scan it would be a
+    proxy: the `is_read_call` gate suppresses a sentence in a `print` whether
+    or not the head test is right, so the mutation would pass.
+    """
+    def head(src):
+        return ast.parse(src.replace("@F@", _FX), mode="eval").body
+
+    assert not fs._fstring_flag_head(head('f"STRIDE_ names unresolved: {x}"'))
+    assert not fs._fstring_flag_head(head('f"@F@ are {x}"'))
+    assert not fs._fstring_flag_head(head('f"{x}_@F@_TAIL"'))
+    assert not fs._fstring_flag_head(head('"@F@_PLAIN"'))
+    assert fs._fstring_flag_head(head('f"STRIDE_RACE_FILTER_{suffix}"'))
+    assert fs._fstring_flag_head(head('f"STRIDE_CTX_MULT_{name}"'))
+
+
+def test_conversion_and_format_spec_do_not_invent_a_name(tmp_path):
+    """`f"STRIDE_X_{s!r}"` builds STRIDE_X_'MAIDEN' at runtime, and `{s:>10}`
+    pads to width. Substituting the bare value would record a flag name that is
+    never read -- inventing a read site, which is worse than missing one,
+    because this report is what says whether a written fix is live. Neither is
+    resolvable, so both belong in `unresolved`."""
+    readers, stranded = _probe(tmp_path, '''
+RULES = {"MAIDEN": 1}
+
+
+def run():
+    for s in RULES:
+        _flag_enabled(f"@F@C_{s!r}")
+        _flag_enabled(f"@F@S_{s:>10}")
+''')
+    invented = [k for k in readers if k.startswith(_FX)]
+    assert invented == [], f"invented names the interpreter never builds: {invented}"
+    assert len(stranded) == 2, f"both sites must be reported, got {stranded}"
+
+
+def test_rebinding_inside_the_loop_ends_the_binding(tmp_path):
+    """A name rebound to something unknowable stops meaning what the loop
+    bound it to. Crediting the later read to the table's names would invent a
+    site, and a site that does not exist is worse than one that is missed --
+    this report is what says whether a written fix is live."""
+    readers, _ = _probe(tmp_path, '''
+RULES = {"MAIDEN": 1, "BIG_FIELD": 2}
+
+
+def run(other):
+    for s in RULES:
+        flag = f"@F@_{s}"
+        _flag_enabled(flag)
+        flag = other
+        _flag_enabled(flag)
+''')
+    for suffix in ("MAIDEN", "BIG_FIELD"):
+        sites = readers[f"{_FX}_{suffix}"]["sites"]
+        assert len(sites) == 1, f"expected only the pre-rebinding read, got {sites}"
+
+
+def test_constant_fstring_is_treated_as_a_named_constant(tmp_path):
+    """`F = f"STRIDE_X"` has nothing to substitute: shape 3 wearing an f
+    prefix. Scoping it to a loop span binds it to its own line and loses every
+    later read with no record -- a silent miss, the failure this resolver
+    exists to remove."""
+    readers, stranded = _probe(tmp_path, '''
+PREFIXED = f"@F@_MODLEVEL"
+
+
+def run():
+    _flag_enabled(PREFIXED)
+''')
+    assert f"{_FX}_MODLEVEL" in readers, "constant f-string read was lost"
+    assert readers[f"{_FX}_MODLEVEL"]["sites"]
+    assert stranded == []
+
+
+def test_mention_of_a_flag_shaped_fstring_is_not_a_read(tmp_path):
+    """A flag-shaped head in a call that reads nothing resolves nothing and
+    needs nothing resolved. Recording it would invent work on a print."""
+    _, stranded = _probe(tmp_path, '''
+def run(names):
+    for n in names:
+        print(f"@F@_{n} ignored")
+''')
+    assert stranded == []
 
 
 def test_helper_discovery_requires_an_os_environ_receiver():
