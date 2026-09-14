@@ -21,6 +21,10 @@ and no table behind.
 
 Offline: the checks are data (CHECKS), the executor takes any connection
 with cursor(), and chat/tests cover the verdict logic with a fake.
+
+A .env at the repository root is loaded if python-dotenv is installed
+(same as chat.cli), so STRIDE_CHAT_DATABASE_URL set there is picked up
+without exporting it into the shell first.
 """
 
 from __future__ import annotations
@@ -183,6 +187,8 @@ def main(argv=None) -> int:
     parser.add_argument("--role", default=DEFAULT_ROLE, help="Expected current_user.")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    from .config import load_dotenv_once
+    load_dotenv_once()
     url = args.url or os.environ.get("STRIDE_CHAT_DATABASE_URL", "").strip()
     if not url:
         print("STRIDE_CHAT_DATABASE_URL is not set (or pass --url).", file=sys.stderr)
