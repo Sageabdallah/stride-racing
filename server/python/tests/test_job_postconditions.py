@@ -170,12 +170,122 @@ def test_tips_pipeline_fails_when_no_tips_file(handler, monkeypatch, tmp_path):
     assert "absent after a clean exit" in str(e.value)
 
 
-def test_tips_pipeline_passes_with_tips_file(handler, monkeypatch, tmp_path):
+def _tips_day(handler, monkeypatch, tmp_path):
+    """A day that produced a tips file, every subprocess neutralised."""
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
     os.makedirs(tmp_path / "racecards")
     (tmp_path / "racecards" / f"tips_{handler._today()}.json").write_text("{}")
-    handler.job_tips_pipeline()   # must not raise
+
+
+def _record_says(handler, monkeypatch, line, calls=None):
+    """Answer shadow_pl_tracker.py's record with `line`; every other script
+    stays neutralised. `calls` collects (script, *args) in order if given."""
+    def run_ok(script, *a, **k):
+        if calls is not None:
+            calls.append((script,) + a)
+        return line if script == "shadow_pl_tracker.py" else ""
+    monkeypatch.setattr(handler, "_run_ok", run_ok)
+
+
+def test_tips_pipeline_passes_with_tips_file(handler, monkeypatch, tmp_path):
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 612 rows for {handler._today()} (0 duplicates skipped)")
+    out = handler.job_tips_pipeline()   # must not raise
+    assert out["rows_written"] == 612
+
+
+def test_tips_pipeline_records_tiers_after_the_tips_are_relayed(handler, monkeypatch,
+                                                                tmp_path):
+    """The frontend's tips must be on S3 before anything that can still fail
+    runs. Checked by sequence, not by reading the code."""
+    _tips_day(handler, monkeypatch, tmp_path)
+    events = []
+    monkeypatch.setattr(handler, "_sync_up",
+                        lambda *a, **k: events.append(("sync_up",) + a))
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 5 rows for {handler._today()} (0 duplicates skipped)",
+                 calls=events)
+    handler.job_tips_pipeline()
+    names = [e[0] for e in events]
+    assert names.index("sync_up") < names.index("shadow_pl_tracker.py")
+    assert ("shadow_pl_tracker.py", "record", handler._today()) in events
+
+
+def test_tips_pipeline_fails_when_the_record_step_recorded_nothing(handler, monkeypatch,
+                                                                    tmp_path):
+    """The silent no-op this wiring exists to refuse: a tips file, and no row
+    in stride_tip_results to show for it."""
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 0 rows for {handler._today()} (0 duplicates skipped)")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_tips_pipeline()
+    assert "stride_tip_results" in str(e.value)
+    assert "0 rows" in str(e.value)
+
+
+def test_tips_pipeline_accepts_a_rerun_of_a_recorded_day(handler, monkeypatch, tmp_path):
+    """Zero inserted with duplicates skipped is a day already recorded, not
+    a day recorded as nothing."""
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 0 rows for {handler._today()} (612 duplicates skipped)")
+    out = handler.job_tips_pipeline()
+    assert out["rows_written"] == 0
+
+
+def test_tips_pipeline_fails_when_the_record_step_says_nothing(handler, monkeypatch,
+                                                                tmp_path):
+    """A record script whose summary line changed shape must not pass as a
+    recorded day. Unknown is treated as nothing."""
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 "  [SHADOW] Recorded 12 rows for today (0 duplicates skipped)")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_tips_pipeline()
+    assert "no RECORDED summary" in str(e.value)
+
+
+def test_tips_pipeline_fails_when_the_record_step_names_another_date(handler,
+                                                                      monkeypatch,
+                                                                      tmp_path):
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 "RECORDED 12 rows for 2001-01-01 (0 duplicates skipped)")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_tips_pipeline()
+    assert "2001-01-01" in str(e.value)
+
+
+def test_record_prints_the_line_the_handler_parses(handler, monkeypatch, capsys):
+    """Both ends of the contract in one test: the line the tracker prints is
+    the line the handler's regex matches, field for field. A faked cursor,
+    so it says nothing about the SQL; the live proof is the first tips run."""
+    import shadow_pl_tracker as spt
+
+    class _Cur:
+        def execute(self, *a, **k):
+            pass
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    monkeypatch.setattr(spt, "_load_tips", lambda d: [])
+    assert spt.cmd_record("2026-09-14", conn=_Conn()) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines()
+             if l.startswith("RECORDED")]
+    assert len(lines) == 1, lines
+    m = handler._RECORDED_RE.search(lines[0])
+    assert m is not None and m.groups() == ("0", "2026-09-14", "0")
 
 
 def test_consensus_fails_when_no_consensus_file(handler, monkeypatch, tmp_path):
@@ -1167,20 +1277,18 @@ def test_tips_pipeline_defaults_the_ctx_mult_diag_on(handler, monkeypatch, tmp_p
     """The realised context-multiplier distribution is recorded into the
     artifact under STRIDE_CTX_MULT_DIAG; the cloud tips job turns it on
     unless the environment says otherwise (audit 2026-09-06 H3/H4)."""
-    _neutralise_io(handler, monkeypatch)
-    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
-    os.makedirs(tmp_path / "racecards")
-    (tmp_path / "racecards" / f"tips_{handler._today()}.json").write_text("{}")
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 1 rows for {handler._today()} (0 duplicates skipped)")
     monkeypatch.delenv("STRIDE_CTX_MULT_DIAG", raising=False)
     handler.job_tips_pipeline()
     assert os.environ.get("STRIDE_CTX_MULT_DIAG") == "true"
 
 
 def test_tips_pipeline_respects_an_explicit_ctx_mult_diag_off(handler, monkeypatch, tmp_path):
-    _neutralise_io(handler, monkeypatch)
-    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
-    os.makedirs(tmp_path / "racecards")
-    (tmp_path / "racecards" / f"tips_{handler._today()}.json").write_text("{}")
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 1 rows for {handler._today()} (0 duplicates skipped)")
     monkeypatch.setenv("STRIDE_CTX_MULT_DIAG", "false")
     handler.job_tips_pipeline()
     assert os.environ.get("STRIDE_CTX_MULT_DIAG") == "false"
@@ -1196,3 +1304,156 @@ def test_tips_proof_defaults_the_ctx_mult_diag_on(handler, monkeypatch):
     # the proof's write switches are untouched by the addition
     assert os.environ.get("STRIDE_LEDGER_WRITE") == "false"
     assert os.environ.get("STRIDE_MC_AUDIT_WRITE") == "false"
+
+
+# ------------------------------------- stride_tip_results: the results side
+
+def _yesterday(handler):
+    from datetime import datetime, timedelta
+    return (datetime.now(handler.SYD).date() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _collector_says(handler, monkeypatch, status, calls=None):
+    """Answer stride_results_collector.py with a result JSON of `status`, the
+    way its main() prints one last on stdout; every other script stays
+    neutralised. `calls` collects (script, *args) in order if given."""
+    def run_ok(script, *a, **k):
+        if calls is not None:
+            calls.append((script,) + a)
+        if script == "stride_results_collector.py":
+            return "some stderr-ish chatter on stdout\n" + json.dumps(
+                {"status": status, "dates": list(a)}, indent=2)
+        return ""
+    monkeypatch.setattr(handler, "_run_ok", run_ok)
+
+
+def _results_day(handler, monkeypatch, tmp_path, tips_for=()):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    monkeypatch.setattr(handler, "_missed_days", lambda j, n: [])
+    os.makedirs(tmp_path / "racecards", exist_ok=True)
+    for d in tips_for:
+        (tmp_path / "racecards" / f"tips_{d}.json").write_text("{}")
+
+
+def test_collector_status_reads_the_last_json_object(handler):
+    assert handler._collector_status('[RESULTS] noise\n{\n  "status": "no_picks"\n}') == "no_picks"
+    assert handler._collector_status('{"status": "completed"}') == "completed"
+    assert handler._collector_status("") == ""
+    assert handler._collector_status("not json at all") == ""
+
+
+def test_results_collect_relays_the_tips_before_scoring_them(handler, monkeypatch,
+                                                              tmp_path):
+    """The collector reads racecards/tips_<date>.json from the task it runs
+    on, and a Fargate task starts empty. Without this relay Step 1 found no
+    tips, exited 0, and neither its scoring insert nor the shadow tracker's
+    settlement ran once in the cloud."""
+    _results_day(handler, monkeypatch, tmp_path)
+    events = []
+    monkeypatch.setattr(handler, "_sync_down",
+                        lambda rel, *a, **k: events.append(("sync_down", rel)))
+    _collector_says(handler, monkeypatch, "completed", calls=events)
+    handler.job_results_collect()
+    assert ("sync_down", "racecards") in events
+    first_collector = next(i for i, e in enumerate(events)
+                           if e[0] == "stride_results_collector.py")
+    assert events.index(("sync_down", "racecards")) < first_collector
+
+
+def test_results_collect_fails_when_a_relayed_tips_file_goes_unscored(handler,
+                                                                      monkeypatch,
+                                                                      tmp_path):
+    """no_tips with the file on the task means the collector read some other
+    path: the exact silent no-op the relay exists to end."""
+    _results_day(handler, monkeypatch, tmp_path,
+                 tips_for=(_yesterday(handler), handler._today()))
+    _collector_says(handler, monkeypatch, "no_tips")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_results_collect()
+    assert "no_tips" in str(e.value)
+    assert f"tips_{_yesterday(handler)}.json" in str(e.value)
+
+
+def test_results_collect_accepts_no_tips_when_nothing_was_relayed(handler,
+                                                                  monkeypatch,
+                                                                  tmp_path):
+    """A quiet day publishes no tips file; no_tips is then the truth."""
+    _results_day(handler, monkeypatch, tmp_path)
+    _collector_says(handler, monkeypatch, "no_tips")
+    out = handler.job_results_collect()      # must not raise
+    assert out["last_success_date"] == handler._today()
+
+
+def test_results_collect_accepts_a_zero_bet_card(handler, monkeypatch, tmp_path):
+    """no_picks: tips present, nothing scorable, shadow rows settled."""
+    _results_day(handler, monkeypatch, tmp_path,
+                 tips_for=(_yesterday(handler), handler._today()))
+    _collector_says(handler, monkeypatch, "no_picks")
+    handler.job_results_collect()            # must not raise
+
+
+def test_results_collect_unscored_today_is_still_soft(handler, monkeypatch,
+                                                      tmp_path):
+    """The today/yesterday asymmetry survives the new check: only today's
+    file is present and unscored, and today is non-fatal."""
+    _results_day(handler, monkeypatch, tmp_path, tips_for=(handler._today(),))
+    _collector_says(handler, monkeypatch, "no_tips")
+    handler.job_results_collect()            # must not raise
+
+
+# ------------------------------------- stride_tip_results: recovery path
+
+def test_tips_pipeline_record_failure_says_the_tips_already_shipped(handler,
+                                                                     monkeypatch,
+                                                                     tmp_path):
+    """The failure lands after the relay. Its text must say so, and name the
+    re-run that is safe, because the watch hint for this job says never
+    re-run it."""
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch, "")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_tips_pipeline()
+    msg = str(e.value)
+    assert "already relayed" in msg
+    assert "tip-results-record" in msg
+    assert "no RECORDED summary" in msg      # the cause is kept, not replaced
+
+
+def test_tip_results_record_is_dispatchable(handler):
+    assert handler.JOBS["tip-results-record"] is handler.job_tip_results_record
+
+
+def test_tip_results_record_refuses_without_a_relayed_tips_file(handler,
+                                                                 monkeypatch,
+                                                                 tmp_path):
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    with pytest.raises(RuntimeError) as e:
+        handler.job_tip_results_record()
+    assert "nothing to record" in str(e.value)
+
+
+def test_tip_results_record_relays_then_records_the_day(handler, monkeypatch,
+                                                         tmp_path):
+    _tips_day(handler, monkeypatch, tmp_path)
+    events = []
+    monkeypatch.setattr(handler, "_sync_down",
+                        lambda rel, *a, **k: events.append(("sync_down", rel)))
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 7 rows for {handler._today()} (605 duplicates skipped)",
+                 calls=events)
+    out = handler.job_tip_results_record()
+    assert out["rows_written"] == 7
+    assert events.index(("sync_down", "racecards")) < events.index(
+        ("shadow_pl_tracker.py", "record", handler._today()))
+
+
+def test_tip_results_record_keeps_the_zero_rows_refusal(handler, monkeypatch,
+                                                         tmp_path):
+    _tips_day(handler, monkeypatch, tmp_path)
+    _record_says(handler, monkeypatch,
+                 f"RECORDED 0 rows for {handler._today()} (0 duplicates skipped)")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_tip_results_record()
+    assert "stride_tip_results" in str(e.value)

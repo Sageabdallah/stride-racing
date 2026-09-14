@@ -159,10 +159,16 @@ WHERE race_date IS NULL
    OR edge_pct IS NULL
    OR collected_at IS NULL;
 
+-- 'PENDING' is the shadow tracker's unsettled state: shadow_pl_tracker.py's
+-- record writes every tier's rows at tip time and its results step settles
+-- them at night. Postgres validates existing rows on ADD CONSTRAINT, so a
+-- set without PENDING here fails the first night a recorded row is still
+-- unsettled. The two files must agree on this list;
+-- tests/test_stride_tip_results_contract.py pins them to each other.
 ALTER TABLE stride_tip_results DROP CONSTRAINT IF EXISTS stride_tip_results_result_check;
 ALTER TABLE stride_tip_results
     ADD CONSTRAINT stride_tip_results_result_check
-    CHECK (result IN ('WIN', 'PLACE', 'LOSS', 'SCRATCHED'));
+    CHECK (result IN ('WIN', 'PLACE', 'LOSS', 'SCRATCHED', 'PENDING'));
 
 CREATE INDEX IF NOT EXISTS idx_stride_tip_results_date ON stride_tip_results(race_date);
 CREATE INDEX IF NOT EXISTS idx_stride_tip_results_result ON stride_tip_results(result);
@@ -733,6 +739,51 @@ def build_summary(conn, tip_results: List[Dict], dates: List[str]) -> Dict:
 
 
 
+def tips_files_present(dates: List[str]) -> List[str]:
+    """The dates in `dates` whose tips file exists, in order."""
+    return [d for d in dates if (RACECARDS_DIR / f"tips_{d}.json").exists()]
+
+
+def settle_shadow_and_ledger(conn, dates: List[str]) -> Dict[str, int]:
+    """Steps 5b and 5c: settle the shadow tracker's PENDING rows and the
+    selection ledger's pending rows for `dates`.
+
+    Shared by the scored path and the zero-bet path. Until 2026-09-14 these
+    ran only when a BET or COVERAGE pick existed, so a card on which every
+    runner gated to NO_BET left the day's shadow rows PENDING forever.
+    """
+    out = {"shadow_matched": 0, "ledger_settled": 0}
+    print(f"\n[Step 5b] Matching shadow tracker results...", file=sys.stderr)
+    try:
+        from shadow_pl_tracker import cmd_results as shadow_cmd_results
+        for date in dates:
+            out["shadow_matched"] += (shadow_cmd_results(date) or 0)
+        print(f"  Shadow tracker: {out['shadow_matched']} rows matched",
+              file=sys.stderr)
+    except CONN_ERRORS:
+        raise
+    except Exception as e:
+        print(f"  Shadow matching failed (non-fatal): {e}", file=sys.stderr)
+
+    print(f"\n[Step 5c] Settling selection ledger rows...", file=sys.stderr)
+    try:
+        from selection_ledger import settle_pending_rows
+        for date in dates:
+            res = settle_pending_rows(conn, date) or {}
+            out["ledger_settled"] += res.get("settled") or 0
+            if res.get("reason") and "net_settlement" in str(res["reason"]):
+                # Missing migration: the loud warning is already emitted —
+                # once per run is enough, and every date would fail the same way.
+                break
+        print(f"  Selection ledger: {out['ledger_settled']} rows settled",
+              file=sys.stderr)
+    except CONN_ERRORS:
+        raise
+    except Exception as e:
+        print(f"  Ledger settlement failed (non-fatal): {e}", file=sys.stderr)
+    return out
+
+
 def collect_results(dates: List[str], parallel: bool = False,
                     skip_sectionals: bool = False,
                     skip_franking: bool = False,
@@ -748,8 +799,22 @@ def collect_results(dates: List[str], parallel: bool = False,
     print("\n[Step 1] Scanning tips files...", file=sys.stderr)
     tipped_races = find_tipped_races(dates)
     if not tipped_races:
-        print("  No tipped races found for these dates.", file=sys.stderr)
-        return {"status": "no_tips", "dates": dates}
+        present = tips_files_present(dates)
+        if not present:
+            print("  No tips files found for these dates.", file=sys.stderr)
+            return {"status": "no_tips", "dates": dates}
+        # Tips were published and none carried a BET or COVERAGE pick: a
+        # zero-bet card, a legitimate outcome and not a missing file. There
+        # is nothing to score, but the shadow tracker recorded every tier's
+        # rows at tip time and they still settle tonight.
+        print(f"  Tips present for {', '.join(present)} but no BET or "
+              f"COVERAGE picks; settling shadow and ledger rows only.",
+              file=sys.stderr)
+        with _db_phase() as conn:
+            ensure_table(conn)
+            settled = settle_shadow_and_ledger(conn, dates)
+        return {"status": "no_picks", "dates": dates, "tips_files": present,
+                **settled}
 
     with _db_phase() as conn:
         ensure_table(conn)
@@ -788,34 +853,7 @@ def collect_results(dates: List[str], parallel: bool = False,
         print(f"\n[Step 5] Scoring tip accuracy...", file=sys.stderr)
         tip_results = score_tip_accuracy(conn, tipped_races)
 
-        print(f"\n[Step 5b] Matching shadow tracker results...", file=sys.stderr)
-        try:
-            from shadow_pl_tracker import cmd_results as shadow_cmd_results
-            shadow_total = 0
-            for date in dates:
-                shadow_total += (shadow_cmd_results(date) or 0)
-            print(f"  Shadow tracker: {shadow_total} rows matched", file=sys.stderr)
-        except CONN_ERRORS:
-            raise
-        except Exception as e:
-            print(f"  Shadow matching failed (non-fatal): {e}", file=sys.stderr)
-
-        print(f"\n[Step 5c] Settling selection ledger rows...", file=sys.stderr)
-        try:
-            from selection_ledger import settle_pending_rows
-            ledger_settled = 0
-            for date in dates:
-                out = settle_pending_rows(conn, date) or {}
-                ledger_settled += out.get("settled") or 0
-                if out.get("reason") and "net_settlement" in str(out["reason"]):
-                    # Missing migration: the loud warning is already emitted —
-                    # once per run is enough, and every date would fail the same way.
-                    break
-            print(f"  Selection ledger: {ledger_settled} rows settled", file=sys.stderr)
-        except CONN_ERRORS:
-            raise
-        except Exception as e:
-            print(f"  Ledger settlement failed (non-fatal): {e}", file=sys.stderr)
+        settle_shadow_and_ledger(conn, dates)
 
     franking_summary = {"horses_recomputed": 0}
     if not skip_franking and needed:
