@@ -10,7 +10,7 @@ Every claim here names the evidence for it. "Built" means the code is on `main`.
 "Proved" means something ran and asserted on its own output. They are different
 words on purpose.
 
-Last updated 2026-09-13.
+Last updated 2026-09-14.
 
 ---
 
@@ -161,7 +161,11 @@ dates' rows are not shown rather than dropping them. Run #7 (`34756390730`,
 on the fix branch at `26808ce`, 12:11 UTC) is the evidence that the new SQL
 runs against the real schema: 38 of 38, `tool_errors: 0` on all 41 turns, and
 16 turns called `get_stride_tips`, every one of which ran the grouped
-calendar and the active-rows query, with 0 errors. The fix is PR #189.
+calendar and the active-rows query, with 0 errors. The fix is PR #189, merged
+2026-09-14 00:13 UTC; run #8 (`34792030150`, on `main` at `d4367b3`, 00:13 UTC)
+repeated it there: 38 of 38, `tool_errors: 0` on all 41 turns, 16
+`get_stride_tips` turns clean, all four legs live. `main` now carries prompt
+v3.2 and every fix this series made, and the last two runs on it are green.
 
 ## Running the phase 0 exit
 
@@ -231,6 +235,11 @@ evidence that answers are grounded.
   application code, not about the folder name.
 
 ## Changelog
+
+**2026-09-14, run #8.** PR #189 merged; `chat-eval` run #8 on `main`
+(`34792030150`, at `d4367b3`): 38 of 38, `tool_errors: 0`, 16 `get_stride_tips`
+turns clean. Nothing on the chat path is left open from run #1. Next is
+phase 2, the operator's two questions in §11.
 
 **2026-09-13, run #7.** The tips range defect fixed (PR #189): active rows
 only, a complete calendar per span, per-track-per-date caps. Run #7 on the

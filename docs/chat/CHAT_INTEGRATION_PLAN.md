@@ -600,7 +600,8 @@ month from its first 400 rows and counting superseded (`is_active = false`)
 runs, is fixed in PR #189: active rows only, a grouped calendar of every date
 and track in the span, and per-track-per-date caps under the payload backstop.
 Run #7 (`34756390730`, on that branch) executed 38 with 38 passed and
-`tool_errors: 0`.
+`tool_errors: 0`; run #8 (`34792030150`, on `main` at `d4367b3` after PR #189
+merged, 2026-09-14) repeated it: 38 of 38, `tool_errors: 0`.
 `docs/chat/HANDOVER.md` carries the evidence.
 
 The exit is the golden and
