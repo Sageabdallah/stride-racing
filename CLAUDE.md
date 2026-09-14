@@ -74,6 +74,9 @@ inferred from the archived V1 guide.
 The chatbot integration plan and its status are at
 [`docs/chat/CHAT_INTEGRATION_PLAN.md`](docs/chat/CHAT_INTEGRATION_PLAN.md); the
 chat's tool library is `server/python/chat/` (`python -m chat.cli --help`).
+[`docs/chat/HANDOVER.md`](docs/chat/HANDOVER.md) is that work's
+session-to-session state file: what is proved, what is blocked and on whom,
+and what the next session picks up. Read it before touching the chat.
 
 The full pipeline reference lives under `.claude/skills/` — `stride-full` for the
 system reference and model baselines, `stride-health` for health gates and retrain

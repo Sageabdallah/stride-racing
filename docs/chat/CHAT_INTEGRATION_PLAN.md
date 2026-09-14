@@ -1,6 +1,6 @@
 # STRIDE chatbot integration — plan
 
-Date: 2026-09-10; status updated 2026-09-13 (§13). Phase 0 is built and its
+Date: 2026-09-10; status updated 2026-09-14 (§13). Phase 0 is built and its
 live exit is dispatchable; phase 1 is applied and proved; phase 2 is the
 blocker and the operator owns it. Supersedes nothing; it
 sits between the audit at
@@ -534,7 +534,7 @@ Phase 2 cannot start without 1 and 2.
 
 ---
 
-## 13. Status, 2026-09-13
+## 13. Status, 2026-09-14
 
 Phases 0 and 1 (plan §6) are merged to `main` as PRs #179 and #180. Phase 1 is
 applied to Neon and proved. Nothing has touched AWS or `stride-app`.
@@ -600,7 +600,9 @@ month from its first 400 rows and counting superseded (`is_active = false`)
 runs, is fixed in PR #189: active rows only, a grouped calendar of every date
 and track in the span, and per-track-per-date caps under the payload backstop.
 Run #7 (`34756390730`, on that branch) executed 38 with 38 passed and
-`tool_errors: 0`.
+`tool_errors: 0`. PR #189 merged on 2026-09-14; run #8 (`34792030150`, on
+`main` at `d4367b3`) executed 38 with 38 passed, `tool_errors: 0` on every
+turn, 16 turns through `get_stride_tips`.
 `docs/chat/HANDOVER.md` carries the evidence.
 
 The exit is the golden and

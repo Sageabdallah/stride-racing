@@ -10,7 +10,7 @@ Every claim here names the evidence for it. "Built" means the code is on `main`.
 "Proved" means something ran and asserted on its own output. They are different
 words on purpose.
 
-Last updated 2026-09-13.
+Last updated 2026-09-14.
 
 ---
 
@@ -19,7 +19,7 @@ Last updated 2026-09-13.
 | Phase (plan §6) | State | Evidence |
 |---|---|---|
 | 0 — the tool library | **Built** | PR #179; 78 offline tests green, no credential, no network |
-| 0 — exit (live evals) | **Closed: run #6 on `main`, 38 of 38** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, 38/38, `main` at `d8cf80c`, v3.2, `tool_errors` 0 on all 41 turns) |
+| 0 — exit (live evals) | **Closed: run #6 on `main`, 38 of 38; re-proved by run #8 after PR #189** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, 38/38, `main` at `d8cf80c`, v3.2, `tool_errors` 0 on all 41 turns); run #8 (`34792030150`, 38/38, `main` at `d4367b3` after PR #189, v3.2, `tool_errors` 0 on all 41 turns) |
 | 1 — read-only role | **Closed, proved** | `apply-migration` run #6, 2026-09-13 05:35 UTC, on `40b698b` |
 | 2 — the fork decision | **BLOCKED — operator** | §11 questions 1 and 2, unanswered |
 | 3A — AWS | Not started, and must not be | §6: "Do not build AWS resources before this" |
@@ -161,7 +161,34 @@ dates' rows are not shown rather than dropping them. Run #7 (`34756390730`,
 on the fix branch at `26808ce`, 12:11 UTC) is the evidence that the new SQL
 runs against the real schema: 38 of 38, `tool_errors: 0` on all 41 turns, and
 16 turns called `get_stride_tips`, every one of which ran the grouped
-calendar and the active-rows query, with 0 errors. The fix is PR #189.
+calendar and the active-rows query, with 0 errors. The fix is PR #189, merged 2026-09-14 00:13 UTC. Run #8
+(`34792030150`, on `main` at `d4367b3`, 00:14 UTC) is the proof on `main`:
+38 of 38, `tool_errors: 0` on all 41 turns, every turn on v3.2, 16 turns
+through `get_stride_tips`, and the relay leg showing 55 races for 2026-09-12
+and no file for the two quiet days since.
+
+## Credential hygiene, unresolved
+
+Two secrets were pasted into the transcript of the session that created the
+role on 2026-09-13 (recorded first in PR #183, which this file supersedes):
+
+- The **`stride_chat_ro` password**, in a full terminal-history paste. It is
+  live. The role is read-only, but `pg_read_all_data` means it can read every
+  table in the database. Rotating it is cheap: generate a new value, update
+  the `STRIDE_CHAT_RO_PASSWORD` repository secret, re-run the `apply-migration`
+  dispatch (the SQL is written to be idempotent for exactly this), then update
+  the local `STRIDE_CHAT_DATABASE_URL`.
+- A **`neondb_owner` connection string**. The operator said the password in it
+  was fabricated. If that is wrong, it is the full read-write owner credential
+  and rotating it is urgent — and `DATABASE_URL` must then be updated in the
+  repository secret and everywhere else it is stored, or the 04:00 chain
+  breaks.
+
+As of 2026-09-14 the documented rotation path has not been exercised: the
+last `apply-migration` run is still #6 (`34740673203`, 2026-09-13 05:35 UTC),
+and every `chat-eval` run since has connected as `stride_chat_ro`, which
+proves the role and not the secret's value. Whether either value was rotated by hand cannot be read from the
+repository. Confirm with the operator rather than assuming.
 
 ## Running the phase 0 exit
 
@@ -229,8 +256,31 @@ evidence that answers are grounded.
 - **`infra/*.sh` is off limits** in an unattended run; `infra/jobs/**` is not.
   `CLAUDE.md` explains the distinction — it is about schedule state versus
   application code, not about the folder name.
+- **The operator is on Windows PowerShell.** `python` is not on PATH there;
+  the launcher is `py -3`. Inline JSON in `--args` cannot be made to work
+  for values with spaces (`\"` makes Windows re-split on the spaces, plain
+  `"` inside single quotes is mangled), and values without spaces pass,
+  which makes it look intermittent. Use `--args-file` (PR #182, merged
+  2026-09-14) on Windows, always. Commands are copy-pasted verbatim,
+  placeholders included: never write an example value that could be
+  mistaken for a real one; have the operator edit the string Neon prints.
+- **`gh workflow run` dispatches against the remote default branch**, not
+  the local checkout. Two `apply-migration` runs failed with "migrations/
+  chat_readonly_role.sql does not exist" because the PR had not merged.
+  Merge first, or pass `--ref <branch>`.
+- **`verify_readonly_role.py` reads `.env` since PR #181** (merged
+  2026-09-14), through the same `config.load_dotenv_once()` the CLI uses.
+  Before that a `STRIDE_CHAT_DATABASE_URL` set only in `.env` was invisible
+  to it, and the symptom was `is not set (or pass --url)`.
 
 ## Changelog
+
+**2026-09-14.** PR #189 merged; run #8 on `main` (`34792030150`, at
+`d4367b3`): 38 of 38, `tool_errors: 0` on all 41 turns, 16 turns through
+`get_stride_tips`. The tips range fix is proved on `main`. PRs #181 and #182
+merged: `verify_readonly_role.py` loads `.env`, and `chat.cli` takes
+`--args-file`. PR #183 closed as superseded by this file; its credential
+hygiene and Windows notes are carried above. Phase 2 remains the blocker.
 
 **2026-09-13, run #7.** The tips range defect fixed (PR #189): active rows
 only, a complete calendar per span, per-track-per-date caps. Run #7 on the
