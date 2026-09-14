@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from chat import cli, config, eval_runner, verify_readonly_role
+from chat import cli, config, eval_runner, mcp_server, verify_readonly_role
 
 
 @pytest.fixture
@@ -48,5 +48,18 @@ def test_eval_runner_loads_dotenv(dotenv_calls, capsys):
 
 def test_verify_readonly_role_loads_dotenv(dotenv_calls, capsys):
     assert verify_readonly_role.main([]) != 0
+    capsys.readouterr()
+    assert dotenv_calls == [1]
+
+
+def test_mcp_server_loads_dotenv(dotenv_calls, monkeypatch, capsys):
+    """The fourth entry point, added after this file's own warning that the
+    failure mode is one nobody thought to check."""
+    import sys
+    # main() assigns sys.stdout = sys.stderr so a stray print cannot corrupt
+    # the protocol. Register the attribute so monkeypatch puts it back.
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(mcp_server, "serve", lambda *a, **k: 0)
+    assert mcp_server.main([]) == 0
     capsys.readouterr()
     assert dotenv_calls == [1]

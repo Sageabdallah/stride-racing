@@ -190,6 +190,37 @@ and every `chat-eval` run since has connected as `stride_chat_ro`, which
 proves the role and not the secret's value. Whether either value was rotated by hand cannot be read from the
 repository. Confirm with the operator rather than assuming.
 
+## `run_readonly_sql` is not safe to enable, unresolved
+
+Found by an adversarial review during the MCP server build, in code that
+predates it. The tool is off unless `STRIDE_CHAT_SQL_TOOL` is set, and it
+should stay off until these are fixed. Both bypasses were confirmed against
+the real `validate()`, not reasoned about.
+
+- **The CTE scan reads string literals.** `readonly_sql.py:53` looks for
+  `ident AS (` anywhere in the statement text, so a decoy inside a quoted
+  string registers as a CTE and its name drops out of the allowlist check:
+  `SELECT * FROM pf_raw_payloads WHERE 'pf_raw_payloads as (' IS NOT NULL`
+  passes. `pf_raw_payloads` is the table the module docstring singles out as
+  one that must never reach the context, and the same trick reaches any table.
+- **Concatenated literals are invisible to the regexes.**
+  `SELECT query_to_xml('select * fr'||'om pg_auth'||'id', true, false, '')`
+  passes: no forbidden word appears literally, and Postgres assembles and runs
+  the string at execution time. `query_to_xml` also returns a whole result set
+  as a single row, so it walks straight through the 200-row cap.
+
+The reason this is worth more than a regex fix: the role holds
+`pg_read_all_data`, so with the SQL tool enabled the validator is the *only*
+bound on what can be read, and `migrations/chat_readonly_role.sql` reasons
+only about write privilege. The durable fix is to grant `SELECT` on the
+allowlisted tables explicitly instead of `pg_read_all_data`, so a validator
+bypass reaches nothing the tools could not already read.
+
+Separately, `db.py:78` interpolates the driver's DSN-parse error into
+`DatabaseUnavailable`, so a malformed `STRIDE_CHAT_DATABASE_URL` puts the
+password into a tool result and the stderr log. Scrub the message before it
+leaves the module.
+
 ## Running the phase 0 exit
 
 The exit is the 46 cases green live against the CLI over the read-only role.
@@ -268,12 +299,92 @@ evidence that answers are grounded.
   the local checkout. Two `apply-migration` runs failed with "migrations/
   chat_readonly_role.sql does not exist" because the PR had not merged.
   Merge first, or pass `--ref <branch>`.
-- **`verify_readonly_role.py` reads `.env` since PR #181** (merged
-  2026-09-14), through the same `config.load_dotenv_once()` the CLI uses.
-  Before that a `STRIDE_CHAT_DATABASE_URL` set only in `.env` was invisible
-  to it, and the symptom was `is not set (or pass --url)`.
+- **All four entry points read `.env`**, through the same
+  `config.load_dotenv_once()`: `cli.py`, `verify_readonly_role.py` (PR #181),
+  `eval_runner.py` (PR #195) and `mcp_server.py`. PR #181 fixed the second and
+  said the two "can no longer drift apart"; there were three, and then four.
+  `chat/tests/test_chat_dotenv_entry_points.py` now enumerates all of them —
+  add the fifth there when it exists. `build_context()` does **not** call it,
+  so a new entry point that forgets comes up with `db=None` and answers every
+  question with an honest "no database is configured" while looking healthy.
+
+## The MCP server, for using the tools yourself
+
+`python -m chat.mcp_server` serves the same tools over MCP stdio, so STRIDE
+answers in Claude Desktop or Claude Code without the Lambda. Plan §9 sanctions
+exactly this and says why it is the wrong shape for the production chat: it is
+a local operator surface, serving whoever launched the process. It needs no
+AWS and no answer to §11, which is why it exists while phase 2 is blocked.
+
+It is dual-era. MCP revision 2026-07-28 removed the `initialize` handshake in
+favour of per-request `_meta`; 2025-11-25 and earlier open a session with it.
+A server speaking one is unreachable from clients speaking the other, so this
+serves both and picks per request.
+
+Two things that are not obvious and cost a debugging session each:
+
+- **MCP spells the tool schema `inputSchema`.** `ToolSpec.to_api()` emits
+  `input_schema` because that is the Anthropic Messages API's spelling. A
+  client handed the wrong key drops the tool with no error at all.
+- **stdout carries the protocol and nothing else.** `.tools` and `.runtime`
+  are imported *inside functions* so `main()` can rebind `sys.stdout` to
+  stderr before the tool graph loads. Hoisting those imports to the top of
+  the file silently reopens the hole: a module-level `print()` in anything
+  the graph pulls in then reaches the real stdout and the session dies on a
+  parse error naming nothing. That was a real defect during the build, caught
+  by adding such a print and watching it land on stdout, and
+  `test_importing_the_server_does_not_pull_in_the_tool_graph` pins it.
+
+On Windows, where the operator is: use `py -3.11` rather than `py -3` (which
+resolves to the highest 3.x, not necessarily the one carrying psycopg2), set
+`PYTHONUTF8=1`, and `pip install tzdata` — without it `config.today_sydney()`
+silently falls back to a fixed +10 and reports yesterday's date between 23:00
+and midnight through AEDT.
+
+```json
+{"mcpServers": {"stride": {
+  "command": "py",
+  "args": ["-3.11", "-m", "chat.mcp_server"],
+  "cwd": "C:\\path\\to\\stride-racing\\server\\python",
+  "env": {"PYTHONPATH": "C:\\path\\to\\stride-racing\\server\\python",
+          "PYTHONUTF8": "1",
+          "STRIDE_CHAT_DATABASE_URL": "postgresql://stride_chat_ro:...@...-pooler/...",
+          "PUNTINGFORM_API_KEY": "...", "STRIDE_EVIDENCE_BUCKET": "..."}}}}
+```
+
+Escape every backslash and never end a path with one. The server prints its
+data plane to stderr on startup — if it says `database NOT configured`, the
+environment above did not reach it and every answer will be an honest miss.
+
+**What it does not fix.** A tool call is answered synchronously, so a slow
+backend blocks the loop; `query_results` without a track can fan out to nine
+Punting Form calls, and `pf_client`'s retry and timeout defaults make that
+minutes. The CLI has the same exposure — it is a property of the tool layer,
+not of this transport — but it is more visible in a server you leave running.
 
 ## Changelog
+
+**2026-09-14, the MCP server.** `chat/mcp_server.py` plus 39 tests: the same
+tools over MCP stdio, dual-era, zero new dependencies. Proved end to end
+against a real subprocess — a staged tips artifact came back through
+`tools/call` as a real bet pick with odds and edge, 4,817 characters on the
+wire, and every response shape validated against the published MCP JSON
+schema for 2025-06-18, 2025-11-25 and 2026-07-28.
+
+Five defects were found and fixed, four of them by an adversarial review
+rather than by the tests: `.tools` imported at module scope made the stdout
+redirect run a line too late, so an import-time print reached stdout (the
+imports are lazy now, and a test pins the import graph); the legacy fallback
+offered 2025-06-18 while the server also spoke 2025-11-25, and the test
+guarding it compared the constant to itself so it could not fail;
+`json.loads` raises `RecursionError`, not `ValueError`, so one deeply nested
+line killed the process; `NaN` and `Infinity` were accepted on input and
+echoed into a response id, putting non-JSON on the wire; and `ping` answered
+a modern client without the `resultType` such a result requires.
+
+`eval_runner.py` was also given `load_dotenv_once()` (PR #195, merged); the
+entry-point test covers all four. Phase 2 is still the blocker for everything
+that serves anyone but the operator.
 
 **2026-09-14.** PR #189 merged; run #8 on `main` (`34792030150`, at
 `d4367b3`): 38 of 38, `tool_errors: 0` on all 41 turns, 16 turns through
