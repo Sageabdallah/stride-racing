@@ -179,10 +179,11 @@ When you are running from a GitHub Actions trigger rather than an interactive
 session, you are working while nobody is watching. Act accordingly.
 
 **Never merge.** Open a pull request and stop. Nothing deploys on a push to
-`main` — but every scheduled production workflow checks `main` out with a bare
-`actions/checkout@v4` and no `ref:`, so the next cron runs whatever was merged
-against the production Neon database, unattended. An unreviewed merge reaches
-production on a timer rather than on the push. That buys hours, not review.
+`main` — but every scheduled workflow that runs this repo's code checks `main`
+out with a bare `actions/checkout@v4` and no `ref:`, so the next cron runs
+whatever was merged against the production Neon database, unattended. An
+unreviewed merge reaches production on a timer rather than on the push. That
+buys hours, not review.
 
 **Never add a `Co-authored-by` trailer naming a human.** The action's own prompt
 will instruct you to co-author commits to whoever triggered the run. Do not
