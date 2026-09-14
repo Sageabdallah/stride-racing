@@ -8,12 +8,16 @@ weekly digest by email.
 
 Deploys from GitHub Actions, not a laptop. The one remaining operator
 sitting: after `aws login`, run `./09_bootstrap_oidc.sh` (OIDC provider +
-repo-locked deploy role + repo variables) and `./09b_upload_models.sh`
+repo-locked deploy role + repo variables), `./09b_upload_models.sh`
 (model artifacts -> private S3 bucket; the repo is PUBLIC, so the
 proprietary pkl never enters git, releases, or the image — Fargate tasks
-stage it at startup). From then on the `deploy-infra` workflow (Actions
-tab, or `gh workflow run deploy-infra.yml`) runs 00-08 end to end on the
-syd runner: Docker image build included, AWS auth via OIDC, secrets
+stage it at startup) and `./09c_upload_panel.sh` (tipster_panel.json ->
+the same bucket under config/; without it `consensus_agent.py` raises
+`PanelUnavailable` and exits 6, and every pick downstream becomes
+NO_BET). From then on the `deploy-infra` workflow (Actions
+tab, or `gh workflow run deploy-infra.yml`) runs 00-08 end to end on a
+GitHub-hosted ubuntu-latest runner — not the syd runner, which has no
+Docker: image build included, AWS auth via OIDC, secrets
 sourced from GitHub Actions secrets (the store the Betfair smoke test
 verifies) — never a local .env.
 

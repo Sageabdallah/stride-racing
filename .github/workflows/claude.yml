@@ -273,7 +273,7 @@ jobs:
           # installation, not by the workflow, so the `permissions:` block above
           # would not constrain it — the read-only claim this whole job is built on
           # would have been decorative, and the unattended agent would have held
-          # write access to a public repo whose main auto-deploys.
+          # write access to a public repo whose main the schedules run unattended.
           #
           # Pinning the token here short-circuits that exchange, which is also why
           # id-token: write is now absent above: no OIDC, no re-mint path.

@@ -15,9 +15,10 @@
 
 ## Preconditions this change assumes
 
-Merging deploys. If this needs something to exist FIRST — an uploaded
-artifact, an applied migration, a rebuilt view — say so here and confirm it
-has happened, or the first person to notice is the 04:00 alarm.
+Merging reaches production on the next scheduled run. If this needs something
+to exist FIRST — an uploaded artifact, an applied migration, a rebuilt view —
+say so here and confirm it has happened, or the first person to notice is the
+04:00 alarm.
 
 - [ ] No precondition, or: _______________________ (done at: ____)
 
