@@ -15,6 +15,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -45,32 +46,217 @@ def handler():
     return mod
 
 
-# ------------------------------------------------------------ _fresh_files
+# ------------------------------------------- _dir_state / _new_or_rewritten
 
-def test_fresh_files_excludes_pre_existing(handler, tmp_path):
-    stale = tmp_path / "stale.json"
-    stale.write_text("{}")
-    # Backdate well clear of filesystem mtime granularity.
+def _across(handler, d, step):
+    """Snapshot, run `step`, diff — the shape job_intelligence_build uses."""
+    before = handler._dir_state(str(d), ".json")
+    step()
+    return handler._new_or_rewritten(before, handler._dir_state(str(d), ".json"))
+
+
+def test_a_pre_existing_file_is_not_counted_as_work(handler, tmp_path):
+    """The teeth: a step that wrote nothing must not read as having worked,
+    however recently the files already in the directory were written."""
+    (tmp_path / "stale.json").write_text("{}")
+    assert _across(handler, tmp_path, lambda: None) == []
+
+
+def test_a_newly_written_file_is_counted(handler, tmp_path):
+    (tmp_path / "stale.json").write_text("{}")
+    got = _across(handler, tmp_path,
+                  lambda: (tmp_path / "fresh.json").write_text("{}"))
+    assert got == ["fresh.json"]
+
+
+def test_a_file_that_appears_carrying_an_older_mtime_still_counts(handler,
+                                                                  tmp_path):
+    """The defect that replaced the mtime threshold, as a portable test.
+
+    The old guard asked `getmtime(f) >= since` against a time.time() reading.
+    A file can appear during a step carrying a timestamp from before it —
+    copy2 and a rename of an earlier write both do it, and so does any
+    filesystem whose stamps are coarser than the clock the caller read.
+    ci run 34927090677 (on 15211b7) is the observed instance — one failure
+    in the 40 consecutive runs 576-615; on a 1s-granularity ext3 volume it
+    reproduces 200 times out of 200.
+
+    Reproduced here with copy2 rather than a coarse mount, so the regression
+    runs on any kernel. Against the old helper the diff is empty and
+    job_intelligence_build raises "wrote no intelligence file" about a build
+    that wrote one.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "form.json").write_text("{}")
     old = time.time() - 3600
-    os.utime(stale, (old, old))
+    os.utime(src / "form.json", (old, old))
 
-    since = time.time()
-    assert handler._fresh_files(str(tmp_path), ".json", since) == []
-
-    fresh = tmp_path / "fresh.json"
-    fresh.write_text("{}")
-    assert handler._fresh_files(str(tmp_path), ".json", since) == ["fresh.json"]
+    got = _across(handler, tmp_path,
+                  lambda: shutil.copy2(src / "form.json",
+                                       tmp_path / "form.json"))
+    assert got == ["form.json"]
 
 
-def test_fresh_files_missing_dir_is_empty_not_error(handler, tmp_path):
-    assert handler._fresh_files(str(tmp_path / "nope"), ".json", 0) == []
+def test_an_in_place_rewrite_counts(handler, tmp_path):
+    """Once the file exists, a rewrite is the only work the guard can see."""
+    (tmp_path / "form.json").write_text("{}")
+    got = _across(handler, tmp_path,
+                  lambda: (tmp_path / "form.json").write_text('{"x": 1}'))
+    assert got == ["form.json"]
 
 
-def test_fresh_files_filters_by_suffix(handler, tmp_path):
+def test_a_same_size_rewrite_with_a_new_stamp_counts(handler, tmp_path):
+    """Pins st_mtime_ns into the identity.
+
+    The test above changes the byte count too, so it passes for an
+    implementation keyed on (inode, size) alone — which would miss every
+    rewrite that keeps the shape, the common case for a JSON file rebuilt
+    from fresh numbers. Drop st_mtime_ns and this is what goes red.
+
+    The new stamp is set explicitly rather than inherited from the write, so
+    the test does not itself depend on the filesystem's timestamp resolution
+    — the trap this whole change exists to remove. The first draft did
+    depend on it and failed on the 1s-granularity volume the defect was
+    reproduced on, which is the hole
+    test_a_rewrite_with_the_stamp_put_back_is_missed documents.
+
+    The stamp moves BACKWARDS on purpose. The diff asks whether the identity
+    changed, not whether it grew, so a file that comes back older still
+    counts as work — which is the whole reason this replaced a threshold.
+    """
+    f = tmp_path / "form.json"
+    f.write_text('{"x": 1}')
+
+    def rewrite():
+        f.write_text('{"x": 2}')                    # same byte count
+        older = time.time() - 3600                  # a stamp no tick can blur
+        os.utime(f, (older, older))
+
+    assert _across(handler, tmp_path, rewrite) == ["form.json"]
+
+
+def test_reading_or_chmodding_a_file_is_not_work(handler, tmp_path):
+    """Pins st_ctime_ns and st_atime_ns OUT of the identity.
+
+    Only write evidence may count. A read moves atime and a chmod moves
+    ctime, and neither writes a byte, so an identity carrying either field
+    turns the no-op into a green build.
+
+    The read half is not hypothetical: stride_build.py:103 does
+    `hashlib.md5(fpath.read_bytes())` for every one of its eight
+    REQUIRED_FILES on every run, in the same directory and suffix this
+    snapshots. So a build that did nothing else still reads all eight — the
+    exact case the handler comment says this guard catches and the exit code
+    cannot. With st_atime_ns in the identity that case reports files_built=8
+    and the 04:20 job goes green on a no-op.
+
+    The ctime half is the trade the next person will be tempted by: adding
+    st_ctime_ns would close the missed-rewrite hole below, and this is what
+    it would cost.
+    """
+    f = tmp_path / "form.json"
+    f.write_text("{}")
+
+    def read_and_chmod():
+        f.read_bytes()
+        os.chmod(f, 0o600)
+
+    assert _across(handler, tmp_path, read_and_chmod) == []
+
+
+def test_a_rewrite_that_changed_only_the_length_counts(handler, tmp_path):
+    """Pins st_size into the identity.
+
+    On a coarse-grained filesystem a rewrite can land in the same timestamp
+    tick as the snapshot, so mtime is unchanged, and an in-place truncate
+    keeps the inode. The byte count is then the only field that sees it —
+    which is exactly the filesystem class this whole change exists for, so
+    st_size is what shrinks the documented hole there rather than decoration.
+    Drop it and this goes red.
+    """
+    f = tmp_path / "form.json"
+    f.write_text('{"x": 1}')
+    st = os.stat(f)
+
+    def rewrite():
+        f.write_text('{"x": 1, "y": 2}')            # longer, same inode
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    assert _across(handler, tmp_path, rewrite) == ["form.json"]
+
+
+def test_a_replaced_file_counts_even_with_its_stamp_restored(handler, tmp_path):
+    """Pins st_ino into the identity.
+
+    A writer that builds into a temp file and os.replace()s it over the
+    target lands on a NEW inode, and rename carries the temp file's stamp,
+    so both size and mtime can survive unchanged across real work. The inode
+    is the only field left that sees it. Drop st_ino and this goes red.
+
+    It can only ever add detections: a changed inode means the file was
+    replaced, so this widens what counts as work without widening what
+    counts as a no-op.
+    """
+    f = tmp_path / "form.json"
+    f.write_text('{"x": 1}')
+    st = os.stat(f)
+
+    def replace():
+        tmp = tmp_path / "form.json.tmp"            # .tmp: outside the snapshot
+        tmp.write_text('{"y": 2}')                  # same byte count
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.replace(tmp, f)                          # new inode, same stamp
+
+    assert _across(handler, tmp_path, replace) == ["form.json"]
+
+
+def test_a_rewrite_with_the_stamp_put_back_is_missed(handler, tmp_path):
+    """The known hole, provoked for real rather than asserted about tuples.
+
+    Identity is (inode, size, mtime_ns). A rewrite that keeps all three is
+    invisible: same file, same byte count, and the mtime restored. That is
+    what a coarse filesystem does for free when the whole rewrite lands in
+    one tick, reproduced here with os.utime so it runs anywhere.
+
+    It fails RED — the diff is empty, the caller raises, and a build that
+    worked is reported as having written nothing. That direction is why the
+    hole is accepted rather than closed with st_ctime_ns, and the test above
+    is the cost of closing it.
+    """
+    f = tmp_path / "form.json"
+    f.write_text('{"x": 1}')
+    st = os.stat(f)
+
+    def rewrite():
+        f.write_text('{"y": 2}')                    # same byte count
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    assert _across(handler, tmp_path, rewrite) == []
+
+
+def test_dir_state_missing_dir_is_empty_not_error(handler, tmp_path):
+    assert handler._dir_state(str(tmp_path / "nope"), ".json") == {}
+
+
+def test_dir_state_filters_by_suffix(handler, tmp_path):
     (tmp_path / "a.json").write_text("{}")
     (tmp_path / "b.txt").write_text("x")
-    got = handler._fresh_files(str(tmp_path), ".json", 0)
-    assert got == ["a.json"]
+    assert sorted(handler._dir_state(str(tmp_path), ".json")) == ["a.json"]
+
+
+def test_dir_state_does_not_swallow_an_unreadable_directory(handler, tmp_path):
+    """A reference that fails quietly is the silent no-op, one level down.
+
+    If the BEFORE snapshot came back short for any reason other than "not
+    there", every file it missed would read as one the step wrote — a false
+    green on the assertion that exists to prevent exactly that. Only
+    FileNotFoundError is absence; everything else must propagate.
+    """
+    not_a_dir = tmp_path / "file.json"
+    not_a_dir.write_text("{}")
+    with pytest.raises(NotADirectoryError):
+        handler._dir_state(str(not_a_dir), ".json")
 
 
 # -------------------------------------------------------- _require_racecard
@@ -145,6 +331,28 @@ def test_intelligence_build_fails_when_nothing_was_built(handler, monkeypatch,
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
     os.makedirs(tmp_path / "server" / "python" / "intelligence")
+    with pytest.raises(RuntimeError) as e:
+        handler.job_intelligence_build()
+    assert "wrote no" in str(e.value)
+
+
+def test_intelligence_build_fails_when_only_stale_files_are_there(handler,
+                                                                  monkeypatch,
+                                                                  tmp_path):
+    """The case the exit code cannot catch, at the call site.
+
+    stride_build.py:122 exits non-zero when a REQUIRED_FILE is absent, so
+    absence is already covered. What it checks is fpath.exists(), so a run
+    that touched nothing while the required files sat there from the image
+    or an earlier relay exits 0 and logs ALL OK. The sibling test above runs
+    against an EMPTY directory and so proves only "no files at all -> raise".
+    """
+    _neutralise_io(handler, monkeypatch)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
+    intel = tmp_path / "server" / "python" / "intelligence"
+    os.makedirs(intel)
+    (intel / "form.json").write_text("{}")          # stale, and the build
+    (intel / "speed.json").write_text("{}")         # will not touch either
     with pytest.raises(RuntimeError) as e:
         handler.job_intelligence_build()
     assert "wrote no" in str(e.value)

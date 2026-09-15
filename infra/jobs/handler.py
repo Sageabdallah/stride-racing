@@ -24,7 +24,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from datetime import date, datetime, timedelta, timezone
 
 import boto3
@@ -908,12 +907,83 @@ def _require_racecard(job: str) -> str:
     return state
 
 
-def _fresh_files(dirpath: str, suffix: str, since: float) -> list:
-    """Files written after `since` — proof a step did work, not just exited."""
-    if not os.path.isdir(dirpath):
-        return []
-    return [f for f in os.listdir(dirpath) if f.endswith(suffix)
-            and os.path.getmtime(os.path.join(dirpath, f)) >= since]
+def _dir_state(dirpath: str, suffix: str) -> dict:
+    """{name: identity} for every matching file — half of a before/after diff.
+
+    The identity is (inode, size, mtime_ns). Nothing here reads a clock, and
+    that is the point. The previous helper asked `getmtime(f) >= since` with
+    `since` a time.time() reading, which puts a filesystem timestamp on one
+    side and this process's CLOCK_REALTIME on the other. Inode stamps are
+    truncated to the filesystem's own granularity — nanoseconds on modern
+    ext4, one second on ext3, two on FAT — so a file the step really did
+    write can read back BELOW a clock value taken just before it. Measured,
+    not assumed: on a 1s-granularity ext3 volume that comparison was false
+    200 times out of 200, and both freshness tests in
+    test_job_postconditions.py fail there on an unpatched tree.
+
+    Same move _db_now() makes one layer up ("freshness must be measured
+    DB-side"), applied to the filesystem: every value below is compared only
+    against a value of the same kind, read from the same filesystem a moment
+    later, so granularity cancels instead of deciding the outcome. There is
+    no longer a timestamp parameter to pass the wrong clock into.
+
+    Only FileNotFoundError is swallowed, and only where it means "not there":
+    a missing directory, or a name that vanished between listdir and stat.
+    Every other OSError propagates deliberately. A `before` snapshot that
+    quietly came back short would make a file that already existed look like
+    one the step wrote — the exact silent no-op this guard exists to catch —
+    so the reference is never allowed to fail quietly. A path that exists but
+    is not a directory now raises rather than reading as an empty directory,
+    which is the honest outcome for a layout that broken.
+    """
+    try:
+        names = os.listdir(dirpath)
+    except FileNotFoundError:
+        return {}
+    out = {}
+    for name in names:
+        if not name.endswith(suffix):
+            continue
+        try:
+            st = os.stat(os.path.join(dirpath, name))
+        except FileNotFoundError:
+            continue
+        out[name] = (st.st_ino, st.st_size, st.st_mtime_ns)
+    return out
+
+
+def _new_or_rewritten(before: dict, after: dict) -> list:
+    """Files a step added or changed — proof it did work, not just exited.
+
+    What this would still pass with, said plainly, in both directions.
+
+    MISSED (fails red, which is the safe way to be wrong): a rewrite landing
+    on the same inode with the same byte count AND the same mtime to the
+    filesystem's resolution. That needs a deliberate os.utime putting the
+    stamp back, or a coarse filesystem where the whole rewrite fits inside
+    one tick — and stride_build.py takes about six minutes. The diff comes
+    back empty, the caller raises, and a build that worked is reported red.
+
+    COUNTED (the false-green surface, such as it is): os.utime on an existing
+    file moves mtime without writing a byte, so a step that only touched
+    timestamps would read as work. Measured, not assumed. Nothing in
+    stride_build.py does that, and no honest write is cheaper to fake, but
+    the guard proves "this file is not the one that was here before", not
+    "bytes were written".
+
+    Only write evidence is in the identity, which is why st_ctime_ns and
+    st_atime_ns are both left out. ctime would close the missed case above,
+    but it moves on metadata alone, so a chmod or chown inside the window
+    would then read as work — widening the false-green surface to buy back a
+    hole that only ever fails red. (A utime is already counted via mtime
+    either way, so ctime changes nothing there.) atime is worse: it moves on
+    a pure read, and stride_build.py:103 md5s every one of its eight
+    REQUIRED_FILES on every run, so a build that did nothing else still
+    reads all eight — the exact no-op this guard exists to catch would
+    report eight files built.
+    """
+    return sorted(name for name, ident in after.items()
+                  if before.get(name) != ident)
 
 
 def job_intelligence_build() -> dict:
@@ -924,15 +994,31 @@ def job_intelligence_build() -> dict:
         # day would blind it on every other day.
         return {"last_success_date": _today(), "files_built": 0,
                 "quiet_day": True}
-    # Timed from just before the build, so a file relayed down earlier in
-    # this same task can never be mistaken for one the build produced.
-    t0 = time.time()
+    # Snapshotted from just before the build, so a file relayed down earlier
+    # in this same task can never be mistaken for one the build produced.
+    # That ordering obligation is the same one the t0 reading carried.
+    # Several other jobs _sync_down this directory and this one does not; if
+    # a relay is ever added here it goes ABOVE this line, not below it,
+    # because download_file stamps what it fetches at fetch time and a
+    # relayed file would otherwise read as one the build produced.
+    #
+    # What the guard is for, stated accurately: stride_build.py:122 is
+    # `sys.exit(0 if all_ok else 1)`, so a build that fails outright, or that
+    # leaves a REQUIRED_FILE absent, does exit non-zero and _run_ok raises.
+    # What it checks is `fpath.exists()` — existence, not freshness — so a
+    # run that touched nothing while the eight required files sat there from
+    # the image or an earlier relay exits 0 and logs ALL OK. That is the case
+    # this diff catches and the exit code cannot.
+    intel = f"{_root()}/server/python/intelligence"
+    before = _dir_state(intel, ".json")
     _run_ok("stride_build.py", _today(), "--parallel")
-    built = _fresh_files(f"{_root()}/server/python/intelligence", ".json", t0)
+    built = _new_or_rewritten(before, _dir_state(intel, ".json"))
     if not built:
         raise RuntimeError(
             "intelligence-build: stride_build.py exited 0 but wrote no "
-            "intelligence file; consensus and tips would run on stale data.")
+            f"intelligence file — nothing in {intel} is new or changed since "
+            f"before it ran ({len(before)} .json file(s) there beforehand); "
+            "consensus and tips would run on stale data.")
     _sync_up("server/python/intelligence")
     return {"last_success_date": _today(), "files_built": len(built)}
 
