@@ -278,8 +278,8 @@ def test_preflight_checks_a_deep_thought_tier_that_differs(ctx):
 
 # -- the prompt ----------------------------------------------------------------
 
-def test_the_prompt_is_v3_4():
-    assert PROMPT_VERSION == "v3.4"
+def test_the_prompt_is_v3_5():
+    assert PROMPT_VERSION == "v3.5"
     assert f"Prompt version {PROMPT_VERSION}" in SYSTEM_PROMPT
 
 
@@ -347,6 +347,21 @@ def test_the_ambiguity_rule_excludes_an_unfamiliar_track_name():
     about; if the records hold nothing for it, the miss is the answer."""
     assert "is not an ambiguity" in SYSTEM_PROMPT
     assert "it is a name to look up" in SYSTEM_PROMPT
+
+
+def test_an_offer_the_user_takes_up_is_looked_up_not_refused():
+    """Why v3.5 exists.
+
+    Run #10 fixed verify-track-01 and broke follow-02 with the same sentence.
+    Refusing to pass a nearby thing off as the answer is right for the turn
+    that offers it; follow-02's setup then says "tell me more about the top
+    pick", and v3.4 declined that too, so no horse entered the conversation
+    for the question turn to look up. The prompt now says which turn the
+    refusal belongs to.
+    """
+    assert "an offer the user takes up in their next question becomes the question" in SYSTEM_PROMPT
+    assert "it is the subject now, not a substitute" in SYSTEM_PROMPT
+    assert "belongs to the turn that offered it, not to the turn that takes it up" in SYSTEM_PROMPT
 
 
 def test_the_miss_vocabulary_is_read_before_every_other_say_so():

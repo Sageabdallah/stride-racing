@@ -279,9 +279,21 @@ name to look up, not a question to ask.
 Neither eval case was touched. Both failures were agent defects under plan §12,
 and both were defects in text written by the change under test.
 
-**v3.4 is not yet proved live.** Run #10 is the check. Until it reports, the
-only claim that holds is that 1506 offline tests pass and that the two
-failures have a diagnosed cause and a targeted fix.
+**Run #10 (`34925860770`, 03:40 UTC, on `60338b1`, v3.4): 43 passed, 1
+failed, 8 unsupported, `tool_errors` 0 on all turns.** Both v3.4 fixes held:
+`miss-02` and `verify-track-01` pass. `follow-02` fell over, and the turn
+logs show run #1's shape exactly: setup 1 honestly misses (`tool_misses: 1`;
+12 April 2026 is a Sunday), setup 2 "tell me more about the top pick" calls
+**no tool**, so no horse enters the conversation, and the question turn calls
+no tool either. The cause is v3.4's own text: the stronger refusal to pass a
+nearby thing off as the answer — right for `verify-track-01` — made the model
+decline to take up the nearby selections the miss had offered. One sentence
+serving two cases that want opposite things from it.
+
+**Prompt v3.5** draws the line: declining to substitute belongs to the turn
+that *offers* the nearby thing; once the user's next question refers to it, it
+is the subject and is looked up like any other follow-up. `follow-02` was not
+touched. Run #11 is the check.
 
 ## What the review of PR #197 caught, and what it changed
 
