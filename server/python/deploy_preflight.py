@@ -21,7 +21,9 @@ here is "did tipping run for the latest race day?" — max(race_date) on
 selections vs the race calendar. A schema-only check reads green throughout.
 
 The deployment board answers a different question that used to have no owner:
-main can move without AWS moving, because deploy-infra is dispatch-only. See
+main can move without AWS moving, because both deploy paths are dispatch-only
+(rebuild-image for a code-only change, deploy-infra when a Lambda-hosted job
+or any schedule/secret changed too). See
 check_deployment for what it compares and why it is path-scoped.
 
 Usage:
@@ -152,7 +154,8 @@ def check_deployment(branch="main", timeout=15, fetch=None):
         return [_row(name, RED,
                      "STRIDE_IMAGE_SHA is unset — this image was built before "
                      "the freshness stamp existed, so it cannot be checked at "
-                     "all. Run deploy-infra.")]
+                     "all. Run rebuild-image (or deploy-infra, if a "
+                     "Lambda-hosted job changed).")]
     if not _SHA_RE.match(sha):
         return [_row(name, AMBER,
                      f"image stamped {sha!r}, which is not a clean commit "
@@ -179,7 +182,8 @@ def check_deployment(branch="main", timeout=15, fetch=None):
         return [_row(name, RED,
                      f"{behind} commit(s) behind main and the compare hit its "
                      f"{_COMPARE_FILE_CAP}-file cap, so the drift cannot be "
-                     "shown to be irrelevant. Run deploy-infra.")]
+                     "shown to be irrelevant. Run rebuild-image (or "
+                     "deploy-infra, if a Lambda-hosted job changed).")]
 
     changed = sorted({f.get("filename", "") for f in files if _image_relevant(f.get("filename", ""))})
     if not changed:
@@ -191,7 +195,8 @@ def check_deployment(branch="main", timeout=15, fetch=None):
     return [_row(name, RED,
                  f"image is {sha[:7]}; main has changed {len(changed)} "
                  f"image-relevant file(s) since — {shown}. The jobs are "
-                 "running different code from main. Run deploy-infra.")]
+                 "running different code from main. Run rebuild-image (or "
+                 "deploy-infra, if a Lambda-hosted job changed).")]
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,129 @@
+# Rebuild and push the job image, and NOTHING else.
+#
+# deploy-infra.yml is the full-stack button: it rewrites Secrets Manager,
+# re-runs 06_schedules.sh and 07b_fargate_schedules.sh, applies a DB migration
+# against the production Neon database, and invokes a Lambda and an ECS task.
+# Every one of those is idempotent by design, but none of them is what "the
+# merged code has not reached AWS yet" needs, and two of them are the thing
+# CLAUDE.md singles out: update-schedule is full-replacement, so any parameter
+# omitted from the call silently reverts to its default. Changing live schedule
+# state as a side effect of shipping a code fix is how that happens by
+# accident.
+#
+# So this workflow runs step 04 alone. It touches no schedule, no secret, no
+# migration. Nothing here edits infra/*.sh.
+#
+# WHY IT EXISTS AT ALL. test_deploy_freshness.py records the failure it closes:
+# "deploy-infra is dispatch-only, so a merge that changes job behaviour does
+# not reach AWS until someone runs it. On 2026-08-03 the quiet-day work sat on
+# main for an hour while Fargate ran the previous image: the GitHub crons had
+# the fix, the Fargate jobs did not, and the two monitors disagreed about the
+# same morning with neither of them wrong." Before this, closing that gap meant
+# running the full deploy, which is a large blast radius for a code-only fix.
+#
+# WHAT THE TASK DEFINITIONS NEED: nothing. 07_fargate_heavy.sh:8 pins
+# stride-jobs:latest and Fargate pulls at task start, so a push is picked up by
+# the next scheduled run and re-registering a task definition produces an
+# identical revision. Container-image LAMBDAS are the exception — Lambda
+# resolves the tag to a digest at deploy time and needs update-function-code
+# (05_lambda_jobs.sh:100) — so a change to a Lambda-hosted job still wants
+# deploy-infra. The heavy jobs (intelligence-build, consensus-agent,
+# tips-pipeline, nightly-etl, preflight, calibrator-coverage) are all Fargate.
+
+name: rebuild-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type PUSH to confirm this overwrites stride-jobs:latest for production"
+        required: true
+        default: ""
+
+permissions:
+  id-token: write   # OIDC assume-role
+  contents: read
+
+# deploy-infra's group, deliberately: both workflows write the same :latest
+# tag, and two of them racing decides which code production runs by whichever
+# docker push finished second.
+concurrency:
+  group: deploy-infra
+  cancel-in-progress: false
+
+jobs:
+  image:
+    # GitHub-hosted: Docker is preinstalled here and the syd runner has none
+    # (deploy-infra.yml records run 30740940800). ECR is reachable from
+    # anywhere, so the AU runner stays reserved for the jobs needing an AU IP.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AWS_REGION: ap-southeast-2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check confirmation
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${CONFIRM}" != "PUSH" ]; then
+            echo "::error::Confirmation not given. Re-run with confirm=PUSH to overwrite stride-jobs:latest."
+            exit 1
+          fi
+
+      - name: Assume the deploy role (OIDC — run infra/09_bootstrap_oidc.sh once first)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/stride-deploy-oidc
+          aws-region: ap-southeast-2
+
+      - name: 04 build + push the job image
+        run: ./infra/04_ecr_image.sh
+
+      # Verify content, not a proxy. A moved digest proves something changed,
+      # not that the right thing changed — so this reads the commit stamp back
+      # OUT of the registry and compares it to the commit that was built.
+      # 04_ecr_image.sh stamps GIT_SHA into the image as
+      # LABEL org.opencontainers.image.revision (Dockerfile:64), which
+      # describe-images exposes without running the container.
+      #
+      # What this would still pass with, said plainly: an image built from the
+      # right commit whose jobs are nonetheless broken. It proves the bytes in
+      # the registry came from this commit and no other — which is exactly the
+      # 2026-08-03 failure — and proves nothing about behaviour. That is
+      # verify-jobs.yml and post-deploy-verify.yml's job.
+      - name: Prove the pushed image is this commit
+        run: |
+          set -euo pipefail
+          URI="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com/stride-jobs"
+          DIGEST=$(aws ecr describe-images --repository-name stride-jobs \
+            --image-ids imageTag=latest \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "stride-jobs:latest is now $DIGEST"
+
+          # By digest, not by tag: re-reading the tag would re-resolve it and
+          # could describe a different push that landed in between.
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$URI"
+          docker pull --quiet "$URI@$DIGEST"
+          STAMP=$(docker inspect --format \
+            '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$URI@$DIGEST")
+          echo "image revision label: ${STAMP:-<empty>}"
+
+          if [ -z "$STAMP" ]; then
+            echo "::error::the pushed image carries no revision label. It was built" \
+                 "before the stamp existed, or the --build-arg was dropped:" \
+                 "deploy_preflight.py cannot tell a current image from a stale one."
+            exit 1
+          fi
+          if [ "$STAMP" != "${GITHUB_SHA}" ]; then
+            echo "::error::stride-jobs:latest is stamped '$STAMP', not the commit this" \
+                 "run built (${GITHUB_SHA}). A '-dirty' suffix means the tree was" \
+                 "modified after checkout; any other value means the push did not" \
+                 "land and production is still running older code."
+            exit 1
+          fi
+          echo "PASS: stride-jobs:latest is built from ${GITHUB_SHA}."
+          echo "The next scheduled Fargate task pulls it; Lambda-hosted jobs still" \
+               "need deploy-infra (05_lambda_jobs.sh update-function-code)."
