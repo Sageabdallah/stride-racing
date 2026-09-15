@@ -19,7 +19,13 @@ tab, or `gh workflow run deploy-infra.yml`) runs 00-08 end to end on a
 GitHub-hosted ubuntu-latest runner — not the syd runner, which has no
 Docker: image build included, AWS auth via OIDC, secrets
 sourced from GitHub Actions secrets (the store the Betfair smoke test
-verifies) — never a local .env.
+verifies) — never a local .env. For a code-only change the `rebuild-image`
+workflow runs step 04 alone (typed `PUSH` to confirm) and touches no schedule,
+secret or migration; the Fargate tasks pull `stride-jobs:latest` at start, so
+the next scheduled run picks it up. The four container Lambdas resolve the tag
+at deploy time and keep their old digest until `deploy-infra` runs
+`05_lambda_jobs.sh` — so after a `rebuild-image` the two halves of the same
+image differ, which is expected and only `deploy-infra` closes.
 
 Runtime split rule: Lambda's filesystem is read-only and Fargate tasks
 share no filesystem, so every job that writes repo paths (racecards/,
@@ -29,7 +35,7 @@ s3://stride-evidence-<acct>/artifacts/. Only DB-only jobs stay on Lambda.
 
 Everything below is idempotent: safe to re-run top to bottom at any time.
 
-## Order (the deploy-infra workflow runs exactly this)
+## Order (the deploy-infra workflow runs exactly this; rebuild-image runs 04 only)
 
     ./00_prereqs.sh                     sanity: identity, region
     ./01_secrets.sh --from-env          GitHub secrets -> Secrets Manager (stride/prod)

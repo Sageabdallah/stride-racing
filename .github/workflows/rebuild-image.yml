@@ -29,6 +29,15 @@
 # (05_lambda_jobs.sh:100) — so a change to a Lambda-hosted job still wants
 # deploy-infra. The heavy jobs (intelligence-build, consensus-agent,
 # tips-pipeline, nightly-etl, preflight, calibrator-coverage) are all Fargate.
+#
+# WHAT THIS LEAVES BEHIND, said plainly: after a run, the four Lambdas
+# (tip-time-snapshot, late-odds-watch, bsp-settle, weekly-digest) keep the
+# digest they were last deployed with, so they run an older handler.py than
+# the Fargate tasks until deploy-infra next runs 05_lambda_jobs.sh. That split
+# is the expected state after a code-only push, not a fault. Nothing reports
+# it: deploy_preflight's freshness row reads STRIDE_IMAGE_SHA from inside the
+# Fargate preflight task, so it sees the new image and says nothing about the
+# Lambdas. If the merged change touched a Lambda-hosted job, run deploy-infra.
 
 name: rebuild-image
 
@@ -125,5 +134,8 @@ jobs:
             exit 1
           fi
           echo "PASS: stride-jobs:latest is built from ${GITHUB_SHA}."
-          echo "The next scheduled Fargate task pulls it; Lambda-hosted jobs still" \
-               "need deploy-infra (05_lambda_jobs.sh update-function-code)."
+          echo "The next scheduled Fargate task pulls it. The four Lambdas" \
+               "(tip-time-snapshot, late-odds-watch, bsp-settle, weekly-digest)" \
+               "keep their previous digest until deploy-infra runs" \
+               "05_lambda_jobs.sh update-function-code — expected after a" \
+               "code-only push, and deploy_preflight cannot see it."

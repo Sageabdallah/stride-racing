@@ -120,8 +120,9 @@ racecard job records a quiet day and the rest of the chain stands down.
 - **Deployment.** [`infra/`](infra/) holds the AWS setup as shell scripts:
   one container image shared by every job, four Lambdas, ten Fargate tasks,
   their schedules, secrets and alerts. The `deploy-infra` workflow runs them
-  from GitHub Actions with no stored AWS keys. Models and the tipster panel
-  live in a private bucket and are loaded when a task starts.
+  from GitHub Actions with no stored AWS keys; `rebuild-image` rebuilds and
+  pushes the image alone, for a code-only change. Models and the tipster
+  panel live in a private bucket and are loaded when a task starts.
 - **Watching.** GitHub Actions check that every scheduled job ran, report
   any failed task with the tail of its log, and confirm the morning actually
   produced tips. Each opens an issue and a read-only agent comments a

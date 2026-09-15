@@ -106,12 +106,14 @@ def _row(name, status, detail=""):
 # DEPLOYMENT board — do the running bytes match main?
 # ---------------------------------------------------------------------------
 #
-# deploy-infra is dispatch-only and deliberately stays that way, so a merge
-# that changes job behaviour does not reach AWS until someone runs it. Nothing
-# noticed the gap. On 2026-08-03 the quiet-day work sat on main for an hour
-# while Fargate ran the previous image: the GitHub crons had the fix and the
-# Fargate jobs did not, so the two monitors disagreed about the same morning
-# and neither was wrong. This is the check that would have said so.
+# Both deploy paths are dispatch-only and deliberately stay that way —
+# rebuild-image for the image alone, deploy-infra for the full stack — so a
+# merge that changes job behaviour does not reach AWS until someone runs one
+# of them. Nothing noticed the gap. On 2026-08-03 the quiet-day work sat on
+# main for an hour while Fargate ran the previous image: the GitHub crons had
+# the fix and the Fargate jobs did not, so the two monitors disagreed about
+# the same morning and neither was wrong. This is the check that would have
+# said so.
 #
 # It runs inside the container, against the image's own stamp, and asks GitHub
 # what changed between that commit and main. Two deliberate choices:
