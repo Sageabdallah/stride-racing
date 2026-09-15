@@ -937,6 +937,29 @@ def job_intelligence_build() -> dict:
     return {"last_success_date": _today(), "files_built": len(built)}
 
 
+def _file_identity(path: str):
+    """(inode, size, mtime_ns) for one file, or None if it is not there.
+
+    Enough to tell the file a step WROTE from the file that was already
+    here — which an os.path.exists() cannot, and which matters wherever a
+    _sync_down of the same directory runs before the step.
+
+    Deliberately an identity and not a timestamp threshold. Comparing an
+    inode stamp against this process's time.time() is a cross-clock
+    comparison: the stamp is truncated to the filesystem's resolution and
+    the clock is not, so a file the step really wrote can read back below a
+    reading taken just before it. Every value here is compared only against
+    another reading of the same kind from the same filesystem, so the
+    resolution cancels instead of deciding the outcome. Same reasoning
+    _db_now already applies to the database clock.
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def job_consensus_agent() -> dict:
     _sync_down("server/python/intelligence")
     if _require_racecard("consensus-agent") == "quiet":
@@ -946,8 +969,19 @@ def job_consensus_agent() -> dict:
         # be a RuntimeError and an SNS alarm for a day with nothing to do.
         # It also spends real LLM budget to reach that conclusion.
         return {"last_success_date": _today(), "quiet_day": True}
+    # One reading of the clock for the whole job. _run_ok was told to build
+    # for _today() and the post-condition below then asked _today() again;
+    # across a midnight rollover those are different days and the check
+    # looks for a file the run was never asked to write.
+    date = _today()
+    path = f"{_root()}/server/python/intelligence/consensus_{date}.json"
+    # AFTER the _sync_down at the top of this job, and before the run. That
+    # order is the whole point: the relay brings yesterday's — or this
+    # morning's — consensus_<date>.json back into the container, so it must
+    # be part of what we already had, not part of what the run produced.
+    before = _file_identity(path)
     try:
-        _run_ok("consensus_agent.py", _today())
+        _run_ok("consensus_agent.py", date)
     except Exception:
         # The health sidecar is the run's own account of what its two mention
         # sources did — panel_fetch_success/attempted and the per-API call
@@ -967,18 +1001,40 @@ def job_consensus_agent() -> dict:
         # save. Best-effort upload, original exception either way.
         try:
             _sync_up("server/python/intelligence",
-                     f"consensus_{_today()}.health.json")
+                     f"consensus_{date}.health.json")
         except Exception as sync_err:
             print(f"[sync] health sidecar upload failed: {sync_err}",
                   file=sys.stderr)
         raise
-    path = f"{_root()}/server/python/intelligence/consensus_{_today()}.json"
-    if not os.path.exists(path):
+    after = _file_identity(path)
+    if after is None:
         raise RuntimeError(
             f"consensus-agent: {path} absent after a clean exit. Without "
             f"fresh consensus every pick degrades to NO_BET.")
+    if after == before:
+        # Presence was standing in for authorship. os.path.exists() here was
+        # satisfied by whatever _sync_down had just put on disk, so on any
+        # second invocation for the same day — a retry, a DLQ redrive, an
+        # operator re-run — a consensus_agent.py that exited 0 having written
+        # nothing passed this gate and _sync_up then re-published the relayed
+        # file as the day's result.
+        #
+        # That is not hypothetical. consensus_agent.py:1648 records the run
+        # it happened on: with no API keys the agent "reported SUCCESS, wrote
+        # no consensus file, and left every downstream pick to degrade to
+        # NO_BET with no alarm anywhere" (issue #176). That was fixed in the
+        # agent by raising instead of returning — but this gate, which exists
+        # to catch the class rather than the instance, would still not have
+        # caught it whenever the relay had a file to bring down.
+        raise RuntimeError(
+            f"consensus-agent: {path} is the file that was already on disk "
+            f"before the run — same inode, size and mtime — so it is what "
+            f"_sync_down relayed, not what this run wrote. "
+            f"consensus_agent.py exited 0 without producing a consensus for "
+            f"{date}. Publishing it would pass a stale day off as a fresh "
+            f"one; without fresh consensus every pick degrades to NO_BET.")
     _sync_up("server/python/intelligence")
-    return {"last_success_date": _today()}
+    return {"last_success_date": date}
 
 
 # The realised context-multiplier distribution (audit 2026-09-06 H3/H4) is
