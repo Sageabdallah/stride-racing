@@ -496,6 +496,21 @@ def test_record_prints_the_line_the_handler_parses(handler, monkeypatch, capsys)
     assert m is not None and m.groups() == ("0", "2026-09-14", "0")
 
 
+def test_file_identity_does_not_swallow_an_unreadable_path(handler, tmp_path):
+    """Only absence may read as absence.
+
+    A stat that failed for any other reason and returned None would put the
+    file in neither snapshot the same way: absent `before`, present `after`,
+    so the file the relay brought down reads as one the run wrote. That is
+    the exact false green this guard exists to remove, reintroduced by
+    widening one except clause.
+    """
+    not_a_dir = tmp_path / "intelligence"
+    not_a_dir.write_text("{}")
+    with pytest.raises(NotADirectoryError):
+        handler._file_identity(str(not_a_dir / "consensus_2026-04-11.json"))
+
+
 def test_consensus_fails_when_no_consensus_file(handler, monkeypatch, tmp_path):
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
@@ -504,13 +519,161 @@ def test_consensus_fails_when_no_consensus_file(handler, monkeypatch, tmp_path):
     assert "NO_BET" in str(e.value)
 
 
-def test_consensus_passes_with_consensus_file(handler, monkeypatch, tmp_path):
+def _consensus_dir(handler, monkeypatch, tmp_path):
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
     intel = tmp_path / "server" / "python" / "intelligence"
     os.makedirs(intel)
-    (intel / f"consensus_{handler._today()}.json").write_text("{}")
+    return intel, intel / f"consensus_{handler._today()}.json"
+
+
+def test_consensus_passes_when_the_run_writes_the_file(handler, monkeypatch,
+                                                       tmp_path):
+    """The success path, with the run actually doing the writing.
+
+    This replaces a test that pre-created the file itself and then asserted
+    the job did not raise. That is the defect, not the contract: it asserted
+    that a consensus_agent.py which exited 0 having written nothing passes,
+    so long as SOMETHING had put a file of the right name on disk.
+    """
+    _, path = _consensus_dir(handler, monkeypatch, tmp_path)
+    monkeypatch.setattr(handler, "_run_ok",
+                        lambda *a, **k: path.write_text('{"r1": {}}'))
     handler.job_consensus_agent()   # must not raise
+
+
+def test_consensus_passes_when_the_run_rewrites_an_existing_file(handler,
+                                                                 monkeypatch,
+                                                                 tmp_path):
+    """A re-run for the same day is legitimate, and must stay legitimate.
+
+    The relay brings this morning's consensus back down; the agent then runs
+    and overwrites it. Only a file the run did not touch is a failure.
+    """
+    _, path = _consensus_dir(handler, monkeypatch, tmp_path)
+    path.write_text("{}")                          # what _sync_down relayed
+    monkeypatch.setattr(handler, "_run_ok",
+                        lambda *a, **k: path.write_text('{"r1": {}}'))
+    handler.job_consensus_agent()   # must not raise
+
+
+def test_consensus_passes_when_the_rewrite_keeps_the_same_size(handler,
+                                                               monkeypatch,
+                                                               tmp_path):
+    """Pins st_mtime_ns into the identity.
+
+    A consensus rewritten to the same byte count is still a rewrite, and an
+    identity keyed on size alone would call it the relayed file and take the
+    day red. The new stamp is set explicitly rather than inherited from the
+    write, so the test does not itself depend on the filesystem's timestamp
+    resolution — on a 1-second-granularity volume both writes land in one
+    tick and the mtime would be identical. It moves backwards on purpose:
+    the check asks whether the identity changed, not whether it grew.
+    """
+    _, path = _consensus_dir(handler, monkeypatch, tmp_path)
+    path.write_text('{"r1": {}}')                  # what _sync_down relayed
+
+    def run(*a, **k):
+        path.write_text('{"r2": {}}')              # same byte count
+        older = time.time() - 3600
+        os.utime(path, (older, older))
+        return ""
+
+    monkeypatch.setattr(handler, "_run_ok", run)
+    handler.job_consensus_agent()   # must not raise
+
+
+def test_consensus_passes_when_the_file_is_replaced_in_place(handler,
+                                                             monkeypatch,
+                                                             tmp_path):
+    """Pins st_ino into the identity.
+
+    consensus_agent.py:1486 writes through Path.write_text today, which
+    truncates in place and keeps the inode. A move to the usual atomic
+    shape — build a temp file, os.replace it over the target — lands on a
+    new inode and can carry the temp file's stamp and byte count, so the
+    inode is the only field left that sees it. Without it such a rewrite
+    would read as the relayed file.
+    """
+    intel, path = _consensus_dir(handler, monkeypatch, tmp_path)
+    path.write_text('{"r1": {}}')                  # what _sync_down relayed
+    st = os.stat(path)
+
+    def run(*a, **k):
+        tmp = intel / "consensus.tmp"
+        tmp.write_text('{"r2": {}}')               # same byte count
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.replace(tmp, path)                      # new inode, same stamp
+        return ""
+
+    monkeypatch.setattr(handler, "_run_ok", run)
+    handler.job_consensus_agent()   # must not raise
+
+
+def test_consensus_fails_when_the_file_is_the_one_the_relay_brought_down(
+        handler, monkeypatch, tmp_path):
+    """The gap this guard was missing.
+
+    consensus_agent.py exits 0 having written nothing — the shape
+    consensus_agent.py:1648 records from issue #176, where a run with no API
+    keys "reported SUCCESS, wrote no consensus file". A consensus file for
+    today is nevertheless on disk, because _sync_down at the top of the job
+    relays server/python/intelligence/ and an earlier run that day published
+    one. os.path.exists() was satisfied by it, the job reported success, and
+    _sync_up re-published the stale file as the day's result.
+    """
+    _, path = _consensus_dir(handler, monkeypatch, tmp_path)
+    path.write_text("{}")                          # what _sync_down relayed
+    # _run_ok stays the neutralised no-op: exits 0, writes nothing.
+    with pytest.raises(RuntimeError) as e:
+        handler.job_consensus_agent()
+    assert "relayed" in str(e.value) and "NO_BET" in str(e.value)
+
+
+def test_consensus_snapshots_the_file_after_the_relay_not_before(handler,
+                                                                 monkeypatch,
+                                                                 tmp_path):
+    """Ordering, pinned: the reading has to sit BELOW the _sync_down.
+
+    Taken above it, the relayed file is absent at snapshot time and present
+    afterwards, so it reads as one the run produced — the same false green,
+    reintroduced by moving one line. Here the relay itself creates the file,
+    which is what it does in production.
+    """
+    _, path = _consensus_dir(handler, monkeypatch, tmp_path)
+    monkeypatch.setattr(handler, "_sync_down",
+                        lambda *a, **k: path.write_text("{}"))
+    # _run_ok stays the neutralised no-op: exits 0, writes nothing.
+    with pytest.raises(RuntimeError) as e:
+        handler.job_consensus_agent()
+    assert "relayed" in str(e.value)
+
+
+def test_consensus_checks_the_date_it_asked_the_agent_to_build(handler,
+                                                               monkeypatch,
+                                                               tmp_path):
+    """One reading of the clock for the whole job.
+
+    _run_ok was told _today() and the post-condition asked _today() again.
+    Across a midnight rollover those differ, and the job then hunts for a
+    file it never asked for. Pinned by making _today() advance on every
+    call: the run must be checked against the date it was given.
+    """
+    _, _ = _consensus_dir(handler, monkeypatch, tmp_path)
+    days = iter(["2026-04-11", "2026-04-12", "2026-04-13", "2026-04-14"])
+    monkeypatch.setattr(handler, "_today", lambda: next(days))
+    seen = {}
+
+    def run(script, date, *a, **k):
+        seen["date"] = date
+        p = (tmp_path / "server" / "python" / "intelligence"
+             / f"consensus_{date}.json")
+        p.write_text('{"r1": {}}')
+        return ""
+
+    monkeypatch.setattr(handler, "_run_ok", run)
+    out = handler.job_consensus_agent()             # must not raise
+    assert out["last_success_date"] == seen["date"]
 
 
 # -------------------------------------------------------- baseline-night

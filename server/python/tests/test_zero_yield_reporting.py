@@ -124,27 +124,41 @@ def test_run_ok_still_succeeds_quietly_on_an_allowed_code(handler, monkeypatch):
 
 # ------------------------------- the artifact that explains a failure survives
 
-def _consensus_job(handler, monkeypatch, run_raises):
+def _consensus_job(handler, monkeypatch, tmp_path, run_raises):
+    """The job with its I/O neutralised and a real intelligence directory.
+
+    The clean-run arm writes consensus_<date>.json, because that is what
+    consensus_agent.py:1486 does and what the job's post-condition now
+    requires: the file has to be one the run produced, not merely one that
+    is present. This fixture used to `monkeypatch.setattr(os.path, "exists",
+    lambda p: True)` instead — faking the post-condition rather than
+    satisfying it, which also meant these tests would have kept passing if
+    the run had stopped writing anything at all.
+    """
     uploads = []
+    intel = tmp_path / "server" / "python" / "intelligence"
+    os.makedirs(intel)
+    monkeypatch.setattr(handler, "_root", lambda: str(tmp_path))
     monkeypatch.setattr(handler, "_sync_down", lambda *a, **k: 0)
     monkeypatch.setattr(handler, "_sync_up",
                         lambda d, pattern="*.json": uploads.append((d, pattern)))
     monkeypatch.setattr(handler, "_require_racecard", lambda job: "card")
     monkeypatch.setattr(handler, "_today", lambda: "2026-09-08")
-    monkeypatch.setattr(os.path, "exists", lambda p: True)
 
     def run_ok(script, *args, **kw):
         if run_raises:
             raise RuntimeError("consensus_agent.py exited 4 -- zero-yield "
                                "breakdown: panel 0/16 sources fetched OK")
+        (intel / "consensus_2026-09-08.json").write_text('{"r1": {}}')
         return ""
 
     monkeypatch.setattr(handler, "_run_ok", run_ok)
     return uploads
 
 
-def test_health_sidecar_is_uploaded_when_the_run_fails(handler, monkeypatch):
-    uploads = _consensus_job(handler, monkeypatch, run_raises=True)
+def test_health_sidecar_is_uploaded_when_the_run_fails(handler, monkeypatch,
+                                                       tmp_path):
+    uploads = _consensus_job(handler, monkeypatch, tmp_path, run_raises=True)
     with pytest.raises(RuntimeError):
         handler.job_consensus_agent()
     assert uploads == [("server/python/intelligence",
@@ -152,14 +166,14 @@ def test_health_sidecar_is_uploaded_when_the_run_fails(handler, monkeypatch):
 
 
 def test_a_failed_run_still_does_not_publish_its_consensus_artifact(
-        handler, monkeypatch):
+        handler, monkeypatch, tmp_path):
     """The sidecar, never the directory.
 
     On a zero-yield run consensus_<date>.json exists and is full of zeroes.
     Publishing it would let run_tips_pipeline sync down a failed day and score
     it as a real one — trading a stale-data bug for a wrong-data bug.
     """
-    uploads = _consensus_job(handler, monkeypatch, run_raises=True)
+    uploads = _consensus_job(handler, monkeypatch, tmp_path, run_raises=True)
     with pytest.raises(RuntimeError):
         handler.job_consensus_agent()
     # Non-empty first: `all()` over nothing is True, and "uploaded nothing" is
@@ -168,7 +182,8 @@ def test_a_failed_run_still_does_not_publish_its_consensus_artifact(
     assert all(pattern.endswith(".health.json") for _, pattern in uploads)
 
 
-def test_a_failing_sidecar_upload_does_not_mask_the_reason(handler, monkeypatch):
+def test_a_failing_sidecar_upload_does_not_mask_the_reason(handler, monkeypatch,
+                                                          tmp_path):
     """The upload is best-effort; the exception it protects is not.
 
     An S3 error raised from inside the except block chains over the original
@@ -176,7 +191,7 @@ def test_a_failing_sidecar_upload_does_not_mask_the_reason(handler, monkeypatch)
     put a boto stack trace in the alert in place of the cause — losing exactly
     what the block exists to save.
     """
-    _consensus_job(handler, monkeypatch, run_raises=True)
+    _consensus_job(handler, monkeypatch, tmp_path, run_raises=True)
 
     def denied(*a, **k):
         raise RuntimeError("An error occurred (AccessDenied)")
@@ -188,8 +203,9 @@ def test_a_failing_sidecar_upload_does_not_mask_the_reason(handler, monkeypatch)
     assert "AccessDenied" not in str(e.value)
 
 
-def test_a_clean_run_uploads_the_directory_as_before(handler, monkeypatch):
-    uploads = _consensus_job(handler, monkeypatch, run_raises=False)
+def test_a_clean_run_uploads_the_directory_as_before(handler, monkeypatch,
+                                                     tmp_path):
+    uploads = _consensus_job(handler, monkeypatch, tmp_path, run_raises=False)
     assert handler.job_consensus_agent() == {"last_success_date": "2026-09-08"}
     assert uploads == [("server/python/intelligence", "*.json")]
 
