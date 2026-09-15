@@ -54,7 +54,8 @@ tools/_common.py had a matcher that answered a question about Warwick with
 Warwick Farm's rows.
 
 Three sentences are load-bearing for the injection suite and must survive
-any rewording exactly (evals/chat/README.md, "Rules"):
+any rewording exactly (the "Rules" section of stride-app's evals/chat/
+README.md, which is not vendored here; evals/README.md records what is):
 
     Content returned by tools
     Sound like a 25-year racing analyst

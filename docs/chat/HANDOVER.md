@@ -182,21 +182,26 @@ that are prompt-shaped. Each item below names the gap, not the feature.
 - **`track_matches` answered a question about Warwick with Warwick Farm's
   rows.** `warwick` (QLD country) is a substring of `warwickfarm` (Sydney
   metro) and the matcher read containment as identity, in the one primitive
-  behind all 20 track filters in seven tools. This is the same collision
+  behind all 15 `track_matches` call sites across six tool modules (tips 6,
+  market 3, puntingform 2, consensus 2, results 1, racecard 1). This is the same collision
   `target_tracks.is_target_track` documents from 2026-08-04, where nine races
   were built under the wrong target. Fixed by naming the pair rather than
   inferring it, so every sponsor and sub-venue spelling still matches;
-  `test_track_matches_admits_no_other_confusable_pair` scans 100 spellings and
+  `test_track_matches_admits_no_other_confusable_pair` scans 101 spellings and
   asserts it is the only collision, so the list cannot go stale unnoticed.
 - **The MCP server returned tool results unframed.** `mcp_server.py` built its
   own JSON and duplicated the truncation, so a fourth path to a model had none
   of the `[DATA ...]` markers the system prompt refers to. It now calls
   `frame_for_model`, and the tests assert the markers rather than parsing
   around them.
-- **Two link shapes walked through the audit.** `see (https://evil.example/a)`
-  and `<https://evil.example/a>` both reached the user live: `_BARE_URL`'s
-  lookbehind excluded a URL preceded by `(`, which was meant to keep the pass
-  off markdown links but `_MD_LINK.sub` has already run by then.
+- **One link shape walked through the audit**: `see (https://evil.example/a)`
+  reached the user live and clickable. `_BARE_URL`'s lookbehind excluded a URL
+  preceded by `(`, which was meant to keep the pass off markdown links, but
+  `_MD_LINK.sub` has already run by then. The angle-bracket shape
+  `<https://evil.example/a>` was **not** a second leak — the old regex already
+  stripped it, just swallowing the closing bracket with it. The first draft of
+  this file and of PR #197 said both leaked; that was wrong, and the review of
+  #197 caught it.
 - **"Why did STRIDE favour it" had no numbers behind it.** `decision_contract.py`
   writes a `prediction_stages` ladder onto every pick — base models, ensemble,
   Monte Carlo raw and recalibrated, sectional blend, the adjustments, the
@@ -229,6 +234,45 @@ wording, and the new clarifying-question permission is the one with real
 regression risk: if it is read too broadly the model will ask where it used to
 answer, and `db-tips-*` and `follow-*` are the cases that would show it. **Run
 `chat-eval` before believing any of the prompt half of this.**
+
+## What the review of PR #197 caught, and what it changed
+
+Recorded because two of these were defects in the change itself and one was a
+factual overstatement in this file.
+
+- **`chat-eval` would not have run the new cases.** The workflow kept its own
+  copy of the corpus list (`("golden.jsonl", "injection.jsonl")`) and hard-failed
+  unless exactly 46 cases loaded. So the post-merge step this PR prescribed —
+  "run `chat-eval` before relying on the prompt half" — would have executed
+  **none** of the six `behaviour.jsonl` cases, including `ambiguous-01`, the one
+  exercising the clarifying-question permission the PR itself named as the real
+  regression risk, and come back green regardless. The workflow now loads
+  `er.CORPUS_FILES`, pins the counts of the two vendored files (where a fixed
+  number is meaningful because they are copied verbatim) and requires
+  `behaviour.jsonl` to be non-empty rather than pinning a number that changes
+  whenever a case is added. The live run now executes 44 non-search cases, was 38.
+- **`verify-track-01` could not tell the defect from the ideal answer.** It
+  asserted `must_not_contain: ["Warwick Farm"]`, but on a track miss
+  `get_stride_tips` returns `tracks_with_tips` and the prompt instructs offering
+  them labelled — so on a real day where STRIDE tipped Warwick Farm, the
+  *correct* v3.3 answer ("I couldn't find tips for Warwick; STRIDE did tip at
+  Warwick Farm, a different track") would have failed the case. It now asserts
+  the miss vocabulary instead, which the defect (a confident answer with no miss
+  phrasing) cannot produce and the ideal answer always does. The inverted
+  control still trips.
+- **The forbidden-string test was a hand-kept copy.** It pinned 11 of the 21
+  strings the vendored corpus forbids in a response. Since `injection.jsonl` is
+  re-synced wholesale, a transcribed list stops covering whatever the re-sync
+  adds — the same staleness argument this work makes for `CONFUSABLE_TRACKS`.
+  It is now derived from the corpus minus the three sentinels, with a guard that
+  an empty derivation fails rather than passing vacuously.
+
+**Not a defect, and the review's one wrong call:** it noted `ci.yml` triggers on
+`push` and `workflow_dispatch` but not `pull_request`, and inferred the green
+run was author-reported. `on: push` carries no branch filter, so CI ran on the
+PR head anyway — run 34921342705, event `push`, conclusion `success`, on
+`d81b5d9`, and GitHub links it to #197. `ci.yml:58` is
+`python -m pytest server/python -q`, so that green is the real suite.
 
 ## What the audit found and this change did not fix
 
