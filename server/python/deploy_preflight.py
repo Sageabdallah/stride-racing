@@ -21,7 +21,9 @@ here is "did tipping run for the latest race day?" — max(race_date) on
 selections vs the race calendar. A schema-only check reads green throughout.
 
 The deployment board answers a different question that used to have no owner:
-main can move without AWS moving, because deploy-infra is dispatch-only. See
+main can move without AWS moving, because both deploy paths are dispatch-only
+(rebuild-image for a code-only change, deploy-infra when a Lambda-hosted job
+or any schedule/secret changed too). See
 check_deployment for what it compares and why it is path-scoped.
 
 Usage:
@@ -104,12 +106,14 @@ def _row(name, status, detail=""):
 # DEPLOYMENT board — do the running bytes match main?
 # ---------------------------------------------------------------------------
 #
-# deploy-infra is dispatch-only and deliberately stays that way, so a merge
-# that changes job behaviour does not reach AWS until someone runs it. Nothing
-# noticed the gap. On 2026-08-03 the quiet-day work sat on main for an hour
-# while Fargate ran the previous image: the GitHub crons had the fix and the
-# Fargate jobs did not, so the two monitors disagreed about the same morning
-# and neither was wrong. This is the check that would have said so.
+# Both deploy paths are dispatch-only and deliberately stay that way —
+# rebuild-image for the image alone, deploy-infra for the full stack — so a
+# merge that changes job behaviour does not reach AWS until someone runs one
+# of them. Nothing noticed the gap. On 2026-08-03 the quiet-day work sat on
+# main for an hour while Fargate ran the previous image: the GitHub crons had
+# the fix and the Fargate jobs did not, so the two monitors disagreed about
+# the same morning and neither was wrong. This is the check that would have
+# said so.
 #
 # It runs inside the container, against the image's own stamp, and asks GitHub
 # what changed between that commit and main. Two deliberate choices:
@@ -152,7 +156,8 @@ def check_deployment(branch="main", timeout=15, fetch=None):
         return [_row(name, RED,
                      "STRIDE_IMAGE_SHA is unset — this image was built before "
                      "the freshness stamp existed, so it cannot be checked at "
-                     "all. Run deploy-infra.")]
+                     "all. Run rebuild-image (or deploy-infra, if a "
+                     "Lambda-hosted job changed).")]
     if not _SHA_RE.match(sha):
         return [_row(name, AMBER,
                      f"image stamped {sha!r}, which is not a clean commit "
@@ -179,7 +184,8 @@ def check_deployment(branch="main", timeout=15, fetch=None):
         return [_row(name, RED,
                      f"{behind} commit(s) behind main and the compare hit its "
                      f"{_COMPARE_FILE_CAP}-file cap, so the drift cannot be "
-                     "shown to be irrelevant. Run deploy-infra.")]
+                     "shown to be irrelevant. Run rebuild-image (or "
+                     "deploy-infra, if a Lambda-hosted job changed).")]
 
     changed = sorted({f.get("filename", "") for f in files if _image_relevant(f.get("filename", ""))})
     if not changed:
@@ -191,7 +197,8 @@ def check_deployment(branch="main", timeout=15, fetch=None):
     return [_row(name, RED,
                  f"image is {sha[:7]}; main has changed {len(changed)} "
                  f"image-relevant file(s) since — {shown}. The jobs are "
-                 "running different code from main. Run deploy-infra.")]
+                 "running different code from main. Run rebuild-image (or "
+                 "deploy-infra, if a Lambda-hosted job changed).")]
 
 
 # ---------------------------------------------------------------------------

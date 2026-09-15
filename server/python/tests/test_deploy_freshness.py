@@ -100,6 +100,9 @@ def test_code_change_since_the_image_is_red(monkeypatch):
     _stamp(monkeypatch)
     row, = dp.check_deployment(fetch=_compare(["server/python/download_racecards.py"]))
     assert row["status"] == RED
+    # Both paths, by name: rebuild-image is the remediation for a code-only
+    # change, and deploy-infra stays because a Lambda-hosted job needs it.
+    assert "rebuild-image" in row["detail"]
     assert "deploy-infra" in row["detail"]
 
 
@@ -139,6 +142,7 @@ def test_unstamped_image_is_red_not_amber(monkeypatch):
     row, = dp.check_deployment(fetch=_compare([]))
     assert row["status"] == RED
     assert "unset" in row["detail"]
+    assert "rebuild-image" in row["detail"]
 
 
 def test_dirty_build_is_amber(monkeypatch):
@@ -183,6 +187,7 @@ def test_truncated_compare_is_red_not_green(monkeypatch):
         fetch=_compare(["docs/f%d.md" % i for i in range(dp._COMPARE_FILE_CAP)]))
     assert row["status"] == RED
     assert "cap" in row["detail"]
+    assert "rebuild-image" in row["detail"]
 
 
 # ------------------------------------------------------------- wiring checks
