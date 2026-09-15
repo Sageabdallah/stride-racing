@@ -1301,11 +1301,15 @@ def test_consensus_proof_fails_if_it_never_reached_the_panel(handler,
                                                              monkeypatch):
     """The defect this job actually had, pinned.
 
-    With no card staged, run_consensus returns at its load_racecard_meetings
-    check — which sits above load_tipster_panel — prints "No racecard found",
-    writes an empty consensus file and exits 0. The job reported PASSED
+    With no card staged, run_consensus returned at its load_racecard_meetings
+    check — which sits above load_tipster_panel — printed "No racecard found",
+    wrote an empty consensus file and exited 0. The job reported PASSED
     (ECS task 417b4554, 2026-08-06) while proving none of the container,
     secret or panel setup its docstring claims.
+
+    That path now raises and fails at _run_ok, so the stub below is no longer
+    what consensus_agent prints. It stays because the [PANEL] check guards
+    the class — any early return that still exits 0 — not that one instance.
     """
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(

@@ -882,10 +882,11 @@ def job_bsp_settle() -> dict:
 def _require_racecard(job: str) -> str:
     """Every card-dependent job must FAIL when the card is missing.
 
-    stride_build.py, odds_movement.py and run_tips_pipeline.py have no
-    non-zero exit path, so without this a failed 05:30 collect would let
-    06:00, 07:00 and 10:00 each run on nothing and report success — the
-    whole morning silently producing no tips.
+    odds_movement.py and run_tips_pipeline.py have no non-zero exit path, and
+    stride_build.py's one (`sys.exit(0 if all_ok else 1)`) is decided by
+    fpath.exists(), which a missing card does not change. So without this a
+    failed 05:30 collect would let 06:00, 07:00 and 10:00 each run on nothing
+    and report success — the whole morning silently producing no tips.
 
     A quiet day is the one case where no card is correct: the provider was
     healthy and listed meetings, none on the target-track list. Returns
@@ -1550,8 +1551,10 @@ def job_consensus_proof() -> dict:
     if "[PANEL]" not in out:
         raise RuntimeError(
             "consensus-proof: exited 0 without reaching the tipster panel. "
-            "Something returned before load_tipster_panel — check for 'No "
-            "racecard found' or 'No runners' above.")
+            "Something returned before load_tipster_panel. The three paths "
+            "that used to do this (no card, no runners, empty track filter) "
+            "now raise, so this is a NEW early return — read the output "
+            "above for what it printed on the way out.")
     return {"last_success_date": _today(), "detail": out[-400:]}
 
 
