@@ -28,6 +28,6 @@ from __future__ import annotations
 
 from . import _paths  # noqa: F401  (puts server/python on sys.path for the flat modules)
 
-PROMPT_VERSION = "v3.3"
+PROMPT_VERSION = "v3.4"
 
 __all__ = ["PROMPT_VERSION"]

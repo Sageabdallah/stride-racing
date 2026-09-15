@@ -278,8 +278,8 @@ def test_preflight_checks_a_deep_thought_tier_that_differs(ctx):
 
 # -- the prompt ----------------------------------------------------------------
 
-def test_the_prompt_is_v3_3():
-    assert PROMPT_VERSION == "v3.3"
+def test_the_prompt_is_v3_4():
+    assert PROMPT_VERSION == "v3.4"
     assert f"Prompt version {PROMPT_VERSION}" in SYSTEM_PROMPT
 
 
@@ -320,9 +320,49 @@ def test_the_prompt_permits_one_clarifying_question_and_bounds_it():
 def test_the_prompt_has_a_verify_step_with_all_three_checks():
     assert "BEFORE YOU ANSWER" in SYSTEM_PROMPT
     assert "has not necessarily answered the question" in SYSTEM_PROMPT
-    assert "Warwick Farm in Sydney and Warwick in Queensland" in SYSTEM_PROMPT
+    assert "A near match is not a match" in SYSTEM_PROMPT
     assert "is actually present" in SYSTEM_PROMPT
     assert "names the race, the track and the date" in SYSTEM_PROMPT
+
+
+def test_the_verify_step_names_no_confusable_track_pair():
+    """Why v3.4 exists, half of it.
+
+    v3.3's verify step illustrated itself with "Warwick Farm in Sydney and
+    Warwick in Queensland are different racetracks". chat-eval run #9 then
+    failed verify-track-01 with `tools: []` on a question that supplied both a
+    date and a track: the example taught the model that Warwick is a confusable
+    name, and the ambiguity rule two sections earlier told it to ask rather
+    than look up. track_matches already refuses that pair in code, so the
+    prompt does not need the example -- and naming any pair here re-opens the
+    interaction.
+    """
+    for pair in ("Warwick Farm", "Sandown Hillside", "Ballarat Synthetic",
+                 "Picklebet Park"):
+        assert pair not in SYSTEM_PROMPT, pair
+
+
+def test_the_ambiguity_rule_excludes_an_unfamiliar_track_name():
+    """The other half. A name is something to look up, not something to ask
+    about; if the records hold nothing for it, the miss is the answer."""
+    assert "is not an ambiguity" in SYSTEM_PROMPT
+    assert "it is a name to look up" in SYSTEM_PROMPT
+
+
+def test_the_miss_vocabulary_is_read_before_every_other_say_so():
+    """Why v3.4 exists, the other half.
+
+    v3.3 moved the honest-miss rule below three sections that each also say
+    "say so" in their own words, and chat-eval run #9 regressed miss-02 --
+    which had passed on v3.2 in runs #5 to #8, and which prompt v3.1 was
+    written specifically to pin. The fixed opening now precedes all of them,
+    and says in terms that it governs them.
+    """
+    honesty = SYSTEM_PROMPT.index("HONESTY IS THE PRODUCT")
+    for later in ("WHERE THE ANSWER COMES FROM", "WHEN YOU CANNOT TELL WHICH RACE IS MEANT",
+                  "BEFORE YOU ANSWER"):
+        assert honesty < SYSTEM_PROMPT.index(later), later
+    assert "a miss has one fixed opening and this is it" in SYSTEM_PROMPT
 
 
 def test_the_prompt_says_a_price_is_a_snapshot_not_a_live_screen_price():

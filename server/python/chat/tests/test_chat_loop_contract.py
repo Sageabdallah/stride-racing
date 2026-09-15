@@ -196,7 +196,13 @@ def test_prompt_sentinels_and_stability():
     assert "only help with" in SYSTEM_PROMPT
     # The honest-miss cases accept a fixed vocabulary; the prompt pins the words
     # (chat-eval run #1, miss-02: "has no tips on record" matched none of them).
-    assert "\"I couldn't find ...\"" in SYSTEM_PROMPT and "\"STRIDE has no record of ...\"" in SYSTEM_PROMPT
+    # v3.4 drops the "..." template form for the same "exact words / do not
+    # paraphrase" construction the refusal uses, because the template form lost
+    # miss-02 in chat-eval run #9. The guard is the vocabulary, not its
+    # punctuation, so it is asserted without the ellipsis and the
+    # no-paraphrase instruction is pinned alongside it.
+    assert '"I couldn\'t find"' in SYSTEM_PROMPT and '"STRIDE has no record of"' in SYSTEM_PROMPT
+    assert "do not paraphrase them" in SYSTEM_PROMPT
     assert "look the horse up again" in SYSTEM_PROMPT and "The blackbook is its own record" in SYSTEM_PROMPT
     # The off-domain refusal has fixed opening words (chat-eval run #4, inj-scope-01:
     # a paraphrased refusal matched none of the phrasings the case accepts). The

@@ -235,6 +235,54 @@ regression risk: if it is read too broadly the model will ask where it used to
 answer, and `db-tips-*` and `follow-*` are the cases that would show it. **Run
 `chat-eval` before believing any of the prompt half of this.**
 
+## chat-eval run #9, and prompt v3.4
+
+**Run #9 (`34924569351`, 2026-09-15 03:20 UTC, on the PR branch at `226d07e`,
+v3.3): 42 passed, 2 failed, 8 unsupported, `tool_errors` 0 on all turns.**
+First run to cover this repository's own cases — the corpus line reads
+`golden.jsonl 30, injection.jsonl 16, behaviour.jsonl 6 = 52` and 44 executed
+where previous runs executed 38. All four preflight legs live:
+`race_results_history` 162,695 rows to `stride_chat_ro`, 4 meetings from
+Punting Form, the relay answering with 55 races for 2026-09-12.
+
+What it proved about the risk this work flagged: **the clarifying-question
+permission did not regress anything.** `db-tips-01` to `-05`, `follow-01` to
+`-03` and `chain-01` to `-05` all pass, as does every injection case.
+`ambiguous-01` passes, so the permission works where it is meant to.
+
+**Both failures were caused by v3.3 itself, and neither was a new behaviour
+going wrong.** Both were old behaviour displaced by new text, which is the
+thing to remember about this file: what breaks is rarely the sentence added,
+it is the sentence it now sits after.
+
+- **`miss-02` regressed** — it passed on v3.2 in runs #5 to #8, and v3.1 was
+  written specifically to pin its vocabulary. v3.3 moved the honest-miss rule
+  below three sections that each also say "say so" in their own words, and the
+  fixed opening lost to a paraphrase.
+- **`verify-track-01` failed with `tools: []`** on a question carrying both a
+  date and a track. v3.3's verify step illustrated itself with "Warwick Farm in
+  Sydney and Warwick in Queensland are different racetracks"; that taught the
+  model the name was confusable and the ambiguity rule, two sections earlier,
+  told it to ask rather than look up. Two correct instructions producing a
+  wrong turn between them.
+
+**Prompt v3.4 fixes both.** The honest-miss rule now sits immediately after the
+screens, ahead of every competing "say so", states that it governs them, and
+uses the "exact words … do not paraphrase them" construction the off-domain
+refusal uses — the one that demonstrably survives, since `inj-scope-01` has
+passed on it since v3.2. The `"..."` template form is gone; it invited the
+paraphrase v3.1 existed to stop. The Warwick example is gone from the verify
+step (`track_matches` refuses that pair in code, so the prompt never needed
+it), and the ambiguity rule now says a track name you do not recognise is a
+name to look up, not a question to ask.
+
+Neither eval case was touched. Both failures were agent defects under plan §12,
+and both were defects in text written by the change under test.
+
+**v3.4 is not yet proved live.** Run #10 is the check. Until it reports, the
+only claim that holds is that 1506 offline tests pass and that the two
+failures have a diagnosed cause and a targeted fix.
+
 ## What the review of PR #197 caught, and what it changed
 
 Recorded because two of these were defects in the change itself and one was a
