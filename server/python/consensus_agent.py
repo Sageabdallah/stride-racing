@@ -1686,26 +1686,60 @@ def run_consensus_agent(
     preflight_extraction_model(anthropic_client, _model)
     print(f"[CONSENSUS] Extraction model OK: {_model}", file=sys.stderr)
 
+    # Raised, not returned, and nothing written — the same treatment the
+    # missing-key check above already has, for the same reason. These three
+    # paths each did `_write_output(date_str, {})` then `return {}`, and that
+    # combination is wrong twice over.
+    #
+    # It reported success. `return {}` leaves LAST_RUN_HEALTH empty, so
+    # main()'s exit contract finds no zero_yield, skips the db_mirror branch
+    # on a falsy health dict, and falls off the end: exit 0. zero_yield could
+    # not have caught it either — it is `races > 0 and mentions == 0`, and
+    # here races is 0. A day that scored nothing reported the same exit code
+    # as a day that scored everything, which is issue #176's shape exactly.
+    #
+    # And it clobbered the artifact. `_write_output` here was never guarded
+    # by `dry_run`, unlike the real write site below, so the data loss that
+    # comment records as fixed was still live on these three paths: a
+    # `--dry-run` reaching one of them overwrote a real consensus file with
+    # {}. That is the documented /stride-full-dry hazard and the thing
+    # job_consensus_proof's docstring promises does not happen. The file is
+    # gitignored and has no DB mirror on days the mirror failed, so it is the
+    # only copy.
+    #
+    # Nothing legitimate is lost by failing here. The handler decides
+    # quietness BEFORE the agent runs — _require_racecard returns "quiet" and
+    # job_consensus_agent returns without invoking this at all — so reaching
+    # these lines from the scheduled path means the card went missing or came
+    # back malformed after that check passed. Run by hand, an explicit error
+    # beats an empty file that every downstream pick reads as NO_BET.
     try:
         meetings = load_racecard_meetings(date_str)
     except FileNotFoundError:
-        print(f"[CONSENSUS] No racecard found for {date_str}. Writing empty consensus file.", file=sys.stderr)
-        _write_output(date_str, {})
-        return {}
+        raise RuntimeError(
+            f"no racecard for {date_str} — consensus has nothing to score. "
+            f"The card is staged by the handler before this runs, so it "
+            f"either was not relayed or vanished after _require_racecard "
+            f"passed. Failing rather than publishing an empty consensus, "
+            f"which every downstream pick reads as NO_BET.")
 
     races = flatten_races(meetings)
     if not races:
-        print(f"[CONSENSUS] No runners for {date_str}. Writing empty consensus file.", file=sys.stderr)
-        _write_output(date_str, {})
-        return {}
+        raise RuntimeError(
+            f"the racecard for {date_str} lists no runners at all. A card "
+            f"that exists but flattens to zero races is malformed, not a "
+            f"quiet day: a quiet day is decided upstream and never reaches "
+            f"this point. Failing rather than publishing an empty consensus.")
 
     if track_filter:
         track_norm = normalize_track(track_filter)
         races = [r for r in races if r["track_key"] == track_norm]
         if not races:
-            print(f"[CONSENSUS] No races for track filter '{track_filter}'", file=sys.stderr)
-            _write_output(date_str, {})
-            return {}
+            raise RuntimeError(
+                f"no races on {date_str} match the track filter "
+                f"{track_filter!r}. Nothing to score, so nothing is written: "
+                f"an empty consensus for the whole day is not the answer to a "
+                f"question about one track.")
 
     if max_races and len(races) > max_races:
         races = races[:max_races]
