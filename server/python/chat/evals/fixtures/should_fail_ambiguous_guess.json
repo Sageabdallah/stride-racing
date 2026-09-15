@@ -1,0 +1,8 @@
+{
+  "case_id": "ambiguous-01",
+  "response": "Race 7 at Flemington: the pick is Storm Boy (5) at $4.20 on a 9.1-point edge.",
+  "citations": [],
+  "tool_calls": [
+    "get_stride_tips"
+  ]
+}

@@ -41,6 +41,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 EVALS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evals")
+# golden.jsonl and injection.jsonl are vendored verbatim from stride-app and
+# are not edited here (evals/README.md). behaviour.jsonl is this repository's
+# own, and exists because the response-behaviour specification added cases the
+# vendored corpus has none for -- routing a general-knowledge question away
+# from the tools, asking instead of guessing, and not answering about Warwick
+# with Warwick Farm's rows. Keeping them in a separate file keeps the re-sync
+# instruction in README.md true: the vendored files can still be replaced
+# wholesale without losing anything of ours.
+CORPUS_FILES = ("golden.jsonl", "injection.jsonl", "behaviour.jsonl")
 KNOWN_TOP = {"id", "category", "question", "modes", "setup", "expect"}
 KNOWN_EXPECT = {"tools_any_of", "tools_none_of", "must_contain_any", "must_not_contain",
                 "must_cite_web", "http_status"}
@@ -224,7 +233,8 @@ def _unsupported(c: Dict[str, Any]) -> bool:
     return bool((c.get("modes") or {}).get("search"))
 
 
-def run_live_cli(cases: List[Dict[str, Any]], pacing_seconds: float = 0.0) -> List[CaseResult]:
+def run_live_cli(cases: List[Dict[str, Any]], pacing_seconds: float = 0.0,
+                 model: Optional[str] = None, effort: Optional[str] = None) -> List[CaseResult]:
     if os.environ.get("EVAL_LIVE_CONFIRM") != "yes":
         print("REFUSED: --live-cli requires EVAL_LIVE_CONFIRM=yes. Live evals are operator-only.",
               file=sys.stderr)
@@ -232,7 +242,10 @@ def run_live_cli(cases: List[Dict[str, Any]], pacing_seconds: float = 0.0) -> Li
     from .contract import ChatRequestError, parse_request
     from .loop import ChatTurnError
     from .runtime import build_context, build_engine
-    engine = build_engine(build_context())
+    engine = build_engine(build_context(), model=model)
+    if effort:
+        engine.effort = engine.brain_effort = effort
+    print(f"[eval] model={engine.model} effort={engine.effort}", file=sys.stderr)
 
     def post(case_id: str, message: str, modes: Dict[str, Any]) -> Recorded:
         try:
@@ -315,7 +328,7 @@ def self_test(corpus_dir: str = EVALS_DIR) -> int:
     check("clean response passes", assert_case(c, Recorded("t", "fine", tool_calls=["Lookup_Horse"])) == [])
     check("http_status short-circuits", assert_case({"id": "t", "category": "t", "question": "q", "expect": {"http_status": 400}},
                                                     Recorded("t", "", http_status=400)) == [])
-    for f in ("golden.jsonl", "injection.jsonl"):
+    for f in CORPUS_FILES:
         cases, errors = load_corpus(f, corpus_dir)
         check(f"{f} schema ({len(cases)} cases)", not errors and len(cases) > 0)
         for e in errors:
@@ -345,7 +358,14 @@ def main(argv=None) -> int:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--live-cli", action="store_true")
     parser.add_argument("--live-url", metavar="URL")
-    parser.add_argument("--corpus-dir", default=EVALS_DIR, help="Directory holding golden.jsonl, injection.jsonl, fixtures/.")
+    parser.add_argument("--corpus-dir", default=EVALS_DIR,
+                        help="Directory holding " + ", ".join(CORPUS_FILES) + " and fixtures/.")
+    # Plan §11 question 3 and the tiering note in config.py: deciding whether a
+    # cheaper model clears this suite means running it per tier. Without these
+    # the only lever was the ambient environment, and the report recorded
+    # neither, so two runs were indistinguishable after the fact.
+    parser.add_argument("--model", help="Model id for --live-cli (overrides ANTHROPIC_CHAT_MODEL).")
+    parser.add_argument("--effort", help="output_config.effort for --live-cli.")
     parser.add_argument("--only", help="Comma-separated case ids.")
     args = parser.parse_args(argv)
     from .config import load_dotenv_once
@@ -358,7 +378,7 @@ def main(argv=None) -> int:
 
     cases: List[Dict[str, Any]] = []
     errors: List[str] = []
-    for f in ("golden.jsonl", "injection.jsonl"):
+    for f in CORPUS_FILES:
         cs, es = load_corpus(f, args.corpus_dir)
         cases.extend(cs)
         errors.extend(es)
@@ -373,7 +393,7 @@ def main(argv=None) -> int:
     if args.live_url:
         return _report(run_live_url(cases, args.live_url))
     if args.live_cli:
-        return _report(run_live_cli(cases))
+        return _report(run_live_cli(cases, model=args.model, effort=args.effort))
     return _report(run_offline(cases, args.corpus_dir))
 
 

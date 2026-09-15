@@ -248,11 +248,15 @@ class Server:
                         "error": f"{name} raised {type(e).__name__}: {e}",
                         "notes": [], "truncated": False}
 
-        text = json.dumps(envelope, sort_keys=True, default=str, ensure_ascii=False)
-        if len(text) > config.MAX_TOOL_RESULT_CHARS:
-            omitted = len(text) - config.MAX_TOOL_RESULT_CHARS
-            text = (text[:config.MAX_TOOL_RESULT_CHARS]
-                    + f"\n... [truncated: {omitted} characters omitted; ask a narrower question]")
+        # The same framing the tool loop applies, from the same function.
+        # A tool result here reaches a model just as it does through loop.py,
+        # so the [DATA ...] markers the system prompt refers to belong on it;
+        # a client whose own prompt says nothing about untrusted content is
+        # exactly the one that needs them. Imported inside the method for the
+        # reason the module docstring gives: at module scope it would pull the
+        # tool graph in before main() rebinds stdout.
+        from .tools._common import frame_for_model
+        text = frame_for_model(name, envelope, config.MAX_TOOL_RESULT_CHARS)
         result: Dict[str, Any] = {
             "content": [{"type": "text", "text": text}],
             "isError": not envelope.get("ok", False),

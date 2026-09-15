@@ -10,7 +10,7 @@ Every claim here names the evidence for it. "Built" means the code is on `main`.
 "Proved" means something ran and asserted on its own output. They are different
 words on purpose.
 
-Last updated 2026-09-14.
+Last updated 2026-09-15.
 
 ---
 
@@ -166,6 +166,103 @@ calendar and the active-rows query, with 0 errors. The fix is PR #189, merged 20
 38 of 38, `tool_errors: 0` on all 41 turns, every turn on v3.2, 16 turns
 through `get_stride_tips`, and the relay leg showing 55 races for 2026-09-12
 and no file for the two quiet days since.
+
+## Response-behaviour specification, 2026-09-15
+
+The operator wrote a five-stage response specification — screen, classify,
+route, verify, respond — plus a section on model tiering. It was audited
+against the code before anything was built. Most of it was already here:
+stage 1's defences, the honest-miss half of stage 5 and the routing rows for
+tips, form and results are what phase 0 built, and the front classifier router
+the specification says **not** to build had correctly never been built.
+
+What was missing is now implemented, and prompt v3.3 carries the parts of it
+that are prompt-shaped. Each item below names the gap, not the feature.
+
+- **`track_matches` answered a question about Warwick with Warwick Farm's
+  rows.** `warwick` (QLD country) is a substring of `warwickfarm` (Sydney
+  metro) and the matcher read containment as identity, in the one primitive
+  behind all 20 track filters in seven tools. This is the same collision
+  `target_tracks.is_target_track` documents from 2026-08-04, where nine races
+  were built under the wrong target. Fixed by naming the pair rather than
+  inferring it, so every sponsor and sub-venue spelling still matches;
+  `test_track_matches_admits_no_other_confusable_pair` scans 100 spellings and
+  asserts it is the only collision, so the list cannot go stale unnoticed.
+- **The MCP server returned tool results unframed.** `mcp_server.py` built its
+  own JSON and duplicated the truncation, so a fourth path to a model had none
+  of the `[DATA ...]` markers the system prompt refers to. It now calls
+  `frame_for_model`, and the tests assert the markers rather than parsing
+  around them.
+- **Two link shapes walked through the audit.** `see (https://evil.example/a)`
+  and `<https://evil.example/a>` both reached the user live: `_BARE_URL`'s
+  lookbehind excluded a URL preceded by `(`, which was meant to keep the pass
+  off markdown links but `_MD_LINK.sub` has already run by then.
+- **"Why did STRIDE favour it" had no numbers behind it.** `decision_contract.py`
+  writes a `prediction_stages` ladder onto every pick — base models, ensemble,
+  Monte Carlo raw and recalibrated, sectional blend, the adjustments, the
+  market anchor — and `tips.py` dropped it because `PICK_KEYS` omitted the
+  field. Now returned at `detail='race'` only, ordered as computed.
+- **The card's build time was discarded.** `generated_at` is in every tips
+  file and is now in the envelope, so "how current is this?" has an answer.
+- **Model tier was per-process and mode-blind.** `brain` changed a prompt
+  sentence and nothing else. `ChatEngine.tier()` now resolves model and effort
+  from the mode the request already carries. Both default to the existing
+  values, so **this changes nothing until an operator sets a variable**;
+  `preflight()` covers a second tier only when it differs. `eval_runner` gained
+  `--model` and `--effort` so §11 q3 can be answered by measurement.
+
+Prompt v3.3 moves both screens above the first instruction to use a tool,
+states the routing per question type, permits one clarifying question when
+nothing resolves the race (bounded by the exceptions, so the follow-up cases
+keep working), and adds a verify step: right date/track/race, the figure
+actually present, and the answer naming the race back.
+
+`evals/behaviour.jsonl` is new and is **ours**, not vendored — six cases with
+three inverted controls. It is separate from `golden.jsonl` and
+`injection.jsonl` precisely so those two can still be re-synced wholesale.
+Offline: 16 pass (6 controls), 0 fail. Tests: **183 offline, all green**, no
+credential and no network.
+
+**Not proved live.** No `chat-eval --live-cli` run has been made on v3.3. The
+prompt changes are exactly the kind that runs #1 and #4 showed can fail on
+wording, and the new clarifying-question permission is the one with real
+regression risk: if it is read too broadly the model will ask where it used to
+answer, and `db-tips-*` and `follow-*` are the cases that would show it. **Run
+`chat-eval` before believing any of the prompt half of this.**
+
+## What the audit found and this change did not fix
+
+Recorded so the next session does not have to re-derive them. None is a
+regression; all predate this work.
+
+- **`run_readonly_sql`'s table allowlist does not hold.** Three more bypasses
+  beyond the two already recorded below, all confirmed against the real
+  `validate()`. The tool stays off (`STRIDE_CHAT_SQL_TOOL` unset) and the
+  durable fix is still the one below: grant `SELECT` on the allowlisted tables
+  instead of `pg_read_all_data`.
+- **The read-only role's write-refusal proof no longer runs through its wired
+  path.** `apply-migration.yml:188` invokes `verify_readonly_role.py` by path
+  rather than as a module. It fails loudly under `set -euo pipefail` rather
+  than passing silently, but the next role apply or password rotation will
+  stop there.
+- **There is no pipeline-run status anywhere in this repository.** Stage 3's
+  "check whether the nightly run has completed" has no source to read, so an
+  absent tips file still cannot distinguish "not published yet" from "nothing
+  tipped". `generated_at` narrows this and does not close it. Closing it means
+  a run-status record the chain writes and the chat reads — a real change with
+  a real design, not a prompt line, which is why v3.3 says to state the
+  uncertainty rather than pick the more definite-sounding answer.
+- **Nobody here has established the frontend's read path.** Stage 3 wants the
+  chat to read what the page reads. `stride-app` is a separate repository, so
+  this cannot be verified from this checkout; it should be written down in
+  `docs/chat/` when someone can see both.
+- **`found=true` with the needed field null is still invisible.** `compact()`
+  drops null keys, so a selections row with no price returns as a hit with the
+  price simply absent. v3.3 tells the model to name the missing part; the
+  envelope does not yet flag it.
+- **There is still no post-hoc grounding check.** A green `chat-eval` proves
+  which tools were reached for, not that every number in the prose came from a
+  row. That remains phase 3A's `chat-proof`, as the section above says.
 
 ## Credential hygiene, unresolved
 

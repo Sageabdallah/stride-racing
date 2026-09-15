@@ -133,16 +133,53 @@ def norm_track(value: Any) -> str:
     return normalize_track_key(value)
 
 
+# Normalised key pairs where containment is NOT evidence of the same venue.
+#
+# `warwick` is the Queensland country track; its results-side spelling is
+# `Picklebet Park Warwick`. `warwickfarm` is Sydney metro. One is a substring
+# of the other and they are hundreds of kilometres apart. The pipeline hit
+# this exact collision on 2026-08-04 and target_tracks.is_target_track:162-190
+# records the cost: nine races built and seeded under a target the course had
+# nothing to do with. It fixed it there by dropping one direction of its
+# matcher; that fix does not carry here, because the chat is asked about the
+# short name and holds the long one, which is the direction that survived.
+#
+# So the pair is named rather than inferred. Containment still serves every
+# sponsor and sub-venue spelling that needs it -- `Picklebet Park Warwick`
+# still answers a question about Warwick, `Sandown Hillside` still answers one
+# about Sandown -- because only this pair is withheld. Measured, not assumed:
+# test_track_matches_admits_no_other_confusable_pair scans 96 Australian track
+# spellings and asserts this is the only collision containment produces.
+CONFUSABLE_TRACKS = frozenset({frozenset({"warwick", "warwickfarm"})})
+
+
 def track_matches(candidate: Any, wanted: Optional[str]) -> bool:
-    """Physical-track match through identity_normalization's aliases, with
-    containment either way so 'Randwick' finds 'Royal Randwick' and a file
-    key like 'randwick' finds a request for 'Royal Randwick'."""
+    """Physical-track match through identity_normalization's aliases.
+
+    Equality first, which is what carries the aliases: 'Randwick' and 'Royal
+    Randwick' both normalise to `randwick`, so neither of the examples this
+    docstring used to justify containment with actually needs containment.
+    What containment is for is the spellings the alias table does not hold --
+    sponsor prefixes (`Sportsbet-Ballarat`, `Picklebet Park Warwick`) and
+    sub-venue suffixes (`Sandown Hillside`, `Ballarat Synthetic`) -- and it
+    runs both ways so a request and a stored key can each be the longer one.
+
+    Two different venues whose keys contain one another are listed in
+    CONFUSABLE_TRACKS and matched by equality only. Returning the wrong
+    track's rows is worse than returning none: a miss is honest and the
+    prompt has words for it, while a false positive arrives labelled as the
+    answer to a question it is not the answer to.
+    """
     if not wanted:
         return True
     a, b = norm_track(candidate), norm_track(wanted)
     if not a or not b:
         return False
-    return a == b or a in b or b in a
+    if a == b:
+        return True
+    if frozenset({a, b}) in CONFUSABLE_TRACKS:
+        return False
+    return a in b or b in a
 
 
 def split_race_key(key: str) -> Tuple[str, Optional[int]]:

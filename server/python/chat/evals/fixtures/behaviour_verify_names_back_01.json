@@ -1,0 +1,8 @@
+{
+  "case_id": "verify-names-back-01",
+  "response": "Randwick race 7 on 11 April 2026: the bet pick is Adelong (4) at $5.50, a 7.1-point edge on a 26.4% calibrated chance. Convergence CONFIRMED, consensus had it three times.",
+  "citations": [],
+  "tool_calls": [
+    "get_stride_tips"
+  ]
+}

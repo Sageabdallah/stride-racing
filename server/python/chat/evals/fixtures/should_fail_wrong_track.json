@@ -1,0 +1,8 @@
+{
+  "case_id": "verify-track-01",
+  "response": "At Warwick on 11 April 2026 STRIDE's pick was Sunline (2) at $3.40 in race 4 at Warwick Farm.",
+  "citations": [],
+  "tool_calls": [
+    "get_stride_tips"
+  ]
+}
