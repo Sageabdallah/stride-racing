@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+import sys
+import types
 from typing import Dict, List, Tuple
 
-from chat.verify_readonly_role import verify
+from chat import config
+from chat.verify_readonly_role import main, verify
 
 
 class PGError(Exception):
@@ -122,3 +125,22 @@ def test_report_text_states_the_verdict():
     conn.script.insert(0, (r"^INSERT INTO selections", PGError("42501", "permission denied")))
     text = verify(conn).text()
     assert text.startswith("read-only proof for role stride_chat_ro:") and text.endswith("PASS: the role cannot write")
+
+
+def test_a_connect_failure_does_not_print_the_password(monkeypatch, capsys):
+    """The same leak db.py closes, at the verifier's own connect. This line
+    lands in the apply-migration Actions log; the role's URL is built there
+    from the password secret and the step promises it is never printed."""
+    monkeypatch.setattr(config, "load_dotenv_once", lambda: None)
+    fake = types.ModuleType("psycopg2")
+
+    def connect(dsn, **kwargs):
+        raise ValueError(f'invalid dsn: missing "=" after "{dsn}" in connection info string')
+
+    fake.connect = connect
+    monkeypatch.setitem(sys.modules, "psycopg2", fake)
+    url = '"postgresql://stride_chat_ro:s3cr3t%40pw@host/db"'
+    assert main(["--url", url]) == 2
+    err = capsys.readouterr().err
+    assert "could not connect" in err and "invalid dsn" in err
+    assert "s3cr3t" not in err, err

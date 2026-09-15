@@ -10,6 +10,13 @@ untrusted input:
   migrations/chat_readonly_role.sql has no write privilege, which is the real
   boundary; this is the belt over those braces and costs nothing.
 * The URL is STRIDE_CHAT_DATABASE_URL, never DATABASE_URL (config.py).
+* No driver text leaves this module with the password in it. libpq echoes
+  the whole connection string in its "invalid dsn" error, so a URL it cannot
+  parse -- a stray quote from a Windows paste is enough -- used to put the
+  role's password into the tool result and the stderr log. redact() masks
+  the URL and every form of its password first, and the connect failure is
+  raised `from None` so the raw driver error is not carried along as the
+  cause for a traceback to print later.
 
 psycopg2 is imported inside _open() so the module imports without it, and a
 missing driver raises DatabaseUnavailable like any other reason the database
@@ -23,14 +30,53 @@ returns.
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import quote, unquote, urlsplit
 
 from . import config
 
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 15000
+
+REDACTED = "***"
+
+# user:password@ in a URL-shaped string, whatever precedes it. Deliberately
+# not urlsplit alone: the realistic bad URL is one urlsplit cannot read either
+# (a leading quote leaves it with no scheme, no netloc and no password), and
+# that is exactly the string libpq quotes back in full.
+_URL_PASSWORD = re.compile(r"://[^/@:]*:([^@]*)@")
+
+
+def redact(text: str, url: Optional[str]) -> str:
+    """`text` with `url` and every form of its password masked.
+
+    The whole URL first, since libpq's "invalid dsn" error quotes the entire
+    connection string; then the password as written, URL-decoded and
+    URL-encoded, so a fragment of the URL in an error still cannot carry it.
+    """
+    if not url:
+        return text
+    out = text.replace(url, "<STRIDE_CHAT_DATABASE_URL>")
+    secrets = set()
+    m = _URL_PASSWORD.search(url)
+    if m and m.group(1):
+        secrets.add(m.group(1))
+    try:
+        parsed = urlsplit(url).password
+    except ValueError:
+        parsed = None
+    if parsed:
+        secrets.add(parsed)
+    for raw in list(secrets):
+        secrets.add(unquote(raw))
+        secrets.add(quote(raw, safe=""))
+    for secret in sorted(secrets, key=len, reverse=True):
+        if secret:
+            out = out.replace(secret, REDACTED)
+    return out
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -75,7 +121,10 @@ class Database:
                 application_name=self.application_name,
             )
         except Exception as e:  # noqa: BLE001
-            raise DatabaseUnavailable(f"connect failed: {type(e).__name__}: {e}") from e
+            # from None: the raw error is the one thing here that can hold
+            # the password, and a chained cause is printed by any traceback.
+            raise DatabaseUnavailable(
+                f"connect failed: {type(e).__name__}: {redact(str(e), self.url)}") from None
         conn.set_session(readonly=True, autocommit=True)
         with conn.cursor() as cur:
             cur.execute(f"SET statement_timeout TO {STATEMENT_TIMEOUT_MS}")
@@ -114,9 +163,10 @@ class Database:
                 # comes back identical on retry; only retry connection loss.
                 if not _looks_like_connection_loss(e):
                     break
-                print(f"[chat.db] attempt {attempt} failed: {type(e).__name__}: {e}",
-                      file=sys.stderr)
-        raise DatabaseUnavailable(f"query failed: {type(last_err).__name__}: {last_err}")
+                print(f"[chat.db] attempt {attempt} failed: {type(e).__name__}: "
+                      f"{redact(str(e), self.url)}", file=sys.stderr)
+        raise DatabaseUnavailable(
+            f"query failed: {type(last_err).__name__}: {redact(str(last_err), self.url)}")
 
     def close(self) -> None:
         conn, self._conn = self._conn, None
