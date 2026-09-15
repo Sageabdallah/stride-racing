@@ -882,10 +882,11 @@ def job_bsp_settle() -> dict:
 def _require_racecard(job: str) -> str:
     """Every card-dependent job must FAIL when the card is missing.
 
-    stride_build.py, odds_movement.py and run_tips_pipeline.py have no
-    non-zero exit path, so without this a failed 05:30 collect would let
-    06:00, 07:00 and 10:00 each run on nothing and report success — the
-    whole morning silently producing no tips.
+    odds_movement.py and run_tips_pipeline.py have no non-zero exit path, and
+    stride_build.py's one (`sys.exit(0 if all_ok else 1)`) is decided by
+    fpath.exists(), which a missing card does not change. So without this a
+    failed 05:30 collect would let 06:00, 07:00 and 10:00 each run on nothing
+    and report success — the whole morning silently producing no tips.
 
     A quiet day is the one case where no card is correct: the provider was
     healthy and listed meetings, none on the target-track list. Returns
@@ -905,6 +906,27 @@ def _require_racecard(job: str) -> str:
               f"is no work to do and that is the correct outcome; see "
               f"racecards/quiet_{_today()}.json for what did race.")
     return state
+
+
+def _file_identity(path: str):
+    """(inode, size, mtime_ns) for one file, or None if it is not there.
+
+    Enough to tell the file a step WROTE from the file that was already
+    here — which an os.path.exists() cannot, and which matters wherever a
+    _sync_down of the same directory runs before the step.
+
+    Deliberately an identity and not a timestamp threshold, for the reason
+    _dir_state below spells out: comparing an inode stamp against this
+    process's time.time() is a cross-clock comparison, and every value here
+    is compared only against another reading of the same kind from the same
+    filesystem. _dir_state is built on this, so both guards measure "the
+    same file" the same way by construction.
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
 
 
 def _dir_state(dirpath: str, suffix: str) -> dict:
@@ -944,11 +966,11 @@ def _dir_state(dirpath: str, suffix: str) -> dict:
     for name in names:
         if not name.endswith(suffix):
             continue
-        try:
-            st = os.stat(os.path.join(dirpath, name))
-        except FileNotFoundError:
-            continue
-        out[name] = (st.st_ino, st.st_size, st.st_mtime_ns)
+        # _file_identity, not a second copy of the tuple: two guards that
+        # disagree about what "the same file" means are worse than one.
+        ident = _file_identity(os.path.join(dirpath, name))
+        if ident is not None:          # vanished between listdir and stat
+            out[name] = ident
     return out
 
 
@@ -1021,29 +1043,6 @@ def job_intelligence_build() -> dict:
             "consensus and tips would run on stale data.")
     _sync_up("server/python/intelligence")
     return {"last_success_date": _today(), "files_built": len(built)}
-
-
-def _file_identity(path: str):
-    """(inode, size, mtime_ns) for one file, or None if it is not there.
-
-    Enough to tell the file a step WROTE from the file that was already
-    here — which an os.path.exists() cannot, and which matters wherever a
-    _sync_down of the same directory runs before the step.
-
-    Deliberately an identity and not a timestamp threshold. Comparing an
-    inode stamp against this process's time.time() is a cross-clock
-    comparison: the stamp is truncated to the filesystem's resolution and
-    the clock is not, so a file the step really wrote can read back below a
-    reading taken just before it. Every value here is compared only against
-    another reading of the same kind from the same filesystem, so the
-    resolution cancels instead of deciding the outcome. Same reasoning
-    _db_now already applies to the database clock.
-    """
-    try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        return None
-    return (st.st_ino, st.st_size, st.st_mtime_ns)
 
 
 def job_consensus_agent() -> dict:
@@ -1531,12 +1530,17 @@ def job_consensus_proof() -> dict:
 
     The racecard relay was missing and made this claim false. Fargate tasks
     start with an empty filesystem, so with no card staged run_consensus
-    returns at its `load_racecard_meetings` check — which sits ABOVE
-    load_tipster_panel — prints "No racecard found", writes an empty
-    consensus file and exits 0. Verified 2026-08-06 (ECS task 417b4554):
+    stopped at its `load_racecard_meetings` check — which sits ABOVE
+    load_tipster_panel — printed "No racecard found", wrote an empty
+    consensus file and exited 0. Verified 2026-08-06 (ECS task 417b4554):
     PASSED, and not one line of panel or secret setup ran. A proof that
     cannot reach what it proves is worse than no proof, because it is
     reported as evidence.
+
+    That path now raises rather than returning, and writes nothing, so a
+    missing card fails here at _run_ok. The `[PANEL]` check below is kept as
+    the backstop: it catches any future path that returns early and still
+    exits 0, which is the class, not the one instance.
     """
     _sync_down("server/python/intelligence")
     if _require_racecard("consensus-proof") == "quiet":
@@ -1547,8 +1551,10 @@ def job_consensus_proof() -> dict:
     if "[PANEL]" not in out:
         raise RuntimeError(
             "consensus-proof: exited 0 without reaching the tipster panel. "
-            "Something returned before load_tipster_panel — check for 'No "
-            "racecard found' or 'No runners' above.")
+            "Something returned before load_tipster_panel. The three paths "
+            "that used to do this (no card, no runners, empty track filter) "
+            "now raise, so this is a NEW early return — read the output "
+            "above for what it printed on the way out.")
     return {"last_success_date": _today(), "detail": out[-400:]}
 
 

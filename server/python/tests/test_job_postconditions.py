@@ -1,10 +1,15 @@
 """A job that did nothing must not report success.
 
-stride_build.py, odds_movement.py and run_tips_pipeline.py have no
-non-zero exit path anywhere in their source: they fail loudly on an
-uncaught exception, but a semantic no-op — no racecard, no intelligence
-file, no tips — exits 0. The scheduled job reads only the exit code, so
-the whole morning could produce nothing and every alarm stay silent.
+odds_movement.py and run_tips_pipeline.py have no non-zero exit path
+anywhere in their source: they fail loudly on an uncaught exception, but a
+semantic no-op — no racecard, no tips — exits 0. stride_build.py does have
+one, at line 122 (`sys.exit(0 if all_ok else 1)`), and this file used to
+name it alongside the other two, which was wrong. What it lacks is a
+FRESHNESS check: `all_ok` is decided by `fpath.exists()`, so a run that
+touched nothing while the required files sat there from the image or an
+earlier relay exits 0 and logs ALL OK. Either way the scheduled job reads
+only the exit code, so the whole morning could produce nothing and every
+alarm stay silent.
 
 These pin the post-conditions that make that impossible. They exist
 because the same class of defect was found in auto_results_collector,
@@ -1296,11 +1301,15 @@ def test_consensus_proof_fails_if_it_never_reached_the_panel(handler,
                                                              monkeypatch):
     """The defect this job actually had, pinned.
 
-    With no card staged, run_consensus returns at its load_racecard_meetings
-    check — which sits above load_tipster_panel — prints "No racecard found",
-    writes an empty consensus file and exits 0. The job reported PASSED
+    With no card staged, run_consensus returned at its load_racecard_meetings
+    check — which sits above load_tipster_panel — printed "No racecard found",
+    wrote an empty consensus file and exited 0. The job reported PASSED
     (ECS task 417b4554, 2026-08-06) while proving none of the container,
     secret or panel setup its docstring claims.
+
+    That path now raises and fails at _run_ok, so the stub below is no longer
+    what consensus_agent prints. It stays because the [PANEL] check guards
+    the class — any early return that still exits 0 — not that one instance.
     """
     _neutralise_io(handler, monkeypatch)
     monkeypatch.setattr(

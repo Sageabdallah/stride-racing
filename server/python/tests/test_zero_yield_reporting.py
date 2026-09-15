@@ -63,6 +63,94 @@ class FakeProc:
         self.stderr = stderr
 
 
+# ------------------------------- a run that scored nothing must not exit 0
+
+def _reach_the_racecard(monkeypatch):
+    """Stub everything between run_consensus_agent's entry and its card read.
+
+    Stubbed rather than skipped so the paths under test are reached the way a
+    real run reaches them — after the key checks and the model preflight.
+    Returns the list _write_output calls are recorded into, because "wrote
+    nothing" is half of what these paths must now do.
+    """
+    monkeypatch.setenv("TAVILY_API_KEY", "t")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    monkeypatch.setenv("DATABASE_URL", "postgres://stub/stub")
+
+    dotenv = types.ModuleType("dotenv")
+    dotenv.load_dotenv = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "dotenv", dotenv)
+    tavily = types.ModuleType("tavily")
+    tavily.TavilyClient = lambda api_key=None: object()
+    monkeypatch.setitem(sys.modules, "tavily", tavily)
+    anthropic = types.ModuleType("anthropic")
+    anthropic.Anthropic = lambda api_key=None: object()
+    monkeypatch.setitem(sys.modules, "anthropic", anthropic)
+    monkeypatch.setattr(ca, "preflight_extraction_model", lambda *a, **k: None)
+
+    writes = []
+    monkeypatch.setattr(ca, "_write_output",
+                        lambda d, data: writes.append((d, data)))
+    return writes
+
+
+def _missing_card(monkeypatch):
+    def boom(date_str):
+        raise FileNotFoundError(date_str)
+    monkeypatch.setattr(ca, "load_racecard_meetings", boom)
+
+
+def test_a_missing_racecard_raises_instead_of_reporting_success(monkeypatch):
+    """`return {}` left LAST_RUN_HEALTH empty, so main()'s exit contract found
+    no zero_yield, skipped the db_mirror branch on a falsy health dict, and
+    fell off the end: exit 0. zero_yield could not have caught it either --
+    it is `races > 0 and mentions == 0`, and here races is 0."""
+    writes = _reach_the_racecard(monkeypatch)
+    _missing_card(monkeypatch)
+    with pytest.raises(RuntimeError) as e:
+        ca.run_consensus_agent(date_str="2026-04-11")
+    assert "no racecard" in str(e.value)
+    assert "NO_BET" in str(e.value)
+    assert writes == [], "an empty consensus was published anyway"
+
+
+def test_a_card_with_no_runners_raises_instead_of_reporting_success(monkeypatch):
+    writes = _reach_the_racecard(monkeypatch)
+    monkeypatch.setattr(ca, "load_racecard_meetings", lambda d: [{"races": []}])
+    monkeypatch.setattr(ca, "flatten_races", lambda m: [])
+    with pytest.raises(RuntimeError) as e:
+        ca.run_consensus_agent(date_str="2026-04-11")
+    assert "no runners" in str(e.value)
+    assert writes == []
+
+
+def test_a_track_filter_that_matches_nothing_raises(monkeypatch):
+    writes = _reach_the_racecard(monkeypatch)
+    monkeypatch.setattr(ca, "load_racecard_meetings", lambda d: [{"races": []}])
+    monkeypatch.setattr(ca, "flatten_races",
+                        lambda m: [{"track_key": "randwick"}])
+    with pytest.raises(RuntimeError) as e:
+        ca.run_consensus_agent(date_str="2026-04-11", track_filter="Flemington")
+    assert "track filter" in str(e.value)
+    assert writes == []
+
+
+def test_a_dry_run_that_finds_no_card_writes_nothing(monkeypatch):
+    """The data loss the main write site's comment records as fixed was still
+    live here: _write_output on these three paths was never guarded by
+    dry_run, so `consensus_agent.py <date> --dry-run` -- the documented
+    /stride-full-dry step, and what job_consensus_proof runs on the schedule
+    -- overwrote a real consensus file with {}. The file is gitignored and
+    has no DB mirror on days the mirror failed, so it is the only copy, and
+    job_consensus_proof's docstring promises this cannot happen.
+    """
+    writes = _reach_the_racecard(monkeypatch)
+    _missing_card(monkeypatch)
+    with pytest.raises(RuntimeError):
+        ca.run_consensus_agent(date_str="2026-04-11", dry_run=True)
+    assert writes == [], "a dry run clobbered the live artifact"
+
+
 # --------------------------------------------- the reason reaches the alert
 
 def test_failure_tail_keeps_the_last_lines_not_the_first(handler):
