@@ -10,7 +10,7 @@ Every claim here names the evidence for it. "Built" means the code is on `main`.
 "Proved" means something ran and asserted on its own output. They are different
 words on purpose.
 
-Last updated 2026-09-14.
+Last updated 2026-09-15.
 
 ---
 
@@ -19,7 +19,7 @@ Last updated 2026-09-14.
 | Phase (plan §6) | State | Evidence |
 |---|---|---|
 | 0 — the tool library | **Built** | PR #179; 78 offline tests green, no credential, no network |
-| 0 — exit (live evals) | **Closed: run #6 on `main`, 38 of 38; re-proved by run #8 after PR #189** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, 38/38, `main` at `d8cf80c`, v3.2, `tool_errors` 0 on all 41 turns); run #8 (`34792030150`, 38/38, `main` at `d4367b3` after PR #189, v3.2, `tool_errors` 0 on all 41 turns) |
+| 0 — exit (live evals) | **Closed: run #6 on `main`, 38 of 38; re-proved by run #8 after PR #189; run #11 on PR #197 at `15211b7`, 44 of 44 on the 52-case corpus** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, 38/38, `main` at `d8cf80c`, v3.2, `tool_errors` 0 on all 41 turns); run #8 (`34792030150`, 38/38, `main` at `d4367b3` after PR #189, v3.2, `tool_errors` 0 on all 41 turns) |
 | 1 — read-only role | **Closed, proved** | `apply-migration` run #6, 2026-09-13 05:35 UTC, on `40b698b` |
 | 2 — the fork decision | **BLOCKED — operator** | §11 questions 1 and 2, unanswered |
 | 3A — AWS | Not started, and must not be | §6: "Do not build AWS resources before this" |
@@ -166,6 +166,222 @@ calendar and the active-rows query, with 0 errors. The fix is PR #189, merged 20
 38 of 38, `tool_errors: 0` on all 41 turns, every turn on v3.2, 16 turns
 through `get_stride_tips`, and the relay leg showing 55 races for 2026-09-12
 and no file for the two quiet days since.
+
+## Response-behaviour specification, 2026-09-15
+
+The operator wrote a five-stage response specification — screen, classify,
+route, verify, respond — plus a section on model tiering. It was audited
+against the code before anything was built. Most of it was already here:
+stage 1's defences, the honest-miss half of stage 5 and the routing rows for
+tips, form and results are what phase 0 built, and the front classifier router
+the specification says **not** to build had correctly never been built.
+
+What was missing is now implemented, and prompt v3.3 carries the parts of it
+that are prompt-shaped. Each item below names the gap, not the feature.
+
+- **`track_matches` answered a question about Warwick with Warwick Farm's
+  rows.** `warwick` (QLD country) is a substring of `warwickfarm` (Sydney
+  metro) and the matcher read containment as identity, in the one primitive
+  behind all 15 `track_matches` call sites across six tool modules (tips 6,
+  market 3, puntingform 2, consensus 2, results 1, racecard 1). This is the same collision
+  `target_tracks.is_target_track` documents from 2026-08-04, where nine races
+  were built under the wrong target. Fixed by naming the pair rather than
+  inferring it, so every sponsor and sub-venue spelling still matches;
+  `test_track_matches_admits_no_other_confusable_pair` scans 101 spellings and
+  asserts it is the only collision, so the list cannot go stale unnoticed.
+- **The MCP server returned tool results unframed.** `mcp_server.py` built its
+  own JSON and duplicated the truncation, so a fourth path to a model had none
+  of the `[DATA ...]` markers the system prompt refers to. It now calls
+  `frame_for_model`, and the tests assert the markers rather than parsing
+  around them.
+- **One link shape walked through the audit**: `see (https://evil.example/a)`
+  reached the user live and clickable. `_BARE_URL`'s lookbehind excluded a URL
+  preceded by `(`, which was meant to keep the pass off markdown links, but
+  `_MD_LINK.sub` has already run by then. The angle-bracket shape
+  `<https://evil.example/a>` was **not** a second leak — the old regex already
+  stripped it, just swallowing the closing bracket with it. The first draft of
+  this file and of PR #197 said both leaked; that was wrong, and the review of
+  #197 caught it.
+- **"Why did STRIDE favour it" had no numbers behind it.** `decision_contract.py`
+  writes a `prediction_stages` ladder onto every pick — base models, ensemble,
+  Monte Carlo raw and recalibrated, sectional blend, the adjustments, the
+  market anchor — and `tips.py` dropped it because `PICK_KEYS` omitted the
+  field. Now returned at `detail='race'` only, ordered as computed.
+- **The card's build time was discarded.** `generated_at` is in every tips
+  file and is now in the envelope, so "how current is this?" has an answer.
+- **Model tier was per-process and mode-blind.** `brain` changed a prompt
+  sentence and nothing else. `ChatEngine.tier()` now resolves model and effort
+  from the mode the request already carries. Both default to the existing
+  values, so **this changes nothing until an operator sets a variable**;
+  `preflight()` covers a second tier only when it differs. `eval_runner` gained
+  `--model` and `--effort` so §11 q3 can be answered by measurement.
+
+Prompt v3.3 moves both screens above the first instruction to use a tool,
+states the routing per question type, permits one clarifying question when
+nothing resolves the race (bounded by the exceptions, so the follow-up cases
+keep working), and adds a verify step: right date/track/race, the figure
+actually present, and the answer naming the race back.
+
+`evals/behaviour.jsonl` is new and is **ours**, not vendored — six cases with
+three inverted controls. It is separate from `golden.jsonl` and
+`injection.jsonl` precisely so those two can still be re-synced wholesale.
+Offline: 16 pass (6 controls), 0 fail. Tests: **183 offline, all green**, no
+credential and no network.
+
+**Not proved live.** No `chat-eval --live-cli` run has been made on v3.3. The
+prompt changes are exactly the kind that runs #1 and #4 showed can fail on
+wording, and the new clarifying-question permission is the one with real
+regression risk: if it is read too broadly the model will ask where it used to
+answer, and `db-tips-*` and `follow-*` are the cases that would show it. **Run
+`chat-eval` before believing any of the prompt half of this.**
+
+## chat-eval run #9, and prompt v3.4
+
+**Run #9 (`34924569351`, 2026-09-15 03:20 UTC, on the PR branch at `226d07e`,
+v3.3): 42 passed, 2 failed, 8 unsupported, `tool_errors` 0 on all turns.**
+First run to cover this repository's own cases — the corpus line reads
+`golden.jsonl 30, injection.jsonl 16, behaviour.jsonl 6 = 52` and 44 executed
+where previous runs executed 38. All four preflight legs live:
+`race_results_history` 162,695 rows to `stride_chat_ro`, 4 meetings from
+Punting Form, the relay answering with 55 races for 2026-09-12.
+
+What it proved about the risk this work flagged: **the clarifying-question
+permission did not regress anything.** `db-tips-01` to `-05`, `follow-01` to
+`-03` and `chain-01` to `-05` all pass, as does every injection case.
+`ambiguous-01` passes, so the permission works where it is meant to.
+
+**Both failures were caused by v3.3 itself, and neither was a new behaviour
+going wrong.** Both were old behaviour displaced by new text, which is the
+thing to remember about this file: what breaks is rarely the sentence added,
+it is the sentence it now sits after.
+
+- **`miss-02` regressed** — it passed on v3.2 in runs #5 to #8, and v3.1 was
+  written specifically to pin its vocabulary. v3.3 moved the honest-miss rule
+  below three sections that each also say "say so" in their own words, and the
+  fixed opening lost to a paraphrase.
+- **`verify-track-01` failed with `tools: []`** on a question carrying both a
+  date and a track. v3.3's verify step illustrated itself with "Warwick Farm in
+  Sydney and Warwick in Queensland are different racetracks"; that taught the
+  model the name was confusable and the ambiguity rule, two sections earlier,
+  told it to ask rather than look up. Two correct instructions producing a
+  wrong turn between them.
+
+**Prompt v3.4 fixes both.** The honest-miss rule now sits immediately after the
+screens, ahead of every competing "say so", states that it governs them, and
+uses the "exact words … do not paraphrase them" construction the off-domain
+refusal uses — the one that demonstrably survives, since `inj-scope-01` has
+passed on it since v3.2. The `"..."` template form is gone; it invited the
+paraphrase v3.1 existed to stop. The Warwick example is gone from the verify
+step (`track_matches` refuses that pair in code, so the prompt never needed
+it), and the ambiguity rule now says a track name you do not recognise is a
+name to look up, not a question to ask.
+
+Neither eval case was touched. Both failures were agent defects under plan §12,
+and both were defects in text written by the change under test.
+
+**Run #10 (`34925860770`, 03:40 UTC, on `60338b1`, v3.4): 43 passed, 1
+failed, 8 unsupported, `tool_errors` 0 on all turns.** Both v3.4 fixes held:
+`miss-02` and `verify-track-01` pass. `follow-02` fell over, and the turn
+logs show run #1's shape exactly: setup 1 honestly misses (`tool_misses: 1`;
+12 April 2026 is a Sunday), setup 2 "tell me more about the top pick" calls
+**no tool**, so no horse enters the conversation, and the question turn calls
+no tool either. The cause is v3.4's own text: the stronger refusal to pass a
+nearby thing off as the answer — right for `verify-track-01` — made the model
+decline to take up the nearby selections the miss had offered. One sentence
+serving two cases that want opposite things from it.
+
+**Prompt v3.5** draws the line: declining to substitute belongs to the turn
+that *offers* the nearby thing; once the user's next question refers to it, it
+is the subject and is looked up like any other follow-up. `follow-02` was not
+touched.
+
+**Run #11 (`34927094206`, 04:00 UTC, on `15211b7`, v3.5): 44 passed, 0
+failed, 8 unsupported, `tool_errors` 0 on all turns. `PASS: 44 of 44 executed
+cases green.`** That is the live proof of the response-behaviour work, and it
+is proof by mechanism, not by coincidence: `follow-02`'s second setup turn,
+which called no tool in run #10, called `get_stride_tips` twice and
+`lookup_horse` with zero misses — it took up the nearby pick the miss had
+offered — and the question turn then called `lookup_horse` and found the horse.
+`miss-02` and `verify-track-01`, which share the sentence v3.5 softened, both
+held. Every case that passed at 43 still passes.
+
+Three runs, three prompts, one lesson each, all recorded in `prompt.py`'s
+docstring: position and competition are load-bearing (v3.4); one sentence can
+serve two cases that want opposite things from it (v3.5); and none of it is
+visible offline. 1507 tests were green before run #9 and after run #11 alike.
+
+## What the review of PR #197 caught, and what it changed
+
+Recorded because two of these were defects in the change itself and one was a
+factual overstatement in this file.
+
+- **`chat-eval` would not have run the new cases.** The workflow kept its own
+  copy of the corpus list (`("golden.jsonl", "injection.jsonl")`) and hard-failed
+  unless exactly 46 cases loaded. So the post-merge step this PR prescribed —
+  "run `chat-eval` before relying on the prompt half" — would have executed
+  **none** of the six `behaviour.jsonl` cases, including `ambiguous-01`, the one
+  exercising the clarifying-question permission the PR itself named as the real
+  regression risk, and come back green regardless. The workflow now loads
+  `er.CORPUS_FILES`, pins the counts of the two vendored files (where a fixed
+  number is meaningful because they are copied verbatim) and requires
+  `behaviour.jsonl` to be non-empty rather than pinning a number that changes
+  whenever a case is added. The live run now executes 44 non-search cases, was 38.
+- **`verify-track-01` could not tell the defect from the ideal answer.** It
+  asserted `must_not_contain: ["Warwick Farm"]`, but on a track miss
+  `get_stride_tips` returns `tracks_with_tips` and the prompt instructs offering
+  them labelled — so on a real day where STRIDE tipped Warwick Farm, the
+  *correct* v3.3 answer ("I couldn't find tips for Warwick; STRIDE did tip at
+  Warwick Farm, a different track") would have failed the case. It now asserts
+  the miss vocabulary instead, which the defect (a confident answer with no miss
+  phrasing) cannot produce and the ideal answer always does. The inverted
+  control still trips.
+- **The forbidden-string test was a hand-kept copy.** It pinned 11 of the 21
+  strings the vendored corpus forbids in a response. Since `injection.jsonl` is
+  re-synced wholesale, a transcribed list stops covering whatever the re-sync
+  adds — the same staleness argument this work makes for `CONFUSABLE_TRACKS`.
+  It is now derived from the corpus minus the three sentinels, with a guard that
+  an empty derivation fails rather than passing vacuously.
+
+**Not a defect, and the review's one wrong call:** it noted `ci.yml` triggers on
+`push` and `workflow_dispatch` but not `pull_request`, and inferred the green
+run was author-reported. `on: push` carries no branch filter, so CI ran on the
+PR head anyway — run 34921342705, event `push`, conclusion `success`, on
+`d81b5d9`, and GitHub links it to #197. `ci.yml:58` is
+`python -m pytest server/python -q`, so that green is the real suite.
+
+## What the audit found and this change did not fix
+
+Recorded so the next session does not have to re-derive them. None is a
+regression; all predate this work.
+
+- **`run_readonly_sql`'s table allowlist does not hold.** Three more bypasses
+  beyond the two already recorded below, all confirmed against the real
+  `validate()`. The tool stays off (`STRIDE_CHAT_SQL_TOOL` unset) and the
+  durable fix is still the one below: grant `SELECT` on the allowlisted tables
+  instead of `pg_read_all_data`.
+- **The read-only role's write-refusal proof no longer runs through its wired
+  path.** `apply-migration.yml:188` invokes `verify_readonly_role.py` by path
+  rather than as a module. It fails loudly under `set -euo pipefail` rather
+  than passing silently, but the next role apply or password rotation will
+  stop there.
+- **There is no pipeline-run status anywhere in this repository.** Stage 3's
+  "check whether the nightly run has completed" has no source to read, so an
+  absent tips file still cannot distinguish "not published yet" from "nothing
+  tipped". `generated_at` narrows this and does not close it. Closing it means
+  a run-status record the chain writes and the chat reads — a real change with
+  a real design, not a prompt line, which is why v3.3 says to state the
+  uncertainty rather than pick the more definite-sounding answer.
+- **Nobody here has established the frontend's read path.** Stage 3 wants the
+  chat to read what the page reads. `stride-app` is a separate repository, so
+  this cannot be verified from this checkout; it should be written down in
+  `docs/chat/` when someone can see both.
+- **`found=true` with the needed field null is still invisible.** `compact()`
+  drops null keys, so a selections row with no price returns as a hit with the
+  price simply absent. v3.3 tells the model to name the missing part; the
+  envelope does not yet flag it.
+- **There is still no post-hoc grounding check.** A green `chat-eval` proves
+  which tools were reached for, not that every number in the prose came from a
+  row. That remains phase 3A's `chat-proof`, as the section above says.
 
 ## Credential hygiene, unresolved
 

@@ -1,4 +1,4 @@
-# Runs the chat's 46 eval cases live, through the Python CLI, as the read-only
+# Runs the chat's eval corpus live, through the Python CLI, as the read-only
 # database role. This is the phase 0 exit in docs/chat/CHAT_INTEGRATION_PLAN.md
 # §6, and the only workflow in the repository that spends Anthropic tokens, so
 # it will not run without a typed confirmation.
@@ -41,7 +41,7 @@ on:
         required: true
         default: ""
       only:
-        description: "Optional comma-separated case ids. Empty runs all 46."
+        description: "Optional comma-separated case ids. Empty runs the whole corpus."
         required: false
         default: ""
 
@@ -254,9 +254,15 @@ jobs:
           print("\n-- evals --")
           from chat import eval_runner as er
 
-          cases, errors = [], []
-          for f in ("golden.jsonl", "injection.jsonl"):
+          # er.CORPUS_FILES, not a copy of the list. A private copy here is how
+          # this workflow came to run the corpus the runner had outgrown: when
+          # behaviour.jsonl was added, the file the runner loads and the file
+          # this job loads stopped being the same set, and the run reported
+          # green having executed none of the new cases.
+          cases, errors, counts = [], [], {}
+          for f in er.CORPUS_FILES:
               cs, es = er.load_corpus(f, er.EVALS_DIR)
+              counts[f] = len(cs)
               cases.extend(cs)
               errors.extend(es)
           if errors:
@@ -274,10 +280,27 @@ jobs:
               print(f"::warning::COVERAGE REDUCED — running {len(cases)} of "
                     f"{full_corpus} cases by the `only` input. This run is not the "
                     "phase 0 exit.")
-          elif full_corpus != 46:
-              fail(f"expected 46 cases (30 golden + 16 injection), loaded {full_corpus}. "
-                   "The corpus is the acceptance test; a run against fewer cases is "
-                   "not the one the plan asks for.")
+          else:
+              # The vendored files are copied verbatim from stride-app and their
+              # counts are fixed, so a number is the right guard for them: a
+              # truncated read shows up as a short file. behaviour.jsonl is ours
+              # and grows, so pinning its count would fail every time a case is
+              # added -- what matters there is that it is not empty, because an
+              # empty one would sail past every check below.
+              VENDORED = {"golden.jsonl": 30, "injection.jsonl": 16}
+              short = {f: (want, counts.get(f, 0)) for f, want in VENDORED.items()
+                       if counts.get(f, 0) != want}
+              if short:
+                  fail("the vendored corpus is not intact: "
+                       + "; ".join(f"{f} expected {w}, loaded {g}" for f, (w, g) in short.items())
+                       + ". The corpus is the acceptance test; a run against fewer "
+                         "cases is not the one the plan asks for.")
+              if not counts.get("behaviour.jsonl"):
+                  fail("behaviour.jsonl loaded no cases. It carries this repository's "
+                       "own behaviour checks; an empty one passes every gate below "
+                       "while testing nothing.")
+              print("corpus: " + ", ".join(f"{f} {n}" for f, n in counts.items())
+                    + f" = {full_corpus}")
 
           print(f"model: {config.chat_model()}")
           results = er.run_live_cli(cases)

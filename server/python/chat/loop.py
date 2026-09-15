@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from . import PROMPT_VERSION
-from .config import Limits, chat_effort, chat_model
+from .config import (Limits, brain_effort_override, brain_model_override, chat_effort,
+                     chat_model)
 from .contract import ChatRequest, ToolCallRecord, build_response
 from .prompt import system_blocks
 from .session import InMemorySessionStore, SessionStore
@@ -112,6 +113,11 @@ class ChatEngine:
     client_factory: Callable[[], Any] = field(default_factory=default_client_factory)
     model: str = field(default_factory=chat_model)
     effort: Optional[str] = field(default_factory=chat_effort)
+    # Deep Thought's tier. None means "same as the default tier", which is
+    # what both are unless an operator sets them, so this changes nothing on
+    # its own. config.py says why the model is the one left alone by default.
+    brain_model: Optional[str] = field(default_factory=brain_model_override)
+    brain_effort: Optional[str] = field(default_factory=brain_effort_override)
     sessions: SessionStore = field(default_factory=InMemorySessionStore)
     limits: Limits = field(default_factory=Limits)
     timeout_seconds: float = REQUEST_TIMEOUT_SECONDS
@@ -122,13 +128,41 @@ class ChatEngine:
             self._client = self.client_factory()
         return self._client
 
+    def tier(self, brain: bool = False) -> "tuple[str, Optional[str]]":
+        """(model, effort) for a turn in this mode.
+
+        The whole of the tier decision, in one place and reading one boolean
+        the request already carries. Falling back to the default tier rather
+        than to a second hardcoded id matters: an operator who sets only
+        STRIDE_CHAT_EFFORT_BRAIN gets a harder-thinking Deep Thought on the
+        same model, which is the arrangement that keeps one cache namespace.
+        """
+        if not brain:
+            return self.model, self.effort
+        return (self.brain_model or self.model), (self.brain_effort or self.effort)
+
     def preflight(self) -> None:
-        preflight_model(self.client(), self.model, self.effort)
+        """Preflight every tier that is actually distinct.
+
+        consensus_agent.preflight_extraction_model exists because a retired id
+        was silent for weeks. A Deep Thought tier that is only ever reached by
+        a brain=true request would be exactly as silent, so it is called too
+        -- and only when it differs, so the common single-tier deployment
+        still spends one call.
+        """
+        seen = set()
+        for brain in (False, True):
+            pair = self.tier(brain)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            preflight_model(self.client(), pair[0], pair[1])
 
     # -- the turn ----------------------------------------------------------
 
     def run_turn(self, request: ChatRequest) -> Dict[str, Any]:
         started = time.time()
+        model, effort = self.tier(request.brain)
         specs = active_specs(self.ctx)
         tools = api_tools(specs)
         system = system_blocks(self.ctx.today, request.brain, request.search,
@@ -148,7 +182,7 @@ class ChatEngine:
 
         while True:
             rounds += 1
-            response = self._create(system, tools, messages)
+            response = self._create(system, tools, messages, model, effort)
             for k, v in _usage_of(response).items():
                 usage[k] += v
             content = list(getattr(response, "content", None) or [])
@@ -168,7 +202,7 @@ class ChatEngine:
                 if rounds >= self.limits.max_tool_rounds:
                     warnings.append(f"Stopped after {rounds} tool rounds; the answer may be incomplete.")
                     # One last call with no tools, so the model must write an answer.
-                    response = self._create(system, [], messages)
+                    response = self._create(system, [], messages, model, effort)
                     for k, v in _usage_of(response).items():
                         usage[k] += v
                     text = _text_of(list(getattr(response, "content", None) or [])) or text
@@ -196,22 +230,24 @@ class ChatEngine:
 
         self.sessions.append(request.session_id, request.message, text)
         result = build_response(text, request, calls, warnings, usage, rounds,
-                                answer_source=answer_source, model=self.model)
-        self._log(request, calls, usage, rounds, started)
+                                answer_source=answer_source, model=model)
+        self._log(request, calls, usage, rounds, started, model, effort)
         return result
 
     # -- pieces ------------------------------------------------------------
 
     def _create(self, system: List[Dict[str, Any]], tools: List[Dict[str, Any]],
-                messages: List[Dict[str, Any]]) -> Any:
+                messages: List[Dict[str, Any]], model: Optional[str] = None,
+                effort: Optional[str] = None) -> Any:
         kwargs: Dict[str, Any] = dict(
-            model=self.model, max_tokens=self.limits.max_output_tokens, system=system,
+            model=model or self.model, max_tokens=self.limits.max_output_tokens, system=system,
             messages=messages, thinking={"type": "adaptive"}, timeout=self.timeout_seconds,
         )
         if tools:
             kwargs["tools"] = tools
-        if self.effort:
-            kwargs["output_config"] = {"effort": self.effort}
+        effort = effort if effort is not None else self.effort
+        if effort:
+            kwargs["output_config"] = {"effort": effort}
         try:
             return self.client().messages.create(**kwargs)
         except Exception as e:  # noqa: BLE001
@@ -236,10 +272,13 @@ class ChatEngine:
         return record, frame_for_model(name, envelope, self.limits.max_tool_result_chars)
 
     def _log(self, request: ChatRequest, calls: List[ToolCallRecord], usage: Dict[str, int],
-             rounds: int, started: float) -> None:
+             rounds: int, started: float, model: Optional[str] = None,
+             effort: Optional[str] = None) -> None:
         # One structured line per turn, low-cardinality only: never a horse or
         # race dimension, never the message text.
-        line = {"event": "chat_turn", "model": self.model, "prompt_version": PROMPT_VERSION,
+        line = {"event": "chat_turn", "model": model or self.model,
+                "effort": effort if effort is not None else self.effort,
+                "prompt_version": PROMPT_VERSION,
                 "rounds": rounds, "tools": [c.name for c in calls],
                 "tool_errors": sum(1 for c in calls if not c.ok),
                 "tool_misses": sum(1 for c in calls if c.ok and not c.found),

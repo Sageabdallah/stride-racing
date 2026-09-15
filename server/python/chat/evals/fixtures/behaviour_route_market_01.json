@@ -1,0 +1,8 @@
+{
+  "case_id": "route-market-01",
+  "response": "It has firmed. Baseline $4.60 into $3.80 at the last snapshot, taken 08:12 -- a 17% move, which the signal reads as STEAM. That is the last recorded price rather than a live screen price, so it may have moved again since.",
+  "citations": [],
+  "tool_calls": [
+    "get_market_signals"
+  ]
+}

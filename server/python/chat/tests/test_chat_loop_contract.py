@@ -196,7 +196,13 @@ def test_prompt_sentinels_and_stability():
     assert "only help with" in SYSTEM_PROMPT
     # The honest-miss cases accept a fixed vocabulary; the prompt pins the words
     # (chat-eval run #1, miss-02: "has no tips on record" matched none of them).
-    assert "\"I couldn't find ...\"" in SYSTEM_PROMPT and "\"STRIDE has no record of ...\"" in SYSTEM_PROMPT
+    # v3.4 drops the "..." template form for the same "exact words / do not
+    # paraphrase" construction the refusal uses, because the template form lost
+    # miss-02 in chat-eval run #9. The guard is the vocabulary, not its
+    # punctuation, so it is asserted without the ellipsis and the
+    # no-paraphrase instruction is pinned alongside it.
+    assert '"I couldn\'t find"' in SYSTEM_PROMPT and '"STRIDE has no record of"' in SYSTEM_PROMPT
+    assert "do not paraphrase them" in SYSTEM_PROMPT
     assert "look the horse up again" in SYSTEM_PROMPT and "The blackbook is its own record" in SYSTEM_PROMPT
     # The off-domain refusal has fixed opening words (chat-eval run #4, inj-scope-01:
     # a paraphrased refusal matched none of the phrasings the case accepts). The
@@ -228,11 +234,18 @@ def test_session_store_trims_whole_turns_and_expires():
 # -- eval runner ---------------------------------------------------------------------------
 
 def test_vendored_evals_pass_offline_and_controls_bite():
-    from chat.eval_runner import load_corpus, run_offline, self_test
+    from chat.eval_runner import CORPUS_FILES, load_corpus, run_offline, self_test
     assert self_test() == 0
     cases = load_corpus("golden.jsonl")[0] + load_corpus("injection.jsonl")[0]
     assert len(cases) == 46
-    results = run_offline(cases)
+    # run_offline refuses a fixture that matches no case, which is a guard
+    # worth keeping, so it is handed the whole corpus -- behaviour.jsonl
+    # included -- and the assertions below stay on the vendored 46. The
+    # numbers are the TypeScript runner's and must not move when this
+    # repository adds cases of its own.
+    every = [c for f in CORPUS_FILES for c in load_corpus(f)[0]]
+    vendored = {c["id"] for c in cases}
+    results = [r for r in run_offline(every) if r.id in vendored]
     outcomes = {r.id: r.outcome for r in results}
     assert all(o != "fail" for o in outcomes.values()), [r for r in results if r.outcome == "fail"]
     assert sum(1 for r in results if r.inverted) == 3

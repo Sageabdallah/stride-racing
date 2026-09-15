@@ -1,0 +1,8 @@
+{
+  "case_id": "route-general-01",
+  "response": "Each-way means a win bet and a place bet.",
+  "citations": [],
+  "tool_calls": [
+    "get_stride_tips"
+  ]
+}

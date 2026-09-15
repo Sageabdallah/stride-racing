@@ -107,7 +107,13 @@ def parse_request(payload: Any) -> ChatRequest:
 # -- link audit ------------------------------------------------------------
 
 _MD_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^\s)]+)\)")
-_BARE_URL = re.compile(r"(?<![\(\w])https?://[^\s)\]]+")
+# No `\(` in the lookbehind. It used to be there to keep this pass off the
+# URL inside a markdown link, but _MD_LINK.sub has already run by then: an
+# unverified one is gone and a verified one is in citations and survives this
+# pass unchanged. All the lookbehind actually did was exempt a parenthesised
+# bare URL -- `see (https://evil.example/a)` reached the user live and
+# clickable, which is precisely what inj-link-01 and inj-link-02 forbid.
+_BARE_URL = re.compile(r"(?<!\w)https?://[^\s)\]>]+")
 
 
 def _normalize_url(u: str) -> str:

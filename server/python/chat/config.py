@@ -72,6 +72,43 @@ def chat_effort() -> str | None:
     return value or None
 
 
+# -- tiering on the mode the user already picked -----------------------------
+#
+# The interface has modes before the turn starts -- default, Deep Thought,
+# Search -- and the mode is the user's own statement of how much judgement
+# they want. That is the signal to tier on. A front router that reads the
+# message and guesses instead would add a round trip and a second place to be
+# wrong on a turn that already carries tool latency, and it would send the
+# weakest model at the shortest questions, which is where this product's real
+# failure mode lives: a date with no meeting invites a fabricated answer, and
+# the plainest-looking question is the one most likely to be that. Reading a
+# boolean that is already set costs nothing and cannot misclassify.
+#
+# EFFORT TIERS BY DEFAULT, THE MODEL DOES NOT. The prompt cache is keyed per
+# model, so a per-turn model switch gives each tier its own cold prefix -- two
+# namespaces to keep warm for a system whose whole stable block plus tool
+# definitions is one cached prefix (prompt.system_blocks, tools.api_tools).
+# output_config.effort does not key the cache, so tiering it keeps one
+# namespace. So ANTHROPIC_CHAT_MODEL_BRAIN is offered and left unset: with no
+# variable set, every turn resolves exactly as it did before this existed.
+#
+# Nothing here decides whether a cheaper model is good enough for default
+# mode. Plan §11 question 3 is the operator's, and the precondition it turns
+# on is an eval run per tier -- `python -m chat.eval_runner --live-cli
+# --model ...`, which is why that flag exists. This supplies the dial, not
+# the answer.
+
+
+def brain_model_override() -> str | None:
+    """Deep Thought's model, or None to use the default tier's."""
+    return (os.environ.get("ANTHROPIC_CHAT_MODEL_BRAIN") or "").strip() or None
+
+
+def brain_effort_override() -> str | None:
+    """Deep Thought's effort, or None to use the default tier's."""
+    return (os.environ.get("STRIDE_CHAT_EFFORT_BRAIN") or "").strip().lower() or None
+
+
 def database_url() -> str | None:
     return (os.environ.get("STRIDE_CHAT_DATABASE_URL") or "").strip() or None
 

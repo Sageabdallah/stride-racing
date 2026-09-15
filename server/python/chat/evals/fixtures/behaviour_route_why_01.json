@@ -1,0 +1,8 @@
+{
+  "case_id": "route-why-01",
+  "response": "The ensemble had it at 24.1% against a market read of 17.9%, so a 6.2-point edge, and the Monte Carlo recalibration held it there rather than trimming it. Sectional blend nudged it up again on a 33.8 last-600 two runs back. Convergence came in CONFIRMED with the consensus at 3 mentions.",
+  "citations": [],
+  "tool_calls": [
+    "get_stride_tips"
+  ]
+}

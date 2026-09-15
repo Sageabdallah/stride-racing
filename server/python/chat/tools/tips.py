@@ -69,6 +69,47 @@ ROW_CAPS = {"range": (2, 70, RANGE_KEYS), "day": (3, 40, RANGE_KEYS),
             "track": (12, 30, SELECTION_KEYS), "race": (24, 48, SELECTION_KEYS)}
 
 
+def _stages(p: Dict[str, Any]) -> Dict[str, Any]:
+    """The pick's own calibration ladder, in the order it was computed.
+
+    decision_contract.py writes `prediction_stages` onto every pick through
+    prediction_stages.put_stage: base_xgb, base_lightgbm and base_catboost,
+    their ensemble, the Monte Carlo raw and recalibrated figures, the
+    sectional blend, the ML and combined adjustments, the wrapper's
+    pre-calibration and blend, the market anchor, the selection score and the
+    final decision. That is what "why did the model favour this one" is asking
+    for, and until now `compact(p, PICK_KEYS)` dropped it on the floor because
+    the key was not in the allowlist -- so the chat could offer the decision's
+    label and a prose insight, but never the numbers behind either.
+
+    Shaped, not forwarded: each stage becomes one `name: value` entry, with
+    the owner kept only where it is not obvious, and anything the writer
+    recorded as None omitted. STAGE_DEFINITIONS is imported rather than
+    restated so a stage added upstream appears here without an edit.
+    """
+    raw = p.get("prediction_stages")
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    from prediction_stages import STAGE_DEFINITIONS  # flat module, stdlib-only
+    order = list(STAGE_DEFINITIONS)
+    names = sorted(raw, key=lambda n: (order.index(n) if n in order else len(order), n))
+    out: Dict[str, Any] = {}
+    for name in names:
+        rec = raw.get(name)
+        if not isinstance(rec, dict):
+            continue
+        value = rec.get("value")
+        if value is None:
+            continue
+        entry: Dict[str, Any] = {"value": value}
+        if rec.get("quantity_type") and rec["quantity_type"] != "probability":
+            entry["quantity_type"] = rec["quantity_type"]
+        if rec.get("note"):
+            entry["note"] = truncate_text(rec["note"], 160)
+        out[name] = entry
+    return out
+
+
 def _pick(p: Any, with_insight: bool = False) -> Dict[str, Any]:
     out = compact(p, PICK_KEYS)
     if isinstance(p, dict):
@@ -77,6 +118,13 @@ def _pick(p: Any, with_insight: bool = False) -> Dict[str, Any]:
             out["key_factors"] = kf[:3]
         if with_insight and p.get("ai_insight"):
             out["ai_insight"] = truncate_text(p["ai_insight"], 600)
+        # Only at detail='race'. The ladder is a dozen entries per runner, so
+        # a whole day of it would spend the payload cap on numbers nobody
+        # asked for; a question about one runner is where it belongs.
+        if with_insight:
+            stages = _stages(p)
+            if stages:
+                out["prediction_stages"] = stages
     return out
 
 
@@ -153,6 +201,15 @@ def _from_artifact(ctx: Context, date: str, track: Optional[str], race: Optional
         contract = payload.get("selection_contract")
         if isinstance(contract, dict):
             data["selection_contract"] = compact(contract, ("version", "bet_races", "no_bet_races"))
+        # When the card was built. run_tips_pipeline.py:3687 stamps every tips
+        # file with it and the chat used to drop it, which left "how old is
+        # this?" unanswerable and left a re-run card indistinguishable from
+        # the one the page is showing. It is the only freshness fact the chat
+        # has: there is no pipeline-run status anywhere in this repository, so
+        # an absent file still cannot tell "not published yet" from "nothing
+        # tipped". This says how old the answer is, not that it is current.
+        if payload.get("generated_at"):
+            data["generated_at"] = payload["generated_at"]
     notes = []
     if detail == "day":
         notes.append("Day view: one line per race. Ask with a track for the picks, "
