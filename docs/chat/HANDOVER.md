@@ -19,7 +19,7 @@ Last updated 2026-09-15.
 | Phase (plan §6) | State | Evidence |
 |---|---|---|
 | 0 — the tool library | **Built** | PR #179; 78 offline tests green, no credential, no network |
-| 0 — exit (live evals) | **Closed: run #6 on `main`, 38 of 38; re-proved by run #8 after PR #189** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, 38/38, `main` at `d8cf80c`, v3.2, `tool_errors` 0 on all 41 turns); run #8 (`34792030150`, 38/38, `main` at `d4367b3` after PR #189, v3.2, `tool_errors` 0 on all 41 turns) |
+| 0 — exit (live evals) | **Closed: run #6 on `main`, 38 of 38; re-proved by run #8 after PR #189; run #11 on PR #197 at `15211b7`, 44 of 44 on the 52-case corpus** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, 38/38, `main` at `d8cf80c`, v3.2, `tool_errors` 0 on all 41 turns); run #8 (`34792030150`, 38/38, `main` at `d4367b3` after PR #189, v3.2, `tool_errors` 0 on all 41 turns) |
 | 1 — read-only role | **Closed, proved** | `apply-migration` run #6, 2026-09-13 05:35 UTC, on `40b698b` |
 | 2 — the fork decision | **BLOCKED — operator** | §11 questions 1 and 2, unanswered |
 | 3A — AWS | Not started, and must not be | §6: "Do not build AWS resources before this" |
@@ -293,7 +293,22 @@ serving two cases that want opposite things from it.
 **Prompt v3.5** draws the line: declining to substitute belongs to the turn
 that *offers* the nearby thing; once the user's next question refers to it, it
 is the subject and is looked up like any other follow-up. `follow-02` was not
-touched. Run #11 is the check.
+touched.
+
+**Run #11 (`34927094206`, 04:00 UTC, on `15211b7`, v3.5): 44 passed, 0
+failed, 8 unsupported, `tool_errors` 0 on all turns. `PASS: 44 of 44 executed
+cases green.`** That is the live proof of the response-behaviour work, and it
+is proof by mechanism, not by coincidence: `follow-02`'s second setup turn,
+which called no tool in run #10, called `get_stride_tips` twice and
+`lookup_horse` with zero misses — it took up the nearby pick the miss had
+offered — and the question turn then called `lookup_horse` and found the horse.
+`miss-02` and `verify-track-01`, which share the sentence v3.5 softened, both
+held. Every case that passed at 43 still passes.
+
+Three runs, three prompts, one lesson each, all recorded in `prompt.py`'s
+docstring: position and competition are load-bearing (v3.4); one sentence can
+serve two cases that want opposite things from it (v3.5); and none of it is
+visible offline. 1507 tests were green before run #9 and after run #11 alike.
 
 ## What the review of PR #197 caught, and what it changed
 
