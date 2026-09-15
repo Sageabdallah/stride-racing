@@ -1,7 +1,8 @@
 """The response-behaviour specification: screen, classify, route, verify, respond.
 
-One test per thing prompt v3.3 and the code around it promise, written so that
-each would fail against v3.2. The prompt assertions are deliberately thin --
+One test per thing prompts v3.3 to v3.5 and the code around them promise, each
+written so that it fails against the version before it. The prompt assertions
+are deliberately thin --
 they pin that an instruction is present, which is all a static test can do; the
 behaviour itself is evals/behaviour.jsonl's job, and only a live run proves it.
 """

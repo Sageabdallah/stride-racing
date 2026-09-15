@@ -15,7 +15,7 @@ Layout:
   db.py          read-only Neon access with the timeouts run_tips_pipeline uses
   pf.py          Punting Form through pf_client, with a TTL cache and the wall
   tools/         the typed tools, named as evals/golden.jsonl names them
-  prompt.py      system prompt v3.3 (v3.0 ported from stridePrompts.ts v2.2)
+  prompt.py      system prompt v3.5 (v3.0 ported from stridePrompts.ts v2.2)
   loop.py        the Anthropic tool loop and the ChatCompletionResponse mapping
   contract.py    request validation and the response shape the React client reads
   session.py     conversation memory (12 messages, 30 minutes) behind a protocol

@@ -148,7 +148,7 @@ def norm_track(value: Any) -> str:
 # sponsor and sub-venue spelling that needs it -- `Picklebet Park Warwick`
 # still answers a question about Warwick, `Sandown Hillside` still answers one
 # about Sandown -- because only this pair is withheld. Measured, not assumed:
-# test_track_matches_admits_no_other_confusable_pair scans 96 Australian track
+# test_track_matches_admits_no_other_confusable_pair scans 101 Australian track
 # spellings and asserts this is the only collision containment produces.
 CONFUSABLE_TRACKS = frozenset({frozenset({"warwick", "warwickfarm"})})
 
