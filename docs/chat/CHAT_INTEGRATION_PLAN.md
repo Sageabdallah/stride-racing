@@ -498,6 +498,13 @@ month and the Free Plan period ends 2027-02-01.
 
 ## 11. Decisions the operator owns
 
+> **Answered 2026-09-15** — see [`PUBLIC_LAUNCH_DESIGN.md`](PUBLIC_LAUNCH_DESIGN.md) §0.
+> 1: operator and the public (Fork B). 2: each user brings their own Punting
+> Form key (v4 Mode A), so the pool-key redistribution risk does not arise for
+> the live leg; derived predictions remain an open question for Punting Form.
+> The operator carries the Anthropic key. 3: settled by eval runs, procedure in
+> that document's §4.4. The questions are kept below as written.
+
 Phase 2 cannot start without 1 and 2.
 
 1. **Audience.** Operator-only (Fork A, no legal gate, buildable now), or
@@ -535,6 +542,12 @@ Phase 2 cannot start without 1 and 2.
 ---
 
 ## 13. Status, 2026-09-14
+
+*2026-09-15:* PR #196 merged (the MCP server). §11 questions 1 and 2 are
+answered; the end-to-end design for a public, bring-your-own-Punting-Form-key
+audience, the model-selection procedure and the ordered work plan are in
+[`PUBLIC_LAUNCH_DESIGN.md`](PUBLIC_LAUNCH_DESIGN.md). Where that document and
+§2–§3 here disagree, it wins.
 
 Phases 0 and 1 (plan §6) are merged to `main` as PRs #179 and #180. Phase 1 is
 applied to Neon and proved. Nothing has touched AWS or `stride-app`.

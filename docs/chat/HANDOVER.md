@@ -10,7 +10,7 @@ Every claim here names the evidence for it. "Built" means the code is on `main`.
 "Proved" means something ran and asserted on its own output. They are different
 words on purpose.
 
-Last updated 2026-09-14.
+Last updated 2026-09-15.
 
 ---
 
@@ -21,7 +21,7 @@ Last updated 2026-09-14.
 | 0 — the tool library | **Built** | PR #179; 78 offline tests green, no credential, no network |
 | 0 — exit (live evals) | **Closed: run #6 on `main`, 38 of 38; re-proved by run #8 after PR #189** | run #1 (`34750824003`, 35/38, on `0967164`); run #3 (`34752688083`, 38/38, fix branch `dd9b2d9`); run #4 (`34753747067`, 37/38, `main` at `51c9d1b`); run #5 (`34754428003`, 38/38, v3.2 branch `9c2551f`); run #6 (`34754931990`, 38/38, `main` at `d8cf80c`, v3.2, `tool_errors` 0 on all 41 turns); run #8 (`34792030150`, 38/38, `main` at `d4367b3` after PR #189, v3.2, `tool_errors` 0 on all 41 turns) |
 | 1 — read-only role | **Closed, proved** | `apply-migration` run #6, 2026-09-13 05:35 UTC, on `40b698b` |
-| 2 — the fork decision | **BLOCKED — operator** | §11 questions 1 and 2, unanswered |
+| 2 — the fork decision | **Decided 2026-09-15** | public audience, users bring their own Punting Form key, operator carries the Anthropic key — [`PUBLIC_LAUNCH_DESIGN.md`](PUBLIC_LAUNCH_DESIGN.md) §0; work plan in its §6 |
 | 3A — AWS | Not started, and must not be | §6: "Do not build AWS resources before this" |
 | 4A — the app | Not startable here | `stride-app` is a separate private repository |
 | 5 — streaming, search port | Later, each its own decision | — |
@@ -107,6 +107,11 @@ July and August form, so "blackbooked in March 2026" is honestly empty. None
 of that is a corpus defect; it is what an honest agent has to say plainly.
 
 ## The blocker, and it is not a technical one
+
+*Resolved 2026-09-15.* Both questions are answered in
+[`PUBLIC_LAUNCH_DESIGN.md`](PUBLIC_LAUNCH_DESIGN.md) §0, and the next work is
+its §6 work plan, step 2 (model as an eval input, then three eval runs). The
+section below is kept as the record of why the work stopped here.
 
 Phase 2 is two questions in §11, and only the operator can answer them:
 
