@@ -359,11 +359,13 @@ regression; all predate this work.
   `validate()`. The tool stays off (`STRIDE_CHAT_SQL_TOOL` unset) and the
   durable fix is still the one below: grant `SELECT` on the allowlisted tables
   instead of `pg_read_all_data`.
-- **The read-only role's write-refusal proof no longer runs through its wired
-  path.** `apply-migration.yml:188` invokes `verify_readonly_role.py` by path
-  rather than as a module. It fails loudly under `set -euo pipefail` rather
-  than passing silently, but the next role apply or password rotation will
-  stop there.
+- ~~**The read-only role's write-refusal proof no longer runs through its wired
+  path.**~~ Fixed in PR #202: `apply-migration.yml` now runs
+  `python -m chat.verify_readonly_role` from `server/python`, and
+  `chat/tests/test_chat_workflow_wiring.py` executes that form and pins the
+  workflow to it. Not yet exercised by a real dispatch — the step only runs
+  when the migration is `chat_readonly_role.sql`, so the first proof through
+  the fixed path is the next role apply or password rotation.
 - **There is no pipeline-run status anywhere in this repository.** Stage 3's
   "check whether the nightly run has completed" has no source to read, so an
   absent tips file still cannot distinguish "not published yet" from "nothing
@@ -432,10 +434,14 @@ only about write privilege. The durable fix is to grant `SELECT` on the
 allowlisted tables explicitly instead of `pg_read_all_data`, so a validator
 bypass reaches nothing the tools could not already read.
 
-Separately, `db.py:78` interpolates the driver's DSN-parse error into
-`DatabaseUnavailable`, so a malformed `STRIDE_CHAT_DATABASE_URL` puts the
-password into a tool result and the stderr log. Scrub the message before it
-leaves the module.
+Separately, `db.py` used to interpolate the driver's DSN-parse error into
+`DatabaseUnavailable`, so a malformed `STRIDE_CHAT_DATABASE_URL` put the
+password into a tool result and the stderr log. Fixed in PR #202:
+`db.redact()` masks the URL and every form of its password (as written,
+URL-decoded, URL-encoded, and the misparsed-host tail libpq echoes when the
+password itself contains a raw `@`) at every site driver text leaves the
+module, `Database.__repr__` no longer shows the URL, and the same scrub covers
+`verify_readonly_role.py`'s connect-failure line in the Actions log.
 
 ## Running the phase 0 exit
 

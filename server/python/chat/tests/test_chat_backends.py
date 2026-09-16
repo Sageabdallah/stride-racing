@@ -112,6 +112,33 @@ def test_redact_masks_every_form_of_the_password(form):
     assert redact("anything", None) == "anything"
 
 
+def test_redact_masks_a_password_that_contains_a_raw_at_sign():
+    """An operator paste with an unencoded "@" in the password. libpq splits
+    the authority at its first "@", so it reads the rest of the password as
+    the host and echoes exactly that in "could not translate host name". The
+    regex used to stop at the first "@" too, so that tail went out unmasked
+    -- and the captured head could be a character or two, masking the wrong
+    thing ("p" turned "password authentication" into "***assword")."""
+    url = "postgresql://stride_chat_ro:Tr0ub4dor@h0rse@ep-x-pooler.neon.tech/neondb"
+    msg = 'could not translate host name "h0rse@ep-x-pooler.neon.tech" to address'
+    out = redact(msg, url)
+    assert "h0rse" not in out and "Tr0ub4dor" not in out, out
+    assert "could not translate host name" in out, "the reason must survive"
+    assert "Tr0ub4dor" not in redact("failed for Tr0ub4dor@h0rse today", url)
+    # A short head is no longer a secret on its own.
+    short = "postgresql://u:p@ss@host/db"
+    assert redact("password authentication failed", short) == "password authentication failed"
+    assert "ss@host" not in redact('host name "ss@host"', short)
+
+
+def test_database_repr_does_not_show_the_url():
+    """Context.db holds this object; a print(ctx), an f-string or pytest's
+    assertion introspection would otherwise print the credential."""
+    db = Database(url="postgresql://stride_chat_ro:s3cr3t@host/db")
+    assert "s3cr3t" not in repr(db) and "s3cr3t" not in str(db)
+    assert "postgresql" not in repr(db)
+
+
 def test_database_without_url_and_relation_missing():
     db = Database(url=None)
     assert not db.configured
