@@ -387,6 +387,13 @@ SEARCH_OPTIONAL_ENV = "STRIDE_SEARCH_OPTIONAL"
 # fatal would kill a healthy day the first time a burst got throttled.
 PPLX_FATAL_STATUSES = frozenset({401, 402, 403})
 
+# One name for the model id, because there are now three call sites: the two
+# research queries and the --search-only probe. A probe that proves a DIFFERENT
+# model id from the one production sends proves nothing about production, and a
+# retired model id is one of the faults a 4xx can mean (issue #176). Three
+# literals can drift apart silently; one constant cannot.
+PPLX_MODEL = "sonar-pro"
+
 
 class SearchUnavailable(RuntimeError):
     """Perplexity refused the run for auth or billing. Fatal by design.
@@ -652,7 +659,7 @@ Only include horses from the runners list above. List every source you find."""
                 "Content-Type": "application/json",
             },
             json={
-                "model": "sonar-pro",
+                "model": PPLX_MODEL,
                 "messages": [
                     {
                         "role": "system",
@@ -905,7 +912,7 @@ def search_race_tips_perplexity_multi(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "sonar-pro",
+                    "model": PPLX_MODEL,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": query_text},
@@ -2200,6 +2207,181 @@ def run_panel_only(date_str: str) -> int:
     return 0
 
 
+def run_search_only(date_str: str) -> int:
+    """Does the web-research leg actually answer? One query, and nothing else.
+
+    The counterpart to run_panel_only, and it exists because neither of the
+    other two proofs can reach this leg. --dry-run returns inside
+    claude_research_race before search_race_tips_perplexity_multi is ever
+    called, so consensus-proof makes zero Perplexity calls; --panel-only is
+    the Tavily half and never touches this one. Until this existed, the only
+    way to learn whether Perplexity would answer was to run the real card,
+    which scores every race, writes consensus_mentions and publishes the
+    day's file. So the question "is the key good?" could not be asked on a
+    race day without either spending the card or contaminating it.
+
+    That gap is why the 2026-09-02..09 outage (issue #176) and its recurrence
+    on 2026-09-16 were both diagnosed from an SNS email after the fact. A
+    billing lapse is the cheapest thing in this system to detect in advance
+    and was the most expensive thing to detect here.
+
+    Writes nothing, reads no racecard, opens no database connection, and
+    costs one query — so unlike every other consensus entry point it is safe
+    on a quiet day and safe beside a live job on a race day.
+
+    Three markers, because three different things can be true of this leg and
+    each has a different repair:
+
+      SEARCH_KEY_PRESENT  did PERPLEXITY_API_KEY reach the container at all
+                          (a secrets-delivery fault, not a provider fault)
+      SEARCH_HTTP         what the provider said, or `none` if the call never
+                          completed
+      SEARCH_ANSWERED     whether a 200 carried content the run could use
+
+    The last is the point, and it is deliberately not the status code. A 200
+    whose body carries nothing is exactly what a status-only check would
+    still pass with, and "the provider answered" standing in for "the leg
+    works" is the substitution this repository keeps finding. So the body is
+    parsed the way the research leg parses it, and an empty one fails.
+
+    Exit codes match the real run so one number means one thing however
+    consensus was invoked. 7 is the leg dark: the key absent, or 401/402/403,
+    which is auth or billing. 1 is everything else that leaves it unusable:
+    any other non-200, a transport failure, or an empty 200. The split earns
+    its keep because the repairs have nothing in common — 7 is a key or a
+    credit balance, and 1 is a retired model id, a throttle or a provider
+    fault, none of which are fixed by paying anyone.
+    """
+    # Reported, never obeyed. This probe's job is to say what the leg is
+    # actually doing, and a flag that lets the REAL run tolerate a dark leg
+    # must not also make the check that looks for one come back green. It
+    # does change what a red result means for today's card, so it is printed.
+    if search_optional():
+        print(f"[SEARCH-PROOF] NOTE: {SEARCH_OPTIONAL_ENV} is set, so a real "
+              f"consensus run would continue panel-only rather than exit 7. "
+              f"This probe reports the leg's true state either way.",
+              file=sys.stderr)
+
+    perplexity_key = os.getenv("PERPLEXITY_API_KEY")
+    if not perplexity_key:
+        print("SEARCH_KEY_PRESENT 0")
+        print("SEARCH_HTTP none")
+        print("SEARCH_ANSWERED 0")
+        print("[SEARCH-PROOF] FATAL: PERPLEXITY_API_KEY is not set in the "
+              "container environment. This is a secrets-delivery fault, not "
+              "a provider fault: the key never reached the task. Check the "
+              "stride/prod blob and the task definition, not the Perplexity "
+              "account.", file=sys.stderr)
+        return 7
+    print("SEARCH_KEY_PRESENT 1")
+
+    try:
+        date_formatted = datetime.strptime(date_str, "%Y-%m-%d").strftime(
+            "%A %d %B %Y")
+    except ValueError:
+        date_formatted = date_str
+
+    # The smallest real search this provider can be asked for. max_tokens is
+    # the one departure from the production request shape, and it bounds the
+    # cost of a check meant to be run often; every field that can be REFUSED
+    # — the URL, the auth header, the model id, the search parameters — is
+    # what production sends.
+    try:
+        response = _requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {perplexity_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": PPLX_MODEL,
+                "messages": [
+                    {"role": "system",
+                     "content": "Answer in one short sentence."},
+                    {"role": "user",
+                     "content": (f"Name one Australian horse racing "
+                                 f"publication that previewed racing on "
+                                 f"{date_formatted}.")},
+                ],
+                "return_citations": True,
+                "search_recency_filter": "week",
+                "temperature": 0.1,
+                "max_tokens": 64,
+            },
+            timeout=60,
+        )
+    except Exception as e:
+        print("SEARCH_HTTP none")
+        print("SEARCH_ANSWERED 0")
+        print(f"[SEARCH-PROOF] FATAL: the request to Perplexity did not "
+              f"complete: {type(e).__name__}: {e}. Nothing was refused — the "
+              f"call never reached an answer — so this is egress or the "
+              f"provider being down, not the key and not the balance.",
+              file=sys.stderr)
+        return 1
+
+    print(f"SEARCH_HTTP {response.status_code}")
+
+    if response.status_code in PPLX_FATAL_STATUSES:
+        print("SEARCH_ANSWERED 0")
+        print(f"[SEARCH-PROOF] FATAL: Perplexity returned "
+              f"{response.status_code}: {response.text[:300]}. Auth or "
+              f"billing — not transient, and the same refusal that exits 7 "
+              f"mid-card on a real run. Check the API key and the account "
+              f"credit balance.", file=sys.stderr)
+        return 7
+
+    if response.status_code != 200:
+        print("SEARCH_ANSWERED 0")
+        print(f"[SEARCH-PROOF] FATAL: Perplexity returned "
+              f"{response.status_code}: {response.text[:300]}. Not an auth or "
+              f"billing refusal, so paying will not fix it: a retired "
+              f"{PPLX_MODEL} model id, a throttle (429, which a real run "
+              f"treats as transient and keeps going past), or a provider "
+              f"fault.", file=sys.stderr)
+        return 1
+
+    # A 200 is not the answer. THIS is what this check would otherwise still
+    # pass with: the status on the envelope standing in for the content in it.
+    try:
+        data = response.json()
+        content = data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print("SEARCH_ANSWERED 0")
+        print(f"[SEARCH-PROOF] FATAL: 200 OK, but the body is not the shape "
+              f"the research leg reads: {type(e).__name__}: {e}. "
+              f"search_race_tips_perplexity_multi indexes "
+              f"['choices'][0]['message']['content'] and would fail here too. "
+              f"Body: {response.text[:300]}", file=sys.stderr)
+        return 1
+
+    if not content or not content.strip():
+        print("SEARCH_ANSWERED 0")
+        print("[SEARCH-PROOF] FATAL: 200 OK with empty message content. The "
+              "provider answered and said nothing, which reaches the run as "
+              "an empty summary and yields no mentions for the race — the "
+              "exact shape a status-only check reports as healthy.",
+              file=sys.stderr)
+        return 1
+
+    print("SEARCH_ANSWERED 1")
+    citations = data.get("citations") or []
+    print(f"[SEARCH-PROOF] OK: {PPLX_MODEL} answered {len(content)} chars "
+          f"with {len(citations)} citations. The web-research leg is alive.",
+          file=sys.stderr)
+    # Said on the green path, because green is where it will be misread. The
+    # 2026-09-16 run answered its first races and was refused at the fourth:
+    # the balance was non-zero at 05:30 and gone by 05:52. A single query
+    # cannot see that coming, and a reader who takes this as "consensus will
+    # finish tomorrow" has made the same substitution this job exists to stop.
+    print("[SEARCH-PROOF] NOTE: this proves the leg ANSWERS, not that the "
+          "balance covers a card. A run spends 4 queries per race, so roughly "
+          "130 on a weekday card and more on a Saturday. On 2026-09-16 the "
+          "account answered three races and refused at the fourth.",
+          file=sys.stderr)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="STRIDE Consensus Agent V2")
     parser.add_argument("date", help="Race date YYYY-MM-DD")
@@ -2209,10 +2391,16 @@ def main():
     parser.add_argument("--panel-only", action="store_true",
                         help="Fetch the tipster panel and report; no races, "
                              "no Perplexity/Claude, no DB writes")
+    parser.add_argument("--search-only", action="store_true",
+                        help="Make ONE Perplexity call and report; no panel, "
+                             "no races, no Claude, no racecard, no DB writes")
     args = parser.parse_args()
 
     if args.panel_only:
         sys.exit(run_panel_only(args.date))
+
+    if args.search_only:
+        sys.exit(run_search_only(args.date))
 
     try:
         run_consensus_agent(

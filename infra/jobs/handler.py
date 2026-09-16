@@ -1604,6 +1604,56 @@ def job_panel_proof() -> dict:
             "degraded": bool(usable is not None and total and usable < total)}
 
 
+def job_search_proof() -> dict:
+    """Is the web-research leg alive? One Perplexity query, and nothing else.
+
+    The counterpart to job_panel_proof, and the reason it exists is that the
+    two mention sources did not have equal footing: the Tavily half could be
+    checked on its own for the price of some extracts, and the Perplexity
+    half could only be checked by running the real card. So a question with
+    a one-query answer — will consensus be able to research tomorrow? --
+    was answerable only by an action too expensive and too dirty to take on
+    a race day. Both Perplexity outages (issue #176, and again 2026-09-16)
+    were therefore read off an SNS alert hours after the spend was gone.
+
+    Unlike every other consensus job this one reads no racecard and writes
+    nothing, so it is safe on a quiet day and safe beside a live job on a
+    race day — the same standing as flag-state, and deliberately so. The
+    times you most want to ask this are the times running consensus itself
+    would be wrong.
+
+    One cost it does NOT avoid: dispatch() stages the models and the panel
+    before any job runs, so this pays for both even though it reads neither.
+    That is dispatch's contract rather than this job's, and narrowing it for
+    one probe would put a per-job exception in the path every job takes. The
+    consequence worth knowing is that an unreachable models bucket fails
+    search-proof for a reason that has nothing to do with Perplexity — read
+    the FATAL line, which says which stage spoke.
+
+    Nothing but 0 is accepted, because here the non-zero IS the finding:
+    exit 7 is the leg dark (key absent, or an auth/billing refusal) and exit
+    1 is reachable but unusable. _run_ok carries the FATAL line into the
+    RuntimeError, so the alert says which one and what to repair.
+    """
+    out = _run_ok("consensus_agent.py", _today(), "--search-only")
+    # The backstop, and the same one job_panel_proof carries: an exit code is
+    # a claim about a run, and the marker is the only thing here that saw the
+    # provider. A future early return that exits 0 having called nothing is
+    # the class this catches — not any instance known today.
+    if "SEARCH_ANSWERED 1" not in out:
+        raise RuntimeError(
+            "search-proof: consensus_agent.py --search-only exited 0 without "
+            "printing SEARCH_ANSWERED 1, so it returned before it had an "
+            "answer to report. The exit code and the marker disagree, and on "
+            "this job the marker is the one with evidence behind it.")
+    status = ""
+    for line in out.splitlines():
+        if line.startswith("SEARCH_HTTP"):
+            status = line.split()[1]
+    return {"last_success_date": _today(), "search_answered": True,
+            "http_status": status}
+
+
 def job_flag_state() -> dict:
     """What every STRIDE_* flag is resolved to IN THE CONTAINER, and whether
     it could be set at all.
@@ -1785,6 +1835,7 @@ JOBS = {
     "llm-proof": job_llm_proof,
     "consensus-proof": job_consensus_proof,
     "panel-proof": job_panel_proof,
+    "search-proof": job_search_proof,
     # Reads source and os.environ, writes nothing: the one job that is safe
     # beside any other, on any day.
     "flag-state": job_flag_state,
