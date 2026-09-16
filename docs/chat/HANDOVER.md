@@ -10,7 +10,7 @@ Every claim here names the evidence for it. "Built" means the code is on `main`.
 "Proved" means something ran and asserted on its own output. They are different
 words on purpose.
 
-Last updated 2026-09-15.
+Last updated 2026-09-16.
 
 ---
 
@@ -225,8 +225,12 @@ actually present, and the answer naming the race back.
 `evals/behaviour.jsonl` is new and is **ours**, not vendored — six cases with
 three inverted controls. It is separate from `golden.jsonl` and
 `injection.jsonl` precisely so those two can still be re-synced wholesale.
-Offline: 16 pass (6 controls), 0 fail. Tests: **183 offline, all green**, no
-credential and no network.
+Offline: 16 pass (6 controls), 0 fail. Tests: **183 offline, all green** at
+`d81b5d9`, no credential and no network. That number is the count as this
+section was written and it went stale two commits later, the way every count
+written in prose beside the code that owns it does: v3.4, v3.5 and the review
+fixes each added tests. **On `main` at `d0feba0` the chat package is 195**,
+counted by running it. Date a count or derive it; do not restate it.
 
 **Not proved live.** No `chat-eval --live-cli` run has been made on v3.3. The
 prompt changes are exactly the kind that runs #1 and #4 showed can fail on
@@ -363,14 +367,31 @@ regression; all predate this work.
   path.** `apply-migration.yml:188` invokes `verify_readonly_role.py` by path
   rather than as a module. It fails loudly under `set -euo pipefail` rather
   than passing silently, but the next role apply or password rotation will
-  stop there.
-- **There is no pipeline-run status anywhere in this repository.** Stage 3's
-  "check whether the nightly run has completed" has no source to read, so an
-  absent tips file still cannot distinguish "not published yet" from "nothing
-  tipped". `generated_at` narrows this and does not close it. Closing it means
-  a run-status record the chain writes and the chat reads — a real change with
-  a real design, not a prompt line, which is why v3.3 says to state the
-  uncertainty rather than pick the more definite-sounding answer.
+  stop there. Reproduced on `main` at `d0feba0`, run exactly as the workflow
+  runs it: `ImportError: attempted relative import with no known parent
+  package`, from the `from .config import load_dotenv_once` inside `main()`.
+  **A fix is open and unmerged as PR #202** (CI green, mergeable), together
+  with the `db.py` password leak below. Merge it *before* rotating the role's
+  password — the rotation path runs through this exact step.
+- **The chat cannot read pipeline-run status, but the status exists.** Earlier
+  revisions of this file said there was none anywhere in the repository. That
+  was wrong, and it mattered, because it framed the fix as designing a record
+  rather than reading one. `infra/jobs/handler.py:69` writes a DynamoDB
+  `stride_run_state` row for **every** job, carrying `last_success_date`,
+  `rows_written`, `gaps_found` and `quiet_day`; `infra/02_state_table.sh`
+  creates the table and four workflows already read it. So stage 3's "check
+  whether the nightly run has completed" has a source — the chat just has no
+  path to it, and no right to it: plan §6 phase 3A's IAM table **explicitly
+  denies** the chat access to `stride_run_state`, alongside `stride/prod` and
+  the models bucket. Closing this is therefore a reader plus an amendment to
+  that table, not a new record, and it is the IAM half that deserves the
+  argument: that denial was written deliberately, for a component that faces
+  untrusted input. One caveat survives either way — `handler.py:510` records
+  that "a quiet day still advances `last_success_date`", so a reader that
+  checks only that field still cannot tell "not published yet" from "nothing
+  tipped"; it has to read `quiet_day` too. `generated_at` narrows the gap and
+  does not close it, which is why v3.3 says to state the uncertainty rather
+  than pick the more definite-sounding answer.
 - **Nobody here has established the frontend's read path.** Stage 3 wants the
   chat to read what the page reads. `stride-app` is a separate repository, so
   this cannot be verified from this checkout; it should be written down in
@@ -432,7 +453,8 @@ only about write privilege. The durable fix is to grant `SELECT` on the
 allowlisted tables explicitly instead of `pg_read_all_data`, so a validator
 bypass reaches nothing the tools could not already read.
 
-Separately, `db.py:78` interpolates the driver's DSN-parse error into
+Separately, and **fixed in the open PR #202, not on `main`**, `db.py:78`
+interpolates the driver's DSN-parse error into
 `DatabaseUnavailable`, so a malformed `STRIDE_CHAT_DATABASE_URL` puts the
 password into a tool result and the stderr log. Scrub the message before it
 leaves the module.
@@ -579,6 +601,39 @@ minutes. The CLI has the same exposure — it is a property of the tool layer,
 not of this transport — but it is more visible in a server you leave running.
 
 ## Changelog
+
+**2026-09-16, three corrections to this file.** No code changed. PR #197 is
+merged (`8dd4df2`) and `main` is `d0feba0`, so prompt v3.5 and the 52-case
+corpus are what a checkout gets.
+
+- The claim that no pipeline-run status existed anywhere in the repository was
+  **wrong**. `stride_run_state` has carried one per job since the estate was
+  built. The item now says what is actually missing (a reader, and an
+  amendment to plan §6 phase 3A's IAM table, which denies the chat that table
+  on purpose) and names `handler.py:510`'s quiet-day caveat.
+- The `183 offline` count was stale; the chat package is **195** on `main`,
+  counted by running it. The line is dated to the commit it was true at.
+- The two items **PR #202** fixes were listed as open with no mention that a
+  fix exists, which invited the next session to rebuild it. Both now point at
+  it, with the ordering constraint: merge #202 before rotating the role's
+  password, because the rotation runs through the step #202 repairs.
+
+Verified while making these, on `main` at `d0feba0`: the chat suite is 195
+green with no credential, no network and `psycopg2` absent; the by-path
+verifier invocation dies on `ImportError` exactly as recorded; both
+`run_readonly_sql` bypasses still pass the real `validate()`; all four link
+shapes strip clean, including `see (https://evil.example/a)`; the corpus is
+30 + 16 + 6 = 52 with 8 search-gated (`web-01`–`05`, `inj-page-01/02`,
+**`inj-link-01`**), so 44 execute. That last one is worth knowing: one of the
+two link-injection cases §5 names as the citation contract's acceptance test
+has never run live, and the leak the audit found was found by reading, not by
+the eval.
+
+**Not re-proved:** runs #9–#11 all ran on the PR branch. The last `chat-eval`
+on `main` is run #8, on v3.2 over 38 cases. `prompt.py` at `15211b7` and at
+`d0feba0` are byte-identical — the only chat diffs are two comments and a
+docstring — so run #11's 44 of 44 carries in substance. By the standard run #6
+set, it is not the same as a run on `main`.
 
 **2026-09-14, the MCP server.** `chat/mcp_server.py` plus 39 tests: the same
 tools over MCP stdio, dual-era, zero new dependencies. Proved end to end
