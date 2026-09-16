@@ -27,6 +27,13 @@
 # os.environ and writes nothing, so unlike everything above it is safe beside a
 # real job on a race day. Not in the default set: it answers a question you ask,
 # not one worth asking on every dispatch.
+#
+# `jobs=search-proof` asks of the Perplexity leg what `panel-proof` asks of the
+# Tavily one: does it answer? ONE query, no racecard, no database, nothing
+# written — so like flag-state it is safe beside a live job on a race day, and
+# it is the only way to check the web-research leg without running the card.
+# `consensus-proof` cannot: --dry-run returns before the Perplexity call and
+# spends nothing there. Also not in the default set, for the same reason.
 name: verify-jobs
 
 on:
@@ -162,6 +169,7 @@ jobs:
                 llm-proof)       TD=stride-tips-pipeline ;;
                 consensus-proof) TD=stride-consensus-agent ;;
                 panel-proof)     TD=stride-consensus-agent ;;
+                search-proof)    TD=stride-consensus-agent ;;
                 # Same borrow as the proofs above, and for the same reason:
                 # the default branch resolves stride-$JOB, and no family named
                 # stride-flag-state is registered — 07_fargate_heavy.sh's spec
