@@ -70,6 +70,7 @@ jobs:
           python backfill_results.py
           python tips_day_aggregates.py
           python walk_forward_backtest.py --self-test
+          python staking_replay.py --self-test
           python calibration_model.py
           python fit_calibrator.py --self-test
           python selection_policy.py
