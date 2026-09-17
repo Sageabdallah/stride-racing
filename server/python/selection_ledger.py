@@ -302,6 +302,48 @@ def kelly_readiness(rows: Sequence[Dict[str, Any]],
     return checks
 
 
+def format_kelly_readiness(rows: Sequence[Dict[str, Any]]) -> str:
+    """Production report over all settled history; never activate staking.
+
+    Keep this independent of weekly_metrics: its walk_forward_backtest import
+    creates a repo directory, which is forbidden on the digest Lambda.
+    """
+    import math
+
+    if not rows:
+        raise ValueError("Kelly readiness unavailable: selection_ledger returned zero settled rows")
+    bets = [r for r in rows if r.get("settled") and not r.get("refused")
+            and (r.get("stake") or 0) > 0]
+    # A nonempty table can contain only refusals/zero stakes. Counting those
+    # would pass with the exact no-evidence failure this report guards against.
+    if not bets:
+        raise ValueError("Kelly readiness unavailable: zero settled bets with a positive stake")
+    for row in bets:
+        price = row.get("price_taken")
+        if (price is None or not math.isfinite(float(price)) or float(price) <= 1
+                or row.get("won") not in (True, False) or row.get("won") is None):
+            raise ValueError("Kelly readiness unavailable: settled bet lacks valid price/outcome")
+        if row.get("clv_pct") is not None and not math.isfinite(float(row["clv_pct"])):
+            raise ValueError("Kelly readiness unavailable: non-finite CLV")
+    report = kelly_readiness(bets)
+    if report["roi_ci_lower"] is None or not math.isfinite(report["roi_ci_lower"]):
+        raise ValueError("Kelly readiness unavailable: net ROI confidence interval failed")
+    dates = sorted(str(r["race_date"]) for r in bets if r.get("race_date"))
+    window = f"{dates[0]} through {dates[-1]}" if dates else "dates unavailable"
+    n_clv = sum(r.get("clv_pct") is not None for r in bets)
+    return (
+        "Kelly readiness (REPORT ONLY; Kelly remains disabled)\n"
+        f"Window: all settled history, {window}\n"
+        f"ready: {report['ready']}; settled bets: {report['settled_bets']}/{report['min_bets']}\n"
+        f"net ROI lower 95% CI (%): {report['roi_ci_lower']}; "
+        f"positive: {report['roi_ci_positive']}\n"
+        f"mean CLV (%): {report['mean_clv']}; positive: {report['clv_positive']}; "
+        f"CLV coverage: {n_clv}/{len(bets)}\n"
+        "Existing readiness gate uses current STRIDE_COMMISSION_RATE; "
+        "replay ticket separately requires 500 bets."
+    )
+
+
 def weekly_metrics(rows: Sequence[Dict[str, Any]], bootstrap_n: int = 2000,
                    bootstrap_seed: int = 42) -> Dict[str, Any]:
     """Summarise settled ledger rows using the harness's own metric functions.

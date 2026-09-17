@@ -410,3 +410,27 @@ def test_settle_fails_loud_when_net_migration_missing(capsys):
     err = capsys.readouterr().err
     assert "WARNING" in err and "selection_ledger_net_settlement.sql" in err, \
         "a missing migration must be loud, never a silent non-settlement"
+
+
+def test_readiness_report_requires_actual_settled_bets():
+    from selection_ledger import format_kelly_readiness
+    for rows in ([], [{"settled": True, "stake": 0}],
+                 [{"settled": True, "stake": 100, "refused": True}]):
+        with pytest.raises(ValueError, match="zero settled"):
+            format_kelly_readiness(rows)
+    with pytest.raises(ValueError, match="price/outcome"):
+        format_kelly_readiness([{"settled": True, "stake": 100}])
+
+
+def test_readiness_report_contains_gate_values_and_missing_clv(monkeypatch):
+    from selection_ledger import format_kelly_readiness
+    row = build_ledger_row(PICK, RACE, {"won": False})
+    text = format_kelly_readiness([row])
+    assert "ready: False; settled bets: 1/400" in text
+    assert "net ROI lower 95% CI (%): -100.0; positive: False" in text
+    assert "mean CLV (%): None; positive: False; CLV coverage: 0/1" in text
+    assert "2026-03-08 through 2026-03-08" in text
+    assert "REPORT ONLY; Kelly remains disabled" in text
+    monkeypatch.setattr("selection_ledger.kelly_readiness", lambda rows: {"roi_ci_lower": None})
+    with pytest.raises(ValueError, match="confidence interval failed"):
+        format_kelly_readiness([row])
