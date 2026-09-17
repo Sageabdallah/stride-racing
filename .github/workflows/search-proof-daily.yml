@@ -1,0 +1,197 @@
+# .github/workflows/search-proof-daily.yml
+#
+# Ask Perplexity one question every morning, BEFORE the 05:30 consensus run
+# spends a card on the answer.
+#
+# WHY THIS EXISTS. #204 gave the web-research leg a cheap standalone check, and
+# then nothing ran it. That is the gap both Perplexity outages fell through:
+# 2026-09-02..09 (#176) and again 2026-09-16, when the balance was alive at
+# 05:30 and exhausted by 05:52. Each was discovered from an SNS alert after the
+# money was gone and the card was lost, because the only thing that ever
+# exercised the leg was the job that depended on it. A check nobody runs is not
+# a check; it is a tool.
+#
+# WHY 17:30Z AND NOT 19:00Z. The consensus slot is 19:30Z (05:30 Sydney). Two
+# hours of lead is not caution about this workflow's runtime — the probe takes
+# about ninety seconds — it is about GitHub's scheduler. #145 measured 3-7 of
+# 48 daily firings delivered on the half-hourly watch, and drift here is
+# one-directional: the scheduler fires LATE, never early. pf-morning-racecards
+# is nominally 05:30 Sydney and has landed at 08:15 and 08:21. A 30-minute lead
+# would routinely report on a card that had already been spent, which is the
+# one thing this must not do.
+#
+# WHY IT DISPATCHES verify-jobs RATHER THAN RUNNING THE TASK ITSELF. verify-jobs
+# already owns the OIDC role, the task-definition mapping and the exit-code
+# read. A second copy of that path would be a second thing to keep correct, and
+# the failure it would hide (two run-task implementations disagreeing) is worse
+# than the indirection it would save.
+#
+# WHY IT WAITS INSTEAD OF FIRING AND FORGETTING. `gh workflow run` returns 204
+# whether or not the run it asked for ever happens. Dispatch-and-hope is the
+# silent no-op class this repository keeps finding: a job that runs, exits 0 and
+# produces nothing. So this waits for the dispatched run, reads its conclusion,
+# and refuses to go green on anything it did not actually observe.
+#
+# WHAT ALERTS. Nothing here needs to: a failed search-proof raises inside
+# dispatch(), which publishes to the stride-alerts SNS topic, so the operator
+# gets the same email as any other job failure — naming SEARCH_KEY_PRESENT,
+# SEARCH_HTTP and the FATAL line. The issue this files is the durable record,
+# because an inbox is not a ledger.
+#
+# COST. One Perplexity query per day against a 260-query per-run cap, plus the
+# model and panel staging every task pays on the way in. Against a card that
+# costs ~130 queries and a day of tips, that is not a number worth optimising.
+
+name: search-proof-daily
+
+on:
+  schedule:
+    # 17:30 UTC == 03:30 Sydney (AEST, UTC+10). Two hours before the consensus
+    # slot. Revisit in October when daylight saving starts and this drifts.
+    - cron: "30 17 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write    # dispatch verify-jobs and read the run it creates
+  issues: write     # the durable record when the leg is dark
+
+concurrency:
+  group: search-proof-daily
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dispatch search-proof and wait for its verdict
+        id: probe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # The newest verify-jobs run BEFORE we ask for one, so the run we
+          # then wait on is provably ours. Picking "the newest run" without
+          # this would happily read someone else's dispatch and report its
+          # result as this morning's probe.
+          BEFORE=$(gh run list --workflow=verify-jobs.yml --limit 1 \
+                     --json databaseId -q '.[0].databaseId // 0')
+          echo "newest verify-jobs run before dispatch: $BEFORE"
+
+          gh workflow run verify-jobs.yml \
+            -f jobs=search-proof \
+            -f wait_minutes=10
+
+          # Queueing is not instant. Poll for a run newer than BEFORE.
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            CANDIDATE=$(gh run list --workflow=verify-jobs.yml --limit 1 \
+                          --json databaseId -q '.[0].databaseId // 0')
+            if [ "$CANDIDATE" != "$BEFORE" ] && [ "$CANDIDATE" != "0" ]; then
+              RUN_ID="$CANDIDATE"
+              break
+            fi
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::dispatched verify-jobs but no new run appeared within 5 minutes."
+            echo "verdict=no-run" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "watching verify-jobs run $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "run_url=https://github.com/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" >> "$GITHUB_OUTPUT"
+
+          # Wait it out. verify-jobs is given wait_minutes=10 and the probe
+          # itself takes about ninety seconds, so 18 minutes of polling is
+          # slack, not a guess.
+          for _ in $(seq 1 108); do
+            STATUS=$(gh run view "$RUN_ID" --json status -q .status)
+            [ "$STATUS" = "completed" ] && break
+            sleep 10
+          done
+
+          STATUS=$(gh run view "$RUN_ID" --json status -q .status)
+          CONCLUSION=$(gh run view "$RUN_ID" --json conclusion -q .conclusion)
+          echo "status=$STATUS conclusion=$CONCLUSION"
+
+          if [ "$STATUS" != "completed" ]; then
+            echo "verdict=timeout" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$CONCLUSION" = "success" ]; then
+            echo "verdict=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=dark" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Deliberately conditional on the VERDICT and not on job failure: the
+      # step above exits 0 on a dark leg so that this step runs at all. The
+      # finding is the issue, not a red tick nobody is subscribed to.
+      # Deliberately conditional on the VERDICT and not on job failure: the
+      # step above exits 0 on a dark leg so that this step runs at all. The
+      # finding is the issue, not a red tick nobody is subscribed to.
+      - name: File the finding when the leg is not answering
+        if: steps.probe.outputs.verdict == 'dark' || steps.probe.outputs.verdict == 'timeout'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERDICT: ${{ steps.probe.outputs.verdict }}
+          RUN_URL: ${{ steps.probe.outputs.run_url }}
+        run: |
+          set -euo pipefail
+          TODAY=$(TZ=Australia/Sydney date +%F)
+
+          # One issue per day at most. A daily probe that files a duplicate
+          # every morning of a multi-day outage teaches you to filter it.
+          EXISTING=$(gh issue list --state open --search "search-proof in:title" \
+                       --json number,title -q \
+                       ".[] | select(.title | contains(\"$TODAY\")) | .number" | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "already filed #$EXISTING for $TODAY"
+            exit 0
+          fi
+
+          {
+            if [ "$VERDICT" = "timeout" ]; then
+              echo "The daily search-proof did not reach a verdict before this workflow gave up."
+              echo "That is NOT the same as a dark leg: the ECS task may still be running, or"
+              echo "verify-jobs may have reported STILL RUNNING. Read the run and decide."
+            else
+              echo "\`search-proof\` failed this morning, so the web-research leg is not answering."
+              echo "The 05:30 consensus run is about two hours away and will spend the card"
+              echo "discovering the same thing."
+              echo
+              echo "The markers are in the run below, and the SNS alert email carries the FATAL line:"
+              echo
+              echo "- \`SEARCH_KEY_PRESENT 0\` — the key never reached the container. A"
+              echo "  secrets-delivery fault: check the stride/prod blob, not the Perplexity account."
+              echo "- \`SEARCH_HTTP 401\` or \`402\` — auth or billing. Check the credit balance and"
+              echo "  the monthly spend limit."
+              echo "- \`SEARCH_HTTP\` anything else, or \`SEARCH_ANSWERED 0\` on a 200 — not a billing"
+              echo "  fault, so paying will not fix it: a retired model id, a throttle, or an"
+              echo "  answer with no content in it."
+              echo
+              echo "If it is billing and cannot be fixed before 05:30, \`STRIDE_SEARCH_OPTIONAL=true\`"
+              echo "in the stride/prod secret lets consensus run panel-only rather than exit 7 —"
+              echo "a degraded day instead of no day."
+            fi
+            echo
+            echo "Run: $RUN_URL"
+          } > body.md
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "search-proof: web-research leg not answering ($TODAY)" \
+            --label auto-triage \
+            --body-file body.md
+
+      - name: Say what happened
+        run: |
+          echo "verdict: ${{ steps.probe.outputs.verdict }}"
+          echo "run: ${{ steps.probe.outputs.run_url }}"
