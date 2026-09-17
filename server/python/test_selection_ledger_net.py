@@ -410,3 +410,84 @@ def test_settle_fails_loud_when_net_migration_missing(capsys):
     err = capsys.readouterr().err
     assert "WARNING" in err and "selection_ledger_net_settlement.sql" in err, \
         "a missing migration must be loud, never a silent non-settlement"
+
+
+@pytest.mark.parametrize("fair_odds", [None, 1.0, 0, -2, "bad", float("nan"), float("inf")])
+def test_shadow_market_fallback_is_explicit_and_stake_unchanged(monkeypatch, fair_odds):
+    monkeypatch.setenv("STRIDE_SHADOW_KELLY", "true")
+    pick = {**PICK, "fair_odds": fair_odds}
+    row = build_ledger_row(pick, RACE)
+    plan = row["shadow_kelly"]
+    assert plan["market_prob_source"] == "raw_implied_odds"
+    assert plan["market_prob"] == 0.2
+    assert plan["p_lo"] is None and plan["p_lo_source"] == "absent"
+    assert plan["lower_bound"] is None and plan["applied"] is False
+    assert row["stake"] == 200.0 and pick["staking"] == "2u"
+
+
+def test_shadow_reads_actual_export_contract_and_serializes_every_added_field(monkeypatch):
+    import json
+    from run_tips_pipeline import build_export_pick
+    from portfolio_risk import shadow_stake_plan
+    monkeypatch.setenv("STRIDE_SHADOW_KELLY", "true")
+    horse = {"horse": "Alpha", "winPercentage": 30, "marketOdds": 5,
+             "fairOdds": 6.25, "ciLower": 24, "staking": "1u"}
+    pick = build_export_pick(horse)
+    before = json.dumps(pick, sort_keys=True)
+    row = build_ledger_row(pick, RACE)
+    plan = json.loads(_row_to_tuple(row)[LEDGER_COLUMNS.index("shadow_kelly_json")])
+    assert plan["market_prob"] == 0.16 and plan["market_prob_source"] == "fair_odds"
+    assert plan["prob_used"] == 0.23 and plan["stake_pct"] == 0.9375
+    assert plan["p_lo"] == 0.24
+    assert plan["p_lo_source"] == "pick._mc_data.ciLower_pct_pre_calibration"
+    assert plan["lower_bound"] == {"full_kelly_pct": 5.0, "stake_pct": 1.25,
+                                  "stake": 125.0, "capped": False}
+    assert plan["applied"] is False and row["stake"] == 100.0
+    assert json.dumps(pick, sort_keys=True) == before
+    assert shadow_stake_plan(0.3, 5, market_probability=0.2)["market_prob_source"] == "provided_market_probability"
+
+
+@pytest.mark.parametrize("bound,expected", [(90, {"full_kelly_pct": 87.5, "stake_pct": 2.0,
+                                               "stake": 200.0, "capped": True}),
+                                            (10, {"full_kelly_pct": 0.0, "stake_pct": 0.0,
+                                                  "stake": 0.0, "capped": False})])
+def test_shadow_lower_bound_cap_and_nonpositive_edge(monkeypatch, bound, expected):
+    monkeypatch.setenv("STRIDE_SHADOW_KELLY", "true")
+    plan = build_ledger_row({**PICK, "_mc_data": {"ciLower": bound}}, RACE)["shadow_kelly"]
+    assert plan["lower_bound"] == expected and plan["applied"] is False
+
+
+@pytest.mark.parametrize("bound", [0, 100, -1, float("nan"), float("inf"), "bad"])
+def test_shadow_invalid_lower_bound_is_not_fabricated(monkeypatch, bound):
+    monkeypatch.setenv("STRIDE_SHADOW_KELLY", "true")
+    plan = build_ledger_row({**PICK, "_mc_data": {"ciLower": bound}}, RACE)["shadow_kelly"]
+    assert plan["p_lo"] is None and plan["lower_bound"] is None
+    assert plan["p_lo_source"] == "invalid:pick._mc_data.ciLower_pct_pre_calibration"
+    assert plan["applied"] is False
+
+
+@pytest.mark.parametrize("flag", ["true", "false"])
+@pytest.mark.parametrize("stored", [None, {"applied": False, "stake_pct": 0.1234,
+                                         "p_lo": 0.21, "historical": "unchanged"}])
+def test_settlement_preserves_tip_time_shadow_plan_including_null(monkeypatch, flag, stored):
+    import json
+    import selection_ledger as ledger
+    monkeypatch.setenv("STRIDE_LEDGER_WRITE", "true")
+    monkeypatch.setenv("STRIDE_SHADOW_KELLY", flag)
+    # The cursor must expose the actual selected column: a fixture omitting it
+    # would pass preservation-of-NULL while still losing a real stored plan.
+    assert "shadow_kelly_json" in ledger._SETTLE_PENDING_SQL
+    class Cursor(_SettleCursor):
+        @property
+        def description(self):
+            return [(c,) for c in _SETTLE_COLS + ["shadow_kelly_json"]]
+    class Conn(_SettleConn):
+        def cursor(self):
+            return Cursor(self)
+    conn = Conn([_pending_row() + (stored,)])
+    results = {("flemington", 5, "alpha"): {"position": 1, "sp": 4.0, "won": True}}
+    settle_pending_rows(conn, "2026-03-08", results_map=results)
+    output = _col(conn.upserted[0], "shadow_kelly_json")
+    assert (json.loads(output) if output is not None else None) == stored
+    assert _col(conn.upserted[0], "stake") == 200.0
+    assert _col(conn.upserted[0], "pnl") == 736.0

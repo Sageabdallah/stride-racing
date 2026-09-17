@@ -624,7 +624,10 @@ def shadow_stake_plan(win_probability: float, decimal_odds: float,
                       kelly_fraction: float = 0.25,
                       shrinkage: float = 0.5,
                       max_stake_pct: float = 2.0,
-                      commission_rate: float = 0.0) -> Dict:
+                      commission_rate: float = 0.0,
+                      market_probability_source: Optional[str] = None,
+                      probability_lower: Optional[float] = None,
+                      probability_lower_source: Optional[str] = None) -> Dict:
     """Compute a fractional-Kelly stake WITHOUT applying it.
 
     Shadow by construction: the returned dict is for logging and later
@@ -638,8 +641,11 @@ def shadow_stake_plan(win_probability: float, decimal_odds: float,
     """
     ev = ev_at_price(win_probability, decimal_odds, commission_rate=commission_rate)
 
-    if market_probability is None and decimal_odds and decimal_odds > 1.0:
-        market_probability = 1.0 / float(decimal_odds)
+    market_source = market_probability_source or 'provided_market_probability'
+    if market_probability is None:
+        market_source = 'raw_implied_odds'
+        if decimal_odds and decimal_odds > 1.0:
+            market_probability = 1.0 / float(decimal_odds)
 
     p_used = shrunk_win_probability(win_probability, market_probability or 0.0,
                                     shrinkage=shrinkage)
@@ -655,12 +661,42 @@ def shadow_stake_plan(win_probability: float, decimal_odds: float,
     if ev <= 0 or full_kelly <= 0:
         capped_pct, stake = 0.0, 0.0
 
+    # The optional interval is a separate estimate, never a replacement for
+    # prob_used. MC's interval precedes the pipeline's later calibration.
+    lower_source = probability_lower_source or 'absent'
+    p_lo = None
+    lower_plan = None
+    if probability_lower is not None:
+        try:
+            candidate = float(probability_lower)
+        except (TypeError, ValueError):
+            candidate = float('nan')
+        if math.isfinite(candidate) and 0.0 < candidate < 1.0:
+            p_lo = candidate
+            lower_source = probability_lower_source or 'provided_probability_lower'
+            lower_full = max(0.0, (p_lo * decimal_odds - 1.0) / b) if b > 0 else 0.0
+            lower_pct = min(lower_full * kelly_fraction * 100.0, max_stake_pct)
+            if ev_at_price(p_lo, decimal_odds, commission_rate) <= 0:
+                lower_pct = 0.0
+            lower_plan = {
+                'full_kelly_pct': round(lower_full * 100.0, 4),
+                'stake_pct': round(lower_pct, 4),
+                'stake': round(bankroll * lower_pct / 100.0, 2),
+                'capped': bool(lower_full * kelly_fraction * 100.0 > max_stake_pct),
+            }
+        else:
+            lower_source = 'invalid:' + (probability_lower_source or 'provided_probability_lower')
+
     return {
         'applied': False,
-        'reason': 'shadow-only: staking stays on the live 2u/1u/0u ladder',
+        'reason': 'shadow-only: live staking is unchanged',
         'ev': round(ev, 6),
         'model_prob': round(float(win_probability), 6),
         'market_prob': round(float(market_probability or 0.0), 6),
+        'market_prob_source': market_source,
+        'p_lo': p_lo,
+        'p_lo_source': lower_source,
+        'lower_bound': lower_plan,
         'shrinkage': shrinkage,
         'prob_used': round(p_used, 6),
         'full_kelly_pct': round(full_kelly * 100.0, 4),
@@ -719,6 +755,30 @@ def _self_test():
     assert big['stake'] == 200.0, big['stake']
     print(f"  cap: p=0.90 @5.0 would be {big['full_kelly_pct']:.1f}% full Kelly, "
           f"clamped to {big['max_stake_pct']}% (${big['stake']:.0f}); negative EV stakes 0")
+
+    assert plan['market_prob_source'] == 'raw_implied_odds'
+    assert plan['p_lo'] is None and plan['p_lo_source'] == 'absent'
+    assert plan['lower_bound'] is None
+    sourced = shadow_stake_plan(0.30, 5.0, market_probability=0.16,
+                               market_probability_source='fair_odds',
+                               probability_lower=0.24,
+                               probability_lower_source='pick._mc_data.ciLower_pct_pre_calibration')
+    assert sourced['market_prob_source'] == 'fair_odds' and sourced['market_prob'] == 0.16
+    assert sourced['prob_used'] == 0.23 and sourced['stake_pct'] == 0.9375
+    assert sourced['p_lo'] == 0.24
+    assert sourced['p_lo_source'] == 'pick._mc_data.ciLower_pct_pre_calibration'
+    assert sourced['lower_bound'] == {'full_kelly_pct': 5.0, 'stake_pct': 1.25,
+                                      'stake': 125.0, 'capped': False}
+    assert sourced['applied'] is False
+    assert shadow_stake_plan(0.30, 5.0, market_probability=0.2)['market_prob_source'] == 'provided_market_probability'
+    assert shadow_stake_plan(0.30, 5.0, probability_lower=0.9)['lower_bound'] == {
+        'full_kelly_pct': 87.5, 'stake_pct': 2.0, 'stake': 200.0, 'capped': True}
+    assert shadow_stake_plan(0.30, 5.0, probability_lower=0.1)['lower_bound']['stake'] == 0
+    for bad in (0, 1, -1, float('nan'), float('inf'), 'bad'):
+        invalid = shadow_stake_plan(0.30, 5.0, probability_lower=bad)
+        assert invalid['p_lo'] is None and invalid['lower_bound'] is None
+        assert invalid['p_lo_source'] == 'invalid:provided_probability_lower'
+    print('  shadow inputs: market source and optional lower-bound provenance recorded; invalid bounds absent')
 
     # --- the module stays dead-by-default ---
     prev = os.environ.pop('STRIDE_SHADOW_KELLY', None)
