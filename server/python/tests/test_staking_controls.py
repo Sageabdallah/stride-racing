@@ -192,3 +192,30 @@ class TestExposureCapRanksByNetEv:
         assert (kept, demoted) == (1, 1)
         assert a.get("refused_bet_pick", {}).get("horse") == "A", "edge-ranking would have kept A"
         assert "refused_bet_pick" not in b
+
+
+def test_shadow_flag_preserves_live_staking_bytes(monkeypatch):
+    import json
+    from run_tips_pipeline import compute_staking, build_export_pick
+    from selection_ledger import build_ledger_row
+
+    for flat, expected in (("true", ["1u", "1u", "0u"]),
+                           ("false", ["2u", "1u", "0u"])):
+        monkeypatch.setenv("STRIDE_FLAT_STAKING", flat)
+        snapshots = []
+        for shadow in ("false", "true"):
+            monkeypatch.setenv("STRIDE_SHADOW_KELLY", shadow)
+            payload = []
+            for confidence, staking in zip(("high", "medium", "low"), expected):
+                horse = {"horse": "Alpha", "confidence": confidence,
+                         "winPercentage": 40, "marketOdds": 5}
+                horse["staking"] = compute_staking(horse)
+                pick = build_export_pick(horse)
+                row = build_ledger_row(pick, {"race_date": "2026-09-01"})
+                assert horse["staking"] == pick["staking"] == staking
+                assert row["stake"] == {"0u": 0, "1u": 100, "2u": 200}[staking]
+                if shadow == "true":
+                    assert row["shadow_kelly"]["applied"] is False
+                payload.append([horse["staking"], pick["staking"], row["stake"]])
+            snapshots.append(json.dumps(payload).encode())
+        assert snapshots[0] == snapshots[1]

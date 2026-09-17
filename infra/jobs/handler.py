@@ -519,7 +519,7 @@ def job_racecard_collect() -> dict:
             "quiet_day": quiet, "detail": out[-500:]}
 
 
-def _db_query(sql: str, params: tuple):
+def _db_query(sql: str, params: tuple, *, fetch_all: bool = False):
     """One-shot read for the job-contract layer.
 
     The handler owns no schema and holds no connection; it asks the
@@ -536,7 +536,7 @@ def _db_query(sql: str, params: tuple):
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
-            return cur.fetchone()
+            return cur.fetchall() if fetch_all else cur.fetchone()
     finally:
         conn.close()
 
@@ -1797,6 +1797,17 @@ def job_weekly_digest() -> dict:
         lines += ["", "tip_time capture:", snap.stdout[-800:]]
     except Exception:
         pass
+    # dispatch has already loaded stride/prod, including DATABASE_URL. Do not
+    # swallow ledger failures like the optional tip-time diagnostic above:
+    # missing/empty evidence must fail the job and reach its failure alert.
+    from selection_ledger import format_kelly_readiness
+    ledger_rows = _db_query(
+        "SELECT race_date, settled, refused, stake, price_taken, won, clv_pct "
+        "FROM selection_ledger WHERE settled = TRUE "
+        "ORDER BY race_date, track, race_number, horse_name", (), fetch_all=True)
+    columns = ("race_date", "settled", "refused", "stake", "price_taken", "won", "clv_pct")
+    lines += ["", format_kelly_readiness([
+        dict(zip(columns, row)) for row in ledger_rows])]
     body = "\n".join(lines)
     print(body)
     # The ARN is in the environment; listing topics needs an SNS:ListTopics
