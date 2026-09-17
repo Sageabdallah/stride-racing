@@ -108,6 +108,36 @@ def test_track_matches_admits_no_other_confusable_pair():
     assert not surprises, f"containment matches tracks nothing declares the same venue: {surprises}"
 
 
+def test_puntingform_find_meeting_refuses_the_confusable_pair():
+    """The Punting Form facade had its own containment matcher, so the fix in
+    track_matches did not reach it: with both meetings on the card, a
+    question about Warwick returned Warwick Farm's meeting through every
+    tool that resolves a meeting there (get_race_card, query_results,
+    puntingform). It now goes through track_matches, and the sponsor and
+    sub-venue spellings containment exists for still resolve."""
+    from chat.pf import PuntingForm
+
+    class Client:
+        class PFError(Exception):
+            pass
+
+        class PFAuthError(Exception):
+            pass
+
+        def meetings_for_date(self, d):
+            return [{"meetingId": 1, "track": {"name": "Warwick Farm"}},
+                    {"meetingId": 2, "track": {"name": "Picklebet Park Warwick"}},
+                    {"meetingId": 3, "track": "Sandown Hillside"},
+                    "not a meeting"]
+
+    pf = PuntingForm(client=Client(), today="2026-09-17")
+    assert pf.find_meeting("2026-09-17", "Warwick")["meetingId"] == 2
+    assert pf.find_meeting("2026-09-17", "Warwick Farm")["meetingId"] == 1
+    assert pf.find_meeting("2026-09-17", "Sandown")["meetingId"] == 3
+    assert pf.find_meeting("2026-09-17", "Caulfield") is None
+    assert pf.find_meeting("2026-09-17", "") is None
+
+
 def test_the_confusable_list_is_pairs_not_a_blanket_ban():
     """Listing a bare key would break `Picklebet Park Warwick` finding Warwick."""
     assert CONFUSABLE_TRACKS == frozenset({frozenset({"warwick", "warwickfarm"})})

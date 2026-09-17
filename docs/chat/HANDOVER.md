@@ -189,6 +189,16 @@ that are prompt-shaped. Each item below names the gap, not the feature.
   inferring it, so every sponsor and sub-venue spelling still matches;
   `test_track_matches_admits_no_other_confusable_pair` scans 101 spellings and
   asserts it is the only collision, so the list cannot go stale unnoticed.
+  **That fix did not reach every matcher.** "The one primitive behind all 15
+  call sites" was true of `track_matches`, but `pf.py`'s `find_meeting` had a
+  containment matcher of its own, so a question about Warwick still returned
+  Warwick Farm's Punting Form meeting through `get_race_card` (when no
+  artifact holds the card), `query_results` (on the Punting Form fallback) and
+  the `puntingform` tool. Reproduced on `main` at `9403bcb` with both meetings
+  on one date. Fixed 2026-09-17: `find_meeting` now resolves through
+  `track_matches`, and `test_puntingform_find_meeting_refuses_the_confusable_pair`
+  pins it. `verify-track-01` could not have caught this: it asserts on
+  `get_stride_tips`, which never touches Punting Form.
 - **The MCP server returned tool results unframed.** `mcp_server.py` built its
   own JSON and duplicated the truncation, so a fourth path to a model had none
   of the `[DATA ...]` markers the system prompt refers to. It now calls

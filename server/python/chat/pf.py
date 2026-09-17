@@ -135,15 +135,25 @@ class PuntingForm:
     # -- a join the model should not have to write ------------------------
 
     def find_meeting(self, iso_date: str, track: str) -> Optional[Dict[str, Any]]:
-        """The meeting on `iso_date` whose track matches `track`, or None."""
-        from identity_normalization import normalize_track_key
-        wanted = normalize_track_key(track)
-        if not wanted:
+        """The meeting on `iso_date` whose track matches `track`, or None.
+
+        Through tools._common.track_matches, not a matcher of its own. This
+        used to be plain containment, which is the Warwick / Warwick Farm
+        collision that CONFUSABLE_TRACKS exists to refuse: `warwick` is a
+        substring of `warwickfarm`, so a question about the Queensland track
+        was answered with the Sydney meeting's card by every tool that
+        reaches Punting Form through here (get_race_card, query_results,
+        puntingform). One matcher, so one place for that rule to live.
+        """
+        # Lazy: tools/ imports this module, so a top-level import would cycle.
+        from .tools._common import norm_track, track_matches
+        if not norm_track(track):
             return None
         for m in self.meetings_for_date(iso_date):
-            name = ((m or {}).get("track") or {}).get("name") if isinstance(m.get("track"), dict) \
-                else (m or {}).get("track")
-            got = normalize_track_key(name)
-            if got == wanted or wanted in got or got in wanted:
+            if not isinstance(m, dict):
+                continue
+            name = (m.get("track") or {}).get("name") if isinstance(m.get("track"), dict) \
+                else m.get("track")
+            if track_matches(name, track):
                 return m
         return None
