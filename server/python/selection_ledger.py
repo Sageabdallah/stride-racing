@@ -24,6 +24,7 @@ schema changes additive and deliberate (guardrail 4).
 Run `python selection_ledger.py` for the self-test.
 """
 
+import math
 import os
 import roi_stats
 import sys
@@ -245,9 +246,28 @@ def build_ledger_row(pick: Dict[str, Any], race: Dict[str, Any],
     row["settled_pnl"] = row["pnl"]
 
     if _stride_flag("STRIDE_SHADOW_KELLY") and calibrated_prob is not None and price_taken:
+        try:
+            fair_odds = float(pick.get("fair_odds"))
+        except (TypeError, ValueError):
+            fair_odds = 0.0
+        market_probability = (1.0 / fair_odds
+                              if math.isfinite(fair_odds) and fair_odds > 1.0 else None)
+        # build_export_pick preserves the API runner here; ciLower is percent
+        # and precedes pipeline calibration. Never synthesize an interval.
+        mc_data = pick.get("_mc_data") or {}
+        lower_pct = mc_data.get("ciLower") if isinstance(mc_data, dict) else None
+        try:
+            p_lo = float(lower_pct) / 100.0 if lower_pct is not None else None
+        except (TypeError, ValueError):
+            p_lo = float("nan")  # shadow_stake_plan records invalid, not zero
         row["shadow_kelly"] = shadow_stake_plan(
             calibrated_prob, price_taken, bankroll=bankroll,
-            commission_rate=commission_rate)
+            commission_rate=commission_rate,
+            market_probability=market_probability,
+            market_probability_source="fair_odds" if market_probability is not None else None,
+            probability_lower=p_lo,
+            probability_lower_source=("pick._mc_data.ciLower_pct_pre_calibration"
+                                      if lower_pct is not None else None))
 
     return row
 
@@ -477,7 +497,7 @@ _SETTLE_PENDING_SQL = """
     SELECT race_date, track, race_number, horse_name, selection_origin,
            should_bet, confidence, raw_model_prob, calibrated_prob,
            model_edge_pp, fair_odds, price_taken, has_real_market_odds,
-           stake_rule, stake, commission_rate, refused
+           stake_rule, stake, commission_rate, refused, shadow_kelly_json
     FROM selection_ledger
     WHERE race_date = %s AND settled = FALSE AND pnl IS NULL AND sp IS NULL
 """
@@ -579,9 +599,14 @@ def settle_pending_rows(conn, race_date, results_map: Optional[Dict] = None) -> 
         bankroll = (float(row["stake"]) * 100.0 / units) if units else 10000.0
         commission = (float(row["commission_rate"])
                       if row.get("commission_rate") is not None else None)
-        rebuilt.append(build_ledger_row(
+        settled_row = build_ledger_row(
             pick, race, result=result, commission_rate=commission,
-            bankroll=bankroll, refused=bool(row.get("refused"))))
+            bankroll=bankroll, refused=bool(row.get("refused")))
+        # Rebuilding settlement must preserve tip-time evidence, including NULL.
+        # Merely checking applied=False would still pass if today's code/flag
+        # silently replaced the historical plan or invented one after the race.
+        settled_row["shadow_kelly"] = row.get("shadow_kelly_json")
+        rebuilt.append(settled_row)
 
     out = {"settled": 0, "unmatched": unmatched, "pending": len(pending),
            "reason": None}
