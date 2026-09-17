@@ -197,7 +197,11 @@ def main(argv=None) -> int:
     try:
         conn = psycopg2.connect(url, connect_timeout=10, application_name="stride-chat-ro-proof")
     except Exception as e:  # noqa: BLE001
-        print(f"could not connect as the chat role: {type(e).__name__}: {e}", file=sys.stderr)
+        # Same leak db.py closes: libpq quotes the whole string back on a URL
+        # it cannot parse, and this line lands in the Actions log.
+        from .db import redact
+        print(f"could not connect as the chat role: {type(e).__name__}: "
+              f"{redact(str(e), url)}", file=sys.stderr)
         return 2
     try:
         report = verify(conn, role=args.role)

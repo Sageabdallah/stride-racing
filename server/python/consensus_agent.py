@@ -94,6 +94,66 @@ BUCKET_WEIGHTS = {
 DAILY_TAVILY_CAP = 50     # panel extract (up to 35+ active sources)
 DAILY_CLAUDE_CAP = 200    # batched panel extraction (~40) + web search research (~40) + buffer
 
+# Perplexity had no cap at all until now, alone among the three APIs. What
+# stood in for one was a soft warning at 200 calls that printed a line and
+# carried on — which is to say, on a Saturday it printed that line about
+# eighty times and stopped nothing.
+#
+# That is the shape of the bill risk. A run spends 4 queries per race, so a
+# 29-race weekday card costs 116 and the 55-race Saturday of 2026-09-05 cost
+# 220. 260 clears the largest card measured with headroom for a longer one,
+# and still bounds a run that has gone wrong.
+#
+# Read this number for what it is: a ceiling on ONE run, not on a day and not
+# on a month. The tally lives in .consensus_api_usage_<date>.json inside the
+# task, which is never relayed to S3, so a retry starts counting at zero. Three
+# retries spend three times this. The only true ceiling is the spend limit on
+# the Perplexity account itself, and this does not replace it.
+#
+# STRIDE_PERPLEXITY_CAP overrides it. There is deliberately no value meaning
+# "no cap": a spend guard whose disable switch is a small number someone might
+# type by accident is the wrong way round, and DEFAULT_MIN_YIELD's "0 disables"
+# convention would make STRIDE_PERPLEXITY_CAP=0 mean unlimited to the code and
+# "spend nothing" to the person setting it. Turning the leg off is what
+# STRIDE_SEARCH_OPTIONAL is for.
+DEFAULT_PERPLEXITY_CAP = 260
+
+
+def perplexity_cap() -> int:
+    """The per-run Perplexity query ceiling, or the default.
+
+    Out-of-range values are ignored rather than obeyed, for the reason
+    min_yield() gives: a typo'd cap is worse than no override, because it is
+    silent. Anything below 1 is a typo here — see the note above on why zero
+    is not a way to say "off".
+    """
+    raw = os.environ.get("STRIDE_PERPLEXITY_CAP", "").strip()
+    if not raw:
+        return DEFAULT_PERPLEXITY_CAP
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[CONSENSUS] STRIDE_PERPLEXITY_CAP={raw!r} is not an integer; "
+              f"using {DEFAULT_PERPLEXITY_CAP}", file=sys.stderr)
+        return DEFAULT_PERPLEXITY_CAP
+    if value < 1:
+        print(f"[CONSENSUS] STRIDE_PERPLEXITY_CAP={value} is below 1; using "
+              f"{DEFAULT_PERPLEXITY_CAP}. To run without the web-research leg "
+              f"set {SEARCH_OPTIONAL_ENV}=true instead.", file=sys.stderr)
+        return DEFAULT_PERPLEXITY_CAP
+    return value
+
+
+def _pplx_calls(usage: dict) -> int:
+    """Perplexity queries ATTEMPTED this run, summed across the four labels.
+
+    The `perplexity_` prefix counts requests made; the `pplx_` prefix that
+    _pplx_record writes counts what came back. The cap is spend, so it reads
+    the first: a query refused with a 4xx has still been paid for in the only
+    currency that matters here, an attempt against the account.
+    """
+    return sum(v for k, v in usage.items() if k.startswith("perplexity_"))
+
 # The floor under consensus yield, as a fraction of scored horses carrying at
 # least one mention.
 #
@@ -597,6 +657,14 @@ def search_race_tips_perplexity(
     """
     Uses Perplexity Sonar Pro to search the web for racing tips.
 
+    UNCALLED as of 2026-09-16, and OUTSIDE the spend cap. Nothing in this
+    repository invokes it; search_race_tips_perplexity_multi superseded it.
+    It takes no `usage` dict, so it cannot count against
+    DEFAULT_PERPLEXITY_CAP without a signature change, and wiring it up as it
+    stands would reopen the hole the cap was added to close. If you need it,
+    thread `usage` through it and copy the guard from the multi version
+    first. Better still, delete it.
+
     Completely separate from Anthropic quota — no rate limit competition.
     Perplexity handles all web searching and returns a synthesised summary
     with citations. Claude then extracts structured picks from this summary
@@ -894,14 +962,32 @@ def search_race_tips_perplexity_multi(
     merged_parts = []
     all_citations = set()
     per_query_counts: dict[str, int] = {}
+    cap = perplexity_cap()
 
     for query_text, system_prompt, label in queries:
         try:
+            # Checked BEFORE the increment, so the cap bounds calls MADE rather
+            # than calls counted.
+            #
+            # It breaks rather than raising, and that is the whole design. By
+            # the time this trips, the money for those queries is spent and
+            # cannot be recovered; what is still on the table is every mention
+            # found for the races before this one. SearchUnavailable would
+            # discard all of it and take the day to NO_BET — a worse outcome
+            # than a partial consensus, and not a thing a SPEND guard should
+            # ever cause. The run continues on the panel leg, which costs
+            # nothing further, and the yield floor still judges the result.
+            if _pplx_calls(usage) >= cap:
+                print(f"    [PERPLEXITY_MULTI] CAP REACHED: {cap} queries "
+                      f"spent this run. {track} R{race_number} and every race "
+                      f"after it get no web research; panel mentions still "
+                      f"apply. This bounds ONE run, not the day — a retry "
+                      f"starts its tally at zero. Raise STRIDE_PERPLEXITY_CAP "
+                      f"if this card is legitimately longer than the cap.",
+                      file=sys.stderr)
+                break
             usage_key = f"perplexity_{label}"
             usage[usage_key] = usage.get(usage_key, 0) + 1
-            total_pplx = sum(v for k, v in usage.items() if k.startswith("perplexity_"))
-            if total_pplx > 200:
-                print(f"    [PERPLEXITY_MULTI] Soft warning: {total_pplx} total Perplexity calls", file=sys.stderr)
 
             print(f"    [PERPLEXITY_MULTI] {label}: {track} R{race_number}...", file=sys.stderr, flush=True)
 

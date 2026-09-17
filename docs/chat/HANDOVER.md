@@ -363,16 +363,13 @@ regression; all predate this work.
   `validate()`. The tool stays off (`STRIDE_CHAT_SQL_TOOL` unset) and the
   durable fix is still the one below: grant `SELECT` on the allowlisted tables
   instead of `pg_read_all_data`.
-- **The read-only role's write-refusal proof no longer runs through its wired
-  path.** `apply-migration.yml:188` invokes `verify_readonly_role.py` by path
-  rather than as a module. It fails loudly under `set -euo pipefail` rather
-  than passing silently, but the next role apply or password rotation will
-  stop there. Reproduced on `main` at `d0feba0`, run exactly as the workflow
-  runs it: `ImportError: attempted relative import with no known parent
-  package`, from the `from .config import load_dotenv_once` inside `main()`.
-  **A fix is open and unmerged as PR #202** (CI green, mergeable), together
-  with the `db.py` password leak below. Merge it *before* rotating the role's
-  password — the rotation path runs through this exact step.
+- ~~**The read-only role's write-refusal proof no longer runs through its wired
+  path.**~~ Fixed in PR #202: `apply-migration.yml` now runs
+  `python -m chat.verify_readonly_role` from `server/python`, and
+  `chat/tests/test_chat_workflow_wiring.py` executes that form and pins the
+  workflow to it. Not yet exercised by a real dispatch — the step only runs
+  when the migration is `chat_readonly_role.sql`, so the first proof through
+  the fixed path is the next role apply or password rotation.
 - **The chat cannot read pipeline-run status, but the status exists.** Earlier
   revisions of this file said there was none anywhere in the repository. That
   was wrong, and it mattered, because it framed the fix as designing a record
@@ -453,11 +450,14 @@ only about write privilege. The durable fix is to grant `SELECT` on the
 allowlisted tables explicitly instead of `pg_read_all_data`, so a validator
 bypass reaches nothing the tools could not already read.
 
-Separately, and **fixed in the open PR #202, not on `main`**, `db.py:78`
-interpolates the driver's DSN-parse error into
-`DatabaseUnavailable`, so a malformed `STRIDE_CHAT_DATABASE_URL` puts the
-password into a tool result and the stderr log. Scrub the message before it
-leaves the module.
+Separately, `db.py` used to interpolate the driver's DSN-parse error into
+`DatabaseUnavailable`, so a malformed `STRIDE_CHAT_DATABASE_URL` put the
+password into a tool result and the stderr log. Fixed in PR #202:
+`db.redact()` masks the URL and every form of its password (as written,
+URL-decoded, URL-encoded, and the misparsed-host tail libpq echoes when the
+password itself contains a raw `@`) at every site driver text leaves the
+module, `Database.__repr__` no longer shows the URL, and the same scrub covers
+`verify_readonly_role.py`'s connect-failure line in the Actions log.
 
 ## Running the phase 0 exit
 
@@ -614,9 +614,11 @@ corpus are what a checkout gets.
 - The `183 offline` count was stale; the chat package is **195** on `main`,
   counted by running it. The line is dated to the commit it was true at.
 - The two items **PR #202** fixes were listed as open with no mention that a
-  fix exists, which invited the next session to rebuild it. Both now point at
-  it, with the ordering constraint: merge #202 before rotating the role's
-  password, because the rotation runs through the step #202 repairs.
+  fix exists, which invited the next session to rebuild it. #202 merged on
+  2026-09-16 (`9403bcb`) while this correction was open, so both items now
+  read as fixed rather than as pointing at an open PR. The ordering constraint
+  is moot: the verifier's module-form invocation is on `main`, so rotating the
+  role's password runs through the repaired step.
 
 Verified while making these, on `main` at `d0feba0`: the chat suite is 195
 green with no credential, no network and `psycopg2` absent; the by-path

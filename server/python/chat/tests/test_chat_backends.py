@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
 
 from chat.artifacts import ArtifactMissing, ArtifactStore, ArtifactUnavailable, tips_path
-from chat.db import Database, DatabaseUnavailable, relation_missing
+from chat.db import REDACTED, Database, DatabaseUnavailable, redact, relation_missing
 from chat.pf import PuntingForm, PuntingFormOutsideWindow, PuntingFormUnavailable, outside_window
 from chat.tests.conftest import FakePFClient, pf_meeting
 import pf_client
@@ -61,6 +63,80 @@ def test_artifacts_relay_failure_is_loud(tmp_path):
     store._client = Broken()
     with pytest.raises(ArtifactUnavailable):
         store.get_json(tips_path("2026-04-12"))
+
+
+def _driver_that_echoes_the_dsn(monkeypatch):
+    """psycopg2 whose connect() fails the way libpq does on a string it cannot
+    parse: by quoting the whole connection string back, password included."""
+    fake = types.ModuleType("psycopg2")
+
+    def connect(dsn, **kwargs):
+        raise ValueError(f'invalid dsn: missing "=" after "{dsn}" in connection info string')
+
+    fake.connect = connect
+    fake.extras = types.ModuleType("psycopg2.extras")
+    monkeypatch.setitem(sys.modules, "psycopg2", fake)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", fake.extras)
+
+
+def test_connect_failure_never_carries_the_password(monkeypatch):
+    """db.py interpolated the driver's error straight into DatabaseUnavailable.
+    For a URL libpq cannot parse -- a stray quote around a Windows paste is
+    enough -- that error quotes the entire connection string, and the text
+    goes into the tool result and the stderr log."""
+    _driver_that_echoes_the_dsn(monkeypatch)
+    url = '"postgresql://stride_chat_ro:s3cr3t%40pw@ep-x-pooler.neon.tech/neondb"'
+    db = Database(url=url)
+    with pytest.raises(DatabaseUnavailable) as e:
+        db.query("SELECT 1")
+    text = str(e.value)
+    assert "s3cr3t" not in text, text
+    assert "connect failed" in text and "invalid dsn" in text, "the reason must survive"
+    # No chained cause either: a traceback prints __cause__ and __context__,
+    # and the raw driver error is the one object here that holds the password.
+    assert e.value.__cause__ is None
+    assert e.value.__suppress_context__
+
+
+@pytest.mark.parametrize("form", [
+    "s3cr3t%40pw",          # as written in the URL
+    "s3cr3t@pw",            # URL-decoded, as a driver might print it
+])
+def test_redact_masks_every_form_of_the_password(form):
+    url = "postgresql://stride_chat_ro:s3cr3t%40pw@host/db"
+    assert "s3cr3t" not in redact(f"failed for {form} today", url)
+    assert REDACTED in redact(f"failed for {form} today", url)
+    # The whole URL is masked as a unit, and text without a URL is untouched.
+    assert redact(f"invalid dsn: {url}", url) == "invalid dsn: <STRIDE_CHAT_DATABASE_URL>"
+    assert redact("nothing to hide", url) == "nothing to hide"
+    assert redact("anything", None) == "anything"
+
+
+def test_redact_masks_a_password_that_contains_a_raw_at_sign():
+    """An operator paste with an unencoded "@" in the password. libpq splits
+    the authority at its first "@", so it reads the rest of the password as
+    the host and echoes exactly that in "could not translate host name". The
+    regex used to stop at the first "@" too, so that tail went out unmasked
+    -- and the captured head could be a character or two, masking the wrong
+    thing ("p" turned "password authentication" into "***assword")."""
+    url = "postgresql://stride_chat_ro:Tr0ub4dor@h0rse@ep-x-pooler.neon.tech/neondb"
+    msg = 'could not translate host name "h0rse@ep-x-pooler.neon.tech" to address'
+    out = redact(msg, url)
+    assert "h0rse" not in out and "Tr0ub4dor" not in out, out
+    assert "could not translate host name" in out, "the reason must survive"
+    assert "Tr0ub4dor" not in redact("failed for Tr0ub4dor@h0rse today", url)
+    # A short head is no longer a secret on its own.
+    short = "postgresql://u:p@ss@host/db"
+    assert redact("password authentication failed", short) == "password authentication failed"
+    assert "ss@host" not in redact('host name "ss@host"', short)
+
+
+def test_database_repr_does_not_show_the_url():
+    """Context.db holds this object; a print(ctx), an f-string or pytest's
+    assertion introspection would otherwise print the credential."""
+    db = Database(url="postgresql://stride_chat_ro:s3cr3t@host/db")
+    assert "s3cr3t" not in repr(db) and "s3cr3t" not in str(db)
+    assert "postgresql" not in repr(db)
 
 
 def test_database_without_url_and_relation_missing():

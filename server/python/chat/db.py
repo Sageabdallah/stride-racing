@@ -10,6 +10,13 @@ untrusted input:
   migrations/chat_readonly_role.sql has no write privilege, which is the real
   boundary; this is the belt over those braces and costs nothing.
 * The URL is STRIDE_CHAT_DATABASE_URL, never DATABASE_URL (config.py).
+* No driver text leaves this module with the password in it. libpq echoes
+  the whole connection string in its "invalid dsn" error, so a URL it cannot
+  parse -- a stray quote from a Windows paste is enough -- used to put the
+  role's password into the tool result and the stderr log. redact() masks
+  the URL and every form of its password first, and the connect failure is
+  raised `from None` so the raw driver error is not carried along as the
+  cause for a traceback to print later.
 
 psycopg2 is imported inside _open() so the module imports without it, and a
 missing driver raises DatabaseUnavailable like any other reason the database
@@ -23,14 +30,64 @@ returns.
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import quote, unquote, urlsplit
 
 from . import config
 
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 15000
+
+REDACTED = "***"
+
+# user:password@host in a URL-shaped string, whatever precedes it. Deliberately
+# not urlsplit alone: the realistic bad URL is one urlsplit cannot read either
+# (a leading quote leaves it with no scheme, no netloc and no password), and
+# that is exactly the string libpq quotes back in full.
+#
+# The password runs to the LAST "@" of the authority, not the first: a
+# password pasted with a raw "@" in it would otherwise be captured only up to
+# that "@", and the tail -- which libpq then reads as the host and echoes in
+# "could not translate host name" -- would go out unmasked.
+_URL_AUTHORITY = re.compile(r"://([^/?#:]*):(.*?)@([^/?#@]*)(?=[/?#]|$)")
+
+
+def redact(text: str, url: Optional[str]) -> str:
+    """`text` with `url` and every form of its password masked.
+
+    The whole URL first, since libpq's "invalid dsn" error quotes the entire
+    connection string; then the password as written, URL-decoded and
+    URL-encoded, so a fragment of the URL in an error still cannot carry it.
+    """
+    if not url:
+        return text
+    out = text.replace(url, "<STRIDE_CHAT_DATABASE_URL>")
+    secrets = set()
+    m = _URL_AUTHORITY.search(url)
+    if m and m.group(2):
+        password, host = m.group(2), m.group(3)
+        secrets.add(password)
+        if "@" in password:
+            # libpq splits the authority at its first "@", so the part of the
+            # password after that "@" becomes the host it fails to resolve,
+            # and that is the exact string its error quotes.
+            secrets.add(password.split("@", 1)[1] + "@" + host)
+    try:
+        parsed = urlsplit(url).password
+    except ValueError:
+        parsed = None
+    if parsed:
+        secrets.add(parsed)
+    for raw in list(secrets):
+        secrets.add(unquote(raw))
+        secrets.add(quote(raw, safe=""))
+    for secret in sorted(secrets, key=len, reverse=True):
+        if secret:
+            out = out.replace(secret, REDACTED)
+    return out
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -46,7 +103,9 @@ class Database:
     retry storm.
     """
 
-    url: Optional[str]
+    # repr=False on the URL too: it holds the password, and a dataclass repr
+    # is what a print(ctx), an f-string or a pytest assertion would show.
+    url: Optional[str] = field(repr=False)
     application_name: str = "stride-chat"
     _conn: Any = field(default=None, repr=False)
 
@@ -57,6 +116,15 @@ class Database:
     @property
     def configured(self) -> bool:
         return bool(self.url)
+
+    def _describe(self, e: BaseException) -> str:
+        """`TypeName: message` for a driver error, password masked.
+
+        The one place driver text is turned into ours, so the docstring's
+        promise that no message leaves with the password does not depend
+        on every raise site remembering to call redact().
+        """
+        return f"{type(e).__name__}: {redact(str(e), self.url)}"
 
     def _open(self):
         if not self.url:
@@ -75,7 +143,9 @@ class Database:
                 application_name=self.application_name,
             )
         except Exception as e:  # noqa: BLE001
-            raise DatabaseUnavailable(f"connect failed: {type(e).__name__}: {e}") from e
+            # from None: the raw error is the one thing here that can hold
+            # the password, and a chained cause is printed by any traceback.
+            raise DatabaseUnavailable(f"connect failed: {self._describe(e)}") from None
         conn.set_session(readonly=True, autocommit=True)
         with conn.cursor() as cur:
             cur.execute(f"SET statement_timeout TO {STATEMENT_TIMEOUT_MS}")
@@ -114,9 +184,9 @@ class Database:
                 # comes back identical on retry; only retry connection loss.
                 if not _looks_like_connection_loss(e):
                     break
-                print(f"[chat.db] attempt {attempt} failed: {type(e).__name__}: {e}",
+                print(f"[chat.db] attempt {attempt} failed: {self._describe(e)}",
                       file=sys.stderr)
-        raise DatabaseUnavailable(f"query failed: {type(last_err).__name__}: {last_err}")
+        raise DatabaseUnavailable(f"query failed: {self._describe(last_err)}")
 
     def close(self) -> None:
         conn, self._conn = self._conn, None

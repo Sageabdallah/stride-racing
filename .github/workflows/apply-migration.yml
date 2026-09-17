@@ -185,4 +185,9 @@ jobs:
           print(urlunsplit((u.scheme, netloc, u.path, u.query, u.fragment)))
           PY
           )"
-          python server/python/chat/verify_readonly_role.py
+          # As a module, from server/python. The script imports chat.config
+          # relatively, so by path it died on "attempted relative import with
+          # no known parent package" before it connected -- loudly, under
+          # set -e, but at the one step that proves the role. Pinned by
+          # chat/tests/test_chat_workflow_wiring.py.
+          (cd server/python && python -m chat.verify_readonly_role)
