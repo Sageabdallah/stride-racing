@@ -126,6 +126,46 @@ def roi_ci(per_bet_returns_seq: Sequence[float],
     return out
 
 
+def race_day_bootstrap_ci(race_days, statistic, n_boot=DEFAULT_N_BOOT,
+                          seed=DEFAULT_SEED, confidence=DEFAULT_CONFIDENCE):
+    """Paired percentile CI for arbitrary path metrics, resampling race-days.
+
+    statistic receives row indices with complete days concatenated in sampled
+    order, retaining each day's row order. Use SciPy's resampler rather than a
+    second bootstrap implementation in an application harness. The existing
+    per-bet ROI bootstrap and its callers are unchanged.
+    """
+    from scipy.stats import bootstrap
+    if n_boot < 1:
+        raise ValueError("n_boot must be positive")
+    blocks = {}
+    for index, day in enumerate(race_days):
+        blocks.setdefault(day, []).append(index)
+    if len(blocks) < 2:
+        raise ValueError("race-day bootstrap requires at least two days")
+    groups = list(blocks.values())
+
+    def evaluate(sample):
+        indices = np.concatenate([groups[int(i)] for i in sample])
+        return np.asarray(statistic(indices), dtype=float)
+
+    result = bootstrap((np.arange(len(groups)),), evaluate, vectorized=False,
+                       method="percentile", n_resamples=n_boot, batch=128,
+                       confidence_level=confidence, random_state=seed)
+    distribution = np.atleast_2d(result.bootstrap_distribution)
+    nonfinite = (~np.isfinite(distribution)).sum(axis=-1)
+    low = np.atleast_1d(result.confidence_interval.low)
+    high = np.atleast_1d(result.confidence_interval.high)
+    # Dropping bankrupt/undefined samples would hide the tail being measured.
+    # Mark the affected interval unavailable and report its count instead.
+    intervals = [[float(lo), float(hi)] if count == 0 else [None, None]
+                 for lo, hi, count in zip(low, high, nonfinite)]
+    return {"ci95": intervals, "nonfinite_resamples": nonfinite.tolist(),
+            "n_boot": n_boot, "seed": seed, "race_days": len(groups),
+            "method": "paired percentile bootstrap over whole race-days",
+            "nonfinite_note": "Any bankrupt log-growth or undefined ROI resample makes that CI unavailable; none are discarded"}
+
+
 def max_drawdown_and_streaks(results_sequence: Sequence[float]) -> Dict[str, Any]:
     """Risk path of a per-bet return sequence, consumed in the order given.
 
