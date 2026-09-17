@@ -2347,7 +2347,7 @@ def build_export_pick(horse, rank=None):
         return None
 
     from prediction_stages import finalise_stages
-    return {
+    pick = {
         "rank": rank,
         "horse": horse.get("horse", "Unknown"),
         "barrier": horse.get("barrier", 0),
@@ -2381,6 +2381,15 @@ def build_export_pick(horse, rank=None):
                            {"reference_class": "Unknown", "group_listed_in_chain": False}),
         "_mc_data": horse,
     }
+
+    if _flag_enabled("STRIDE_MC_FIX_DEAD_FIELDS"):
+        from portfolio_risk import shadow_kelly_display
+        # API Kelly predates pipeline calibration and win_pct rounding. Refresh
+        # only display fields using the exact pick inputs the ledger receives.
+        display = shadow_kelly_display(pick["win_pct"] / 100.0, pick["odds"], pick["fair_odds"])
+        pick.update(display)
+        pick["_mc_data"] = {**horse, **display}
+    return pick
 
 
 def annotate_pick_contract(pick, model_leader_horse, selection_origin, selection_origin_reason, should_bet):

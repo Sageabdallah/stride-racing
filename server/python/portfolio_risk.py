@@ -673,9 +673,54 @@ def shadow_stake_plan(win_probability: float, decimal_odds: float,
     }
 
 
+def shadow_kelly_display(win_probability, decimal_odds, fair_odds=None):
+    """Numeric percent of bankroll plus explicit display-only metadata.
+
+    fair_odds must mean the de-vigged MARKET price, as in exported picks.
+    mc_api's model-implied fairOdds is a different field and must not be used.
+    """
+    import os
+    fields = {'kellyStake': 0.0, 'kellyStakeType': 'shadow_estimate',
+              'kellyStakeApplied': False, 'kellyStakeUnits': 'percent_bankroll',
+              'kellyStakeLabel': 'Shadow Kelly estimate (not a placed stake)',
+              'kellyMarketProbabilitySource': 'raw_implied_odds'}
+    try:
+        p, odds = float(win_probability), float(decimal_odds)
+    except (TypeError, ValueError):
+        return fields
+    if not (math.isfinite(p) and math.isfinite(odds) and 0 <= p <= 1 and odds > 1):
+        return fields
+    try:
+        fair = float(fair_odds)
+    except (TypeError, ValueError):
+        fair = 0.0
+    market_probability = 1.0 / fair if math.isfinite(fair) and fair > 1 else None
+    if market_probability is not None:
+        fields['kellyMarketProbabilitySource'] = 'fair_odds'
+    # Match build_ledger_row's current commission convention. This only calls
+    # the shadow primitive; neither the plan nor these fields can place a bet.
+    commission = float(os.environ.get('STRIDE_COMMISSION_RATE', '0.08'))
+    plan = shadow_stake_plan(p, odds, market_probability=market_probability,
+                             commission_rate=commission)
+    fields['kellyStake'] = plan['stake_pct']
+    return fields
+
+
 def _self_test():
     import os
     print("portfolio_risk self-test (Workstream C primitives)")
+
+    display = shadow_kelly_display(0.3, 5.0, fair_odds=6.25)
+    assert display['kellyStake'] == 0.9375
+    assert display['kellyStakeType'] == 'shadow_estimate'
+    assert display['kellyStakeApplied'] is False
+    assert display['kellyStakeUnits'] == 'percent_bankroll'
+    assert display['kellyMarketProbabilitySource'] == 'fair_odds'
+    assert 'not a placed stake' in display['kellyStakeLabel']
+    assert shadow_kelly_display(0.9, 5.0)['kellyStake'] == 2.0
+    for p, odds in ((None, 5), (0.3, None), (float('nan'), 5), (0.3, float('inf'))):
+        assert shadow_kelly_display(p, odds)['kellyStake'] == 0.0
+    print('  display: same shadow fraction/cap, numeric percent and explicit not-placed metadata')
 
     # --- EV, and its identity with the pipeline's ratio form ---
     assert abs(ev_at_price(0.25, 5.0) - 0.25) < 1e-9, ev_at_price(0.25, 5.0)
