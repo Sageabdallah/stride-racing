@@ -9,9 +9,10 @@ Two properties decide whether this workflow is worth having, and neither is
 visible from "the YAML parses":
 
   * it runs with real lead time on the 19:30Z consensus slot. GitHub's
-    scheduler drifts LATE and only late — pf-morning-racecards is nominally
-    05:30 Sydney and has landed at 08:15 and 08:21 — so a probe scheduled
-    close to the slot reports on a card already spent.
+    scheduler drifts LATE and only late, by up to 2h51m on this repository's
+    daily crons, so a probe scheduled close to the slot reports on a card
+    already spent. This file's first version got that wrong and is the reason
+    the threshold below is measured rather than chosen.
   * it does not fire and forget. `gh workflow run` returns 204 whether or not
     the run it asked for ever happens, which is the silent no-op class exactly.
 
@@ -26,9 +27,18 @@ WF = ROOT / ".github" / "workflows" / "search-proof-daily.yml"
 
 # The consensus slot, in UTC minutes past midnight. 05:30 Sydney (AEST, UTC+10).
 CONSENSUS_SLOT_UTC_MIN = 19 * 60 + 30
-# Drift observed on pf-morning-racecards: nominally 05:30 Sydney, landed 08:21.
-# A lead shorter than this is a probe that reports after the fact.
-MIN_LEAD_MINUTES = 90
+# The worst scheduler drift measured on this repository's daily crons, plus an
+# hour. This threshold started at 90 and was WRONG: the workflow shipped with a
+# two-hour lead and its first firing landed 2h21m late, 21 minutes after the
+# consensus job it exists to warn (run 35388256393). A probe that reports after
+# the card is spent is not a probe.
+#
+#     search-proof-daily     17:30Z -> 19:51Z    2h21m
+#     pf-morning-racecards   19:30Z -> 22:15Z    2h45m
+#     pf-morning-racecards   19:30Z -> 22:21Z    2h51m
+#     morning-watch          22:50Z -> 00:49Z    1h59m
+#     morning-watch          22:50Z -> 00:54Z    2h04m
+MIN_LEAD_MINUTES = 240
 
 
 def _text():
