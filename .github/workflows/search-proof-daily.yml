@@ -11,14 +11,32 @@
 # exercised the leg was the job that depended on it. A check nobody runs is not
 # a check; it is a tool.
 #
-# WHY 17:30Z AND NOT 19:00Z. The consensus slot is 19:30Z (05:30 Sydney). Two
-# hours of lead is not caution about this workflow's runtime — the probe takes
-# about ninety seconds — it is about GitHub's scheduler. #145 measured 3-7 of
-# 48 daily firings delivered on the half-hourly watch, and drift here is
-# one-directional: the scheduler fires LATE, never early. pf-morning-racecards
-# is nominally 05:30 Sydney and has landed at 08:15 and 08:21. A 30-minute lead
-# would routinely report on a card that had already been spent, which is the
-# one thing this must not do.
+# WHY 14:30Z. The consensus slot is 19:30Z (05:30 Sydney), so this is five
+# hours of lead. That is not caution about this workflow's runtime — the probe
+# takes about ninety seconds — it is about GitHub's scheduler, whose drift is
+# one-directional here: it fires LATE and never early.
+#
+# The first version of this file used 17:30Z, a two-hour lead, and it was
+# measured wrong on the very first firing:
+#
+#     workflow               nominal   landed    late by
+#     search-proof-daily     17:30Z    19:51Z    2h21m   (run 35388256393)
+#     pf-morning-racecards   19:30Z    22:15Z    2h45m
+#     pf-morning-racecards   19:30Z    22:21Z    2h51m
+#     morning-watch          22:50Z    00:49Z    1h59m
+#     morning-watch          22:50Z    00:54Z    2h04m
+#
+# That first run landed 21 minutes AFTER the consensus job it exists to warn,
+# so it gave exactly zero notice — the one outcome this must not produce. The
+# two-hour figure was chosen while the 2h45m observation was already written
+# into the paragraph above it, which is the mistake worth naming: the number
+# was picked from the intent rather than from the measurements beside it.
+#
+# Five hours clears the worst drift observed (2h51m) with better than two hours
+# to spare. The cost of being early is that the answer is up to five hours
+# stale by the time consensus runs, and a balance can drain inside that window.
+# That is accepted: this is advance warning, not a guarantee, and the exit-7
+# contract still catches a leg that dies after the probe passed.
 #
 # WHY IT DISPATCHES verify-jobs RATHER THAN RUNNING THE TASK ITSELF. verify-jobs
 # already owns the OIDC role, the task-definition mapping and the exit-code
@@ -46,9 +64,11 @@ name: search-proof-daily
 
 on:
   schedule:
-    # 17:30 UTC == 03:30 Sydney (AEST, UTC+10). Two hours before the consensus
-    # slot. Revisit in October when daylight saving starts and this drifts.
-    - cron: "30 17 * * *"
+    # 14:30 UTC == 00:30 Sydney (AEST, UTC+10), five hours before the 19:30Z
+    # consensus slot. Revisit in October when daylight saving starts: the slot
+    # moves an hour earlier in UTC and this must move with it, or the lead
+    # silently shrinks by an hour.
+    - cron: "30 14 * * *"
   workflow_dispatch:
 
 permissions:
